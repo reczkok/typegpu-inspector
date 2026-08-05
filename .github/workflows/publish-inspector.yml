@@ -1,0 +1,59 @@
+name: Publish inspector package
+
+on:
+  push:
+    tags:
+      - 'inspector-v*'
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish inspector package
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Enable pnpm
+        run: corepack enable
+
+      - name: Verify release tag matches package version
+        run: |
+          PACKAGE_VERSION="$(node -p "require('./inspector/package.json').version")"
+          RELEASE_VERSION="${GITHUB_REF_NAME#inspector-v}"
+          if [ "$PACKAGE_VERSION" != "$RELEASE_VERSION" ]; then
+            echo "Release tag ${GITHUB_REF_NAME} does not match inspector/package.json version ${PACKAGE_VERSION}."
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm --dir inspector typecheck
+
+      - name: Test
+        run: pnpm --dir inspector test
+
+      - name: Browser tests
+        run: pnpm --dir inspector test:browser
+
+      - name: Verify npm package contents
+        working-directory: inspector
+        run: npm pack --dry-run
+
+      - name: Publish
+        working-directory: inspector
+        run: npm publish --access public

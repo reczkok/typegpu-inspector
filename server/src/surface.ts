@@ -1,0 +1,2405 @@
+import { createHash } from 'node:crypto';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { basename, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import {
+  CodeActionKind,
+  DiagnosticSeverity,
+  type CodeAction,
+  type CodeActionContext,
+  type Diagnostic,
+  type DiagnosticRelatedInformation,
+  type DocumentLink,
+  type Hover,
+  type InlayHint,
+  type MarkupContent,
+  MarkupKind,
+  type Range,
+} from 'vscode-languageserver';
+import type {
+  DiscoveredModule,
+  DiscoveredSymbol,
+  InspectionTarget,
+  ShaderSourceToken,
+  TypeGpuRole,
+} from './discovery.js';
+import type {
+  HoverDetailLevel,
+  HoverPresentationSettings,
+  HoverSectionId,
+  InlayDetailLevel,
+  InspectorOutput,
+  InspectorResourceReport,
+  InspectorSchemaReport,
+  InspectorDiagnostic,
+  InspectorTargetReport,
+} from './protocol.js';
+import {
+  code,
+  escapeInline,
+  escapeMarkdown,
+  formatInspectableValue,
+  section,
+  tableCode,
+  tableText,
+  valueText,
+} from './markdown.js';
+import {
+  extractGpuBindGroupLayouts,
+  extractGpuPipelineState,
+  type GpuBindGroupLayout,
+  type GpuPipelineState,
+} from './surfaceData.js';
+import { analyzeSchemaLayout } from './schemaLayout.js';
+import { analyzeWgsl, formatByteSize, type WgslAnalysis } from './wgsl.js';
+import {
+  compilerGeneratedRange,
+  mapWgslDiagnostic,
+} from './sourceMapping.js';
+
+const MAX_INLAY_LABEL_LENGTH = 36;
+const MAX_RUNTIME_NOTES = 4;
+
+export type MaterializedTarget = {
+  target: InspectionTarget;
+  report: InspectorTargetReport;
+  analysis?: WgslAnalysis;
+  layouts?: GpuBindGroupLayout[];
+  pipelineState?: GpuPipelineState;
+  generatedUri?: string;
+  generatedReportUri?: string;
+};
+
+export type DocumentInspection = {
+  sourceVersion: number;
+  completedAt: number;
+  output: InspectorOutput;
+  targets: Map<string, MaterializedTarget>;
+  failure?: string;
+  targetFailures?: Map<string, string>;
+  /**
+   * Target IDs that were sent to the runtime but came back without a matching
+   * report. Tracked so hover-triggered inspection does not retry them in a
+   * loop within the same saved version.
+   */
+  unreported?: Set<string>;
+};
+
+export type SurfaceOptions = {
+  sourceMapping: boolean;
+  schemaLayoutHealth: boolean;
+  schemaPackingSuggestions: boolean;
+  saveAffordance: boolean;
+  /**
+   * Hover rendering profile. 'zed' keeps the popup-tuned markdown as-is;
+   * 'vscode' converts tables to aligned mono grids (VS Code hovers render
+   * markdown tables almost unstyled), adds section separators, and promotes
+   * the WGSL preview.
+   */
+  presentation: 'zed' | 'vscode';
+  hoverDetailLevel?: HoverDetailLevel;
+  inlayDetailLevel?: InlayDetailLevel;
+  hoverPresentation?: HoverPresentationSettings;
+};
+
+export const defaultSurfaceOptions: SurfaceOptions = {
+  sourceMapping: true,
+  schemaLayoutHealth: true,
+  schemaPackingSuggestions: true,
+  saveAffordance: true,
+  presentation: 'zed',
+  hoverDetailLevel: 'standard',
+  inlayDetailLevel: 'compact',
+  hoverPresentation: { sections: {}, sectionOrder: [] },
+};
+
+export async function materializeInspection(
+  workspaceRoot: string,
+  modulePath: string,
+  sourceVersion: number,
+  discovered: DiscoveredModule,
+  output: InspectorOutput,
+  requestedTargetIds?: readonly string[],
+): Promise<DocumentInspection> {
+  const reports = new Map(
+    (output.targets ?? []).map((report) => [report.label, report]),
+  );
+  const targets = new Map<string, MaterializedTarget>();
+
+  for (const target of discovered.targets) {
+    const report = reports.get(target.label);
+    if (!report) continue;
+    const analysis = report.wgsl ? analyzeWgsl(report.wgsl) : undefined;
+    const layouts = extractGpuBindGroupLayouts(output, report);
+    const pipelineState = extractGpuPipelineState(output, report);
+    const generatedUri = report.wgsl
+      ? await writeGeneratedWgsl(workspaceRoot, modulePath, target, report.wgsl)
+      : undefined;
+    const materialized: MaterializedTarget = {
+      target,
+      report,
+      ...(analysis ? { analysis } : {}),
+      ...(layouts.length > 0 ? { layouts } : {}),
+      ...(pipelineState ? { pipelineState } : {}),
+      ...(generatedUri ? { generatedUri } : {}),
+    };
+    try {
+      materialized.generatedReportUri = await writeGeneratedReport(
+        workspaceRoot,
+        modulePath,
+        materialized,
+        output,
+      );
+    } catch {
+      // Report artifacts are an affordance, never a reason to discard a valid
+      // runtime inspection. The hover simply omits the unavailable link.
+    }
+    targets.set(target.id, materialized);
+  }
+
+  const requested = requestedTargetIds ??
+    discovered.targets.map((target) => target.id);
+  const unreported = new Set(
+    requested.filter((targetId) => !targets.has(targetId)),
+  );
+
+  return {
+    sourceVersion,
+    completedAt: Date.now(),
+    output,
+    targets,
+    ...(unreported.size > 0 ? { unreported } : {}),
+  };
+}
+
+export function failedTargetInspection(
+  sourceVersion: number,
+  targetIds: readonly string[],
+  message: string,
+): DocumentInspection {
+  return {
+    sourceVersion,
+    completedAt: Date.now(),
+    output: { ok: false },
+    targets: new Map(),
+    targetFailures: new Map(targetIds.map((targetId) => [targetId, message])),
+  };
+}
+
+/** Merge a partial runtime pass without erasing valid same-version targets. */
+export function mergeDocumentInspections(
+  previous: DocumentInspection | undefined,
+  next: DocumentInspection,
+  requestedTargetIds: readonly string[],
+): DocumentInspection {
+  if (!previous || previous.sourceVersion !== next.sourceVersion) return next;
+
+  const targets = new Map(previous.targets);
+  for (const [targetId, target] of next.targets) targets.set(targetId, target);
+
+  const targetFailures = new Map(previous.targetFailures ?? []);
+  for (const targetId of requestedTargetIds) targetFailures.delete(targetId);
+  for (const [targetId, failure] of next.targetFailures ?? []) {
+    targetFailures.set(targetId, failure);
+  }
+
+  const unreported = new Set(previous.unreported ?? []);
+  for (const targetId of requestedTargetIds) unreported.delete(targetId);
+  for (const targetId of next.unreported ?? []) unreported.add(targetId);
+  for (const targetId of targets.keys()) unreported.delete(targetId);
+
+  return {
+    sourceVersion: next.sourceVersion,
+    completedAt: Math.max(previous.completedAt, next.completedAt),
+    output: mergeInspectorOutputs(previous.output, next.output),
+    targets,
+    ...(next.failure ? { failure: next.failure } : {}),
+    ...(targetFailures.size > 0 ? { targetFailures } : {}),
+    ...(unreported.size > 0 ? { unreported } : {}),
+  };
+}
+
+export function createHover(
+  symbol: DiscoveredSymbol,
+  _discovered: DiscoveredModule,
+  inspection: DocumentInspection | undefined,
+  currentVersion: number,
+  inspectingTargetIds: ReadonlySet<string> = new Set(),
+  options: SurfaceOptions = defaultSurfaceOptions,
+): Hover {
+  const lines: string[] = [
+    `### TypeGPU · ${humanRole(symbol.role)} \`${escapeInline(symbol.name)}\``,
+  ];
+  if (symbol.specializationSynthesis) {
+    const synthesis = symbol.specializationSynthesis;
+    lines.push(
+      '',
+      synthesis.truncated
+        ? `_Showing the first ${synthesis.emitted} synthesized specializations ` +
+          `(limit ${synthesis.limit}); additional finite combinations were omitted._`
+        : `_Showing ${plural(
+          synthesis.emitted,
+          'synthesized specialization',
+        )} inferred from finite parameter types._`,
+    );
+  }
+  const inspecting = symbol.targetIds.some((id) => inspectingTargetIds.has(id));
+  if (inspecting) {
+    lines.push('', '> ◌ **Inspecting this target…**');
+  }
+
+  if (!inspection) {
+    lines.push(
+      '',
+      symbol.targetIds.length > 0
+        ? inspecting
+          ? 'The runtime report will appear when inspection completes.'
+          : 'Save the file to resolve this target in Chromium and inspect its generated shader.'
+        : staticRoleDescription(symbol.role),
+    );
+    return hover(lines, symbol.range, options.presentation);
+  }
+
+  const stale = inspection.sourceVersion !== currentVersion;
+  if (stale) {
+    lines.push('', '> Inspection is from the previous saved version.');
+  }
+  const targetFailure = symbol.targetIds
+    .map((id) => inspection.targetFailures?.get(id))
+    .find((failure) => failure !== undefined);
+  const failure = targetFailure ?? inspection.failure;
+  if (failure) {
+    lines.push('', `> **Inspection failed:** ${valueText(failure)}`);
+    return hover(lines, symbol.range, options.presentation);
+  }
+
+  const materialized = symbol.targetIds
+    .map((id) => inspection.targets.get(id))
+    .filter((target): target is MaterializedTarget => target !== undefined);
+
+  if (materialized.length === 0) {
+    lines.push(
+      '',
+      symbol.targetIds.length > 0
+        ? inspecting
+          ? 'The runtime report will appear when inspection completes.'
+          : stale
+          ? 'This target changed since the previous inspection. Save the file to inspect the current version.'
+          : 'An inspection target was derived, but the last runtime pass returned no matching report. Save the file to retry it.'
+        : staticRoleDescription(symbol.role),
+    );
+    appendRuntimeSummary(lines, inspection.output);
+    return hover(lines, symbol.range, options.presentation);
+  }
+
+  for (const [index, target] of materialized.entries()) {
+    if (materialized.length > 1) {
+      lines.push(
+        '',
+        `#### Context ${index + 1} of ${materialized.length} · ${escapeMarkdown(target.target.label)}`,
+      );
+    } else if (target.target.label !== symbol.name) {
+      lines.push(
+        '',
+        target.target.id.startsWith('factory-result:')
+          ? `_Using concrete factory result \`${escapeInline(target.target.label)}\`._`
+          : `_Using authored pipeline context \`${escapeInline(target.target.label)}\`._`,
+      );
+    }
+    appendTarget(lines, target, inspection.output, options);
+  }
+  const level = effectiveHoverLevel(options);
+  const hasRuntimeIssues = (inspection.output.warnings?.length ?? 0) > 0 ||
+    (inspection.output.pageErrors?.length ?? 0) > 0;
+  if (hoverSectionEnabled(options, 'runtime', level === 'deep' || hasRuntimeIssues)) {
+    appendRuntimeSummary(lines, inspection.output, level === 'deep');
+  }
+  return hover(lines, symbol.range, options.presentation);
+}
+
+export function createInlayHints(
+  discovered: DiscoveredModule,
+  inspection: DocumentInspection | undefined,
+  currentVersion: number,
+  requestedRange: Range,
+  inspectingTargetIds: ReadonlySet<string> = new Set(),
+  options: SurfaceOptions = defaultSurfaceOptions,
+): InlayHint[] {
+  const stale = inspection && inspection.sourceVersion !== currentVersion;
+  return discovered.symbols
+    .filter((symbol) =>
+      symbol.targetIds.length > 0 &&
+      rangesOverlap(symbol.range, requestedRange)
+    )
+    .flatMap((symbol) => {
+      const inspecting = symbol.targetIds.some((id) =>
+        inspectingTargetIds.has(id)
+      );
+      const firstTarget = symbol.targetIds
+        .map((id) => inspection?.targets.get(id))
+        .find((target) => target !== undefined);
+      let label: string;
+      let tooltip = 'Hover for TypeGPU inspection details.';
+
+      if (inspecting) {
+        label = '◌ inspecting…';
+        tooltip = 'Runtime inspection is in progress. Hover again for the completed report.';
+      } else if (firstTarget) {
+        const analysis = firstTarget.analysis;
+        const resource = firstTarget.report.resource;
+        const pipelineState = firstTarget.pipelineState;
+        const structural = firstTarget.report.ok
+          ? undefined
+          : structuralTargetDiagnostic(firstTarget.report);
+        const details = uniqueStrings([
+          resource?.bindings?.length
+            ? plural(resource.bindings.length, 'binding')
+            : analysis?.bindings.length
+            ? plural(analysis.bindings.length, 'binding')
+            : undefined,
+          resource?.sizeBytes !== undefined
+            ? formatByteSize(resource.sizeBytes)
+            : undefined,
+          pipelineState?.targets
+            ? plural(pipelineState.targets.length, 'color target')
+            : undefined,
+          typeof pipelineState?.multisample?.count === 'number' &&
+              pipelineState.multisample.count > 1
+            ? `${pipelineState.multisample.count}× MSAA`
+            : undefined,
+          resource?.usages?.length
+            ? resource.usages.join(' + ')
+            : undefined,
+          typeof pipelineState?.depthStencil?.format === 'string'
+            ? `depth/stencil ${pipelineState.depthStencil.format}`
+            : undefined,
+          analysis ? formatByteSize(analysis.utf8Bytes) : undefined,
+          firstTarget.report.resolutionMs !== undefined
+            ? `resolve ${Math.round(firstTarget.report.resolutionMs)} ms`
+            : undefined,
+        ]);
+        const inspectedKind = resource
+          ? analysis ? 'resource + WGSL' : resource.resourceType
+          : pipelineState?.kind === 'render'
+          ? 'render pipeline'
+          : pipelineState?.kind === 'compute'
+          ? 'compute pipeline'
+          : analysis
+          ? 'WGSL'
+          : shortRole(symbol.role);
+        const inlayLevel = effectiveInlayLevel(options);
+        const factLimit = inlayLevel === 'compact' ? 0 : inlayLevel === 'summary' ? 1 : 2;
+        const compactDetails = inlayFacts(symbol, firstTarget, details).slice(0, factLimit);
+        const hintStatus = stale
+          ? '◌ stale'
+          : firstTarget.report.ok
+          ? '✓'
+          : structural
+          ? `◌ ${structuralHintLabel(structural.code)}`
+          : '✗ inspect';
+        label = compactHintLabel(
+          `${hintStatus}${compactDetails.length > 0 ? ` ${compactDetails.join(' · ')}` : ''}`,
+        );
+        tooltip = [
+          stale
+            ? 'Showing the previous saved inspection.'
+            : firstTarget.report.ok
+            ? 'Runtime inspection passed.'
+            : structural
+            ? `Not inspectable standalone: ${formatTargetDiagnostic(structural)}`
+            : `Runtime inspection failed: ${targetFailure(firstTarget.report)}`,
+          `${inspectedKind}${details.length > 0 ? `: ${details.join(', ')}` : ''}.`,
+          'Hover the symbol for the full resource, pipeline, WGSL, binding, and validation report.',
+        ].join(' ');
+      } else {
+        if (!options.saveAffordance) return [];
+        label = '◌ save';
+        tooltip = 'A runtime target was derived. Save the file to inspect it.';
+      }
+
+      return [{
+        position: symbol.range.end,
+        label,
+        paddingLeft: true,
+        tooltip,
+      }];
+    });
+}
+
+export function createDocumentLinks(
+  discovered: DiscoveredModule,
+  inspection: DocumentInspection | undefined,
+): DocumentLink[] {
+  if (!inspection) return [];
+  const links: DocumentLink[] = [];
+  for (const symbol of discovered.symbols) {
+    for (const id of symbol.targetIds) {
+      const target = inspection.targets.get(id);
+      if (!target?.generatedUri) continue;
+      links.push({
+        range: symbol.range,
+        target: target.generatedUri,
+        tooltip: `Open generated WGSL for ${target.target.label}`,
+      });
+    }
+  }
+  return links;
+}
+
+export function createDiagnostics(
+  sourceUri: string,
+  discovered: DiscoveredModule,
+  inspection: DocumentInspection,
+  options: SurfaceOptions = defaultSurfaceOptions,
+): Diagnostic[] {
+  if (inspection.failure) {
+    const first = discovered.symbols[0];
+    if (!first) return [];
+    return [{
+      range: first.range,
+      severity: DiagnosticSeverity.Error,
+      source: 'TypeGPU Inspector',
+      code: 'runtime-inspection',
+      message: inspection.failure,
+    }];
+  }
+
+  const diagnostics: Diagnostic[] = [];
+  for (const [id, runtimeFailure] of inspection.targetFailures ?? []) {
+    const fallbackSymbol = discovered.symbols.find((symbol) =>
+      symbol.targetIds.includes(id)
+    );
+    if (!fallbackSymbol) continue;
+    diagnostics.push({
+      range: fallbackSymbol.range,
+      severity: DiagnosticSeverity.Error,
+      source: 'TypeGPU Inspector',
+      code: 'runtime-inspection',
+      message: runtimeFailure,
+      data: { sourceUri, targetId: id },
+    });
+  }
+
+  for (const [id, target] of inspection.targets) {
+    const targetSymbols = discovered.symbols.filter((symbol) =>
+      target.target.symbolNames.includes(symbol.name) || symbol.targetIds.includes(id)
+    );
+    const fallbackSymbol = targetSymbols[0];
+    if (!fallbackSymbol) continue;
+    for (const message of target.report.compilationMessages ?? []) {
+      const severity = compilerSeverity(message.type);
+      if (!severity) continue;
+      const mapping = options.sourceMapping && target.report.wgsl
+        ? mapWgslDiagnostic(
+            target.report.wgsl,
+            message,
+            target.target,
+            discovered.symbols,
+          )
+        : undefined;
+      const generatedRange = mapping?.generatedRange ??
+        (target.report.wgsl
+          ? compilerGeneratedRange(target.report.wgsl, message)
+          : undefined);
+      const relatedInformation: DiagnosticRelatedInformation[] = [];
+      if (target.generatedUri && generatedRange) {
+        relatedInformation.push({
+          location: { uri: target.generatedUri, range: generatedRange },
+          message: mapping?.generatedDeclaration
+            ? `Generated WGSL location in ${mapping.generatedDeclaration.kind} ${mapping.generatedDeclaration.name}`
+            : 'Generated WGSL location',
+        });
+      }
+      // High-confidence mappings pin the exact authored token. Medium
+      // confidence (ordinal/inline heuristics that passed the ambiguity
+      // refusals in sourceMapping.ts) still points at the guessed token, but
+      // the diagnostic says so; anything weaker falls back to the declaration.
+      const approximate = mapping?.confidence === 'medium' &&
+        mapping.sourceRange !== undefined;
+      diagnostics.push({
+        range: mapping?.sourceRange ?? fallbackSymbol.range,
+        severity,
+        source: 'TypeGPU Inspector',
+        code: 'wgsl-compilation',
+        message: `${target.target.label}: ${message.message}${approximate ? ' (approximate source location)' : ''}`,
+        ...(relatedInformation.length > 0 ? { relatedInformation } : {}),
+        data: {
+          sourceUri,
+          targetId: id,
+          ...(target.generatedUri ? { generatedUri: target.generatedUri } : {}),
+          ...(generatedRange ? { generatedRange } : {}),
+          ...(mapping
+            ? {
+                mapping: {
+                  confidence: mapping.confidence,
+                  strategy: mapping.strategy,
+                  ...(mapping.sourceSymbol
+                    ? { sourceSymbol: mapping.sourceSymbol }
+                    : {}),
+                  ...(mapping.generatedToken
+                    ? { generatedToken: mapping.generatedToken }
+                    : {}),
+                  ...(mapping.generatedDeclaration
+                    ? { generatedDeclaration: mapping.generatedDeclaration }
+                    : {}),
+                },
+              }
+            : {}),
+        },
+      });
+    }
+
+    if (!target.report.ok && (target.report.compilationMessages?.length ?? 0) === 0) {
+      // A resolution trace names the failing item (e.g. `asin`); when a
+      // trace name appears exactly once in the authored shader tokens, point
+      // the diagnostic at that call instead of the whole declaration. The
+      // path is walked deepest-first, so an ambiguous leaf still maps to the
+      // nearest uniquely identifiable enclosing helper.
+      const trace = options.sourceMapping
+        ? parseResolutionTrace(target.report.error)
+        : undefined;
+      const tokenRange = (trace
+        ? resolutionTraceTokenRange(targetSymbols, trace)
+        : undefined) ??
+        (options.sourceMapping
+          ? quotedErrorSnippetRange(targetSymbols, target.report.error)
+          : undefined);
+      // A structural condition (unbound slot, needs a wrapper, ...) means the
+      // target just cannot be inspected standalone — the code is not wrong.
+      // Hint severity keeps it out of the Problems panel and off the red path.
+      const structural = structuralTargetDiagnostic(target.report);
+      diagnostics.push({
+        range: tokenRange ?? fallbackSymbol.range,
+        severity: structural ? DiagnosticSeverity.Hint : DiagnosticSeverity.Error,
+        source: 'TypeGPU Inspector',
+        code: structural ? 'target-not-standalone' : 'target-resolution',
+        message: structural
+          ? `${target.target.label} is not inspectable standalone: ${targetFailure(target.report)}`
+          : `${target.target.label}: ${targetFailure(target.report)}`,
+        data: { sourceUri, targetId: id },
+      });
+    }
+  }
+  return deduplicateDiagnostics(diagnostics);
+}
+
+function mergeInspectorOutputs(
+  previous: InspectorOutput,
+  next: InspectorOutput,
+): InspectorOutput {
+  const targets = new Map<string, InspectorTargetReport>();
+  for (const report of previous.targets ?? []) targets.set(report.label, report);
+  for (const report of next.targets ?? []) targets.set(report.label, report);
+  const mergedTargets = [...targets.values()];
+  const passedTargetCount = mergedTargets.filter((target) => target.ok).length;
+  const failedTargetCount = mergedTargets.length - passedTargetCount;
+
+  return {
+    ...previous,
+    ...next,
+    ok: mergedTargets.length > 0
+      ? failedTargetCount === 0
+      : previous.ok && next.ok,
+    summary: {
+      ...previous.summary,
+      ...next.summary,
+      targetCount: mergedTargets.length,
+      passedTargetCount,
+      failedTargetCount,
+    },
+    targets: mergedTargets,
+    stats: { ...previous.stats, ...next.stats },
+    environment: { ...previous.environment, ...next.environment },
+    // Recorded calls are only consumed while materializing the fresh output;
+    // keep the latest batch instead of accumulating every merge forever.
+    calls: next.calls ?? previous.calls ?? [],
+    warnings: uniqueStrings([
+      ...(previous.warnings ?? []),
+      ...(next.warnings ?? []),
+    ]),
+    pageErrors: uniqueStrings([
+      ...(previous.pageErrors ?? []),
+      ...(next.pageErrors ?? []),
+    ]),
+  };
+}
+
+export const DETAIL_LEVELS = ['compact', 'standard', 'deep'] as const;
+export const INLAY_DETAIL_LEVELS = ['compact', 'summary', 'detailed'] as const;
+
+const DETAIL_LEVEL_SUMMARIES: Record<HoverDetailLevel, string> = {
+  compact: 'core shape',
+  standard: 'role-focused detail',
+  deep: 'complete evidence',
+};
+
+/**
+ * Verbosity switcher for editors without their own settings UI affordance
+ * (Zed reaches server features through the code-actions menu). VS Code users
+ * get the richer QuickPick command instead, so the client decides whether to
+ * surface these.
+ */
+export function createDetailLevelActions(
+  current: HoverDetailLevel,
+): CodeAction[] {
+  return DETAIL_LEVELS.filter((level) => level !== current).map((level) => ({
+    title: `TypeGPU hover detail: ${level} (${DETAIL_LEVEL_SUMMARIES[level]})`,
+    kind: 'source.typegpuInspector',
+    command: {
+      title: `Set TypeGPU hover detail to ${level}`,
+      command: 'typegpuInspector.setHoverDetailLevel',
+      arguments: [level],
+    },
+  }));
+}
+
+export function createInlayDetailLevelActions(
+  current: InlayDetailLevel,
+): CodeAction[] {
+  const summaries: Record<InlayDetailLevel, string> = {
+    compact: 'status only',
+    summary: 'one role-specific fact',
+    detailed: 'two role-specific facts',
+  };
+  return INLAY_DETAIL_LEVELS.filter((level) => level !== current).map((level) => ({
+    title: `TypeGPU inlays: ${level} (${summaries[level]})`,
+    kind: 'source.typegpuInspector',
+    command: {
+      title: `Set TypeGPU inlays to ${level}`,
+      command: 'typegpuInspector.setInlayDetailLevel',
+      arguments: [level],
+    },
+  }));
+}
+
+function effectiveHoverLevel(options: SurfaceOptions): HoverDetailLevel {
+  return options.hoverDetailLevel ?? 'standard';
+}
+
+function effectiveInlayLevel(options: SurfaceOptions): InlayDetailLevel {
+  return options.inlayDetailLevel ?? 'compact';
+}
+
+function presentationSettings(options: SurfaceOptions): HoverPresentationSettings {
+  return options.hoverPresentation ?? { sections: {}, sectionOrder: [] };
+}
+
+function hoverSectionEnabled(
+  options: SurfaceOptions,
+  id: HoverSectionId,
+  auto: boolean,
+): boolean {
+  const mode = presentationSettings(options).sections[id] ?? 'auto';
+  return mode === 'show' || (mode === 'auto' && auto);
+}
+
+function previewLineBudget(options: SurfaceOptions, level: HoverDetailLevel): number {
+  return presentationSettings(options).wgslPreviewLines ??
+    (level === 'compact' ? 0 : level === 'standard' ? 6 : 12);
+}
+
+function collectionBudget(options: SurfaceOptions, level: HoverDetailLevel): number {
+  return presentationSettings(options).collectionItems ??
+    (level === 'deep' ? 50 : 12);
+}
+
+function declarationBudget(options: SurfaceOptions, level: HoverDetailLevel): number {
+  return presentationSettings(options).declarations ??
+    (level === 'deep' ? 24 : 8);
+}
+
+function noteBudget(options: SurfaceOptions, level: HoverDetailLevel): number {
+  return presentationSettings(options).inspectionNotes ??
+    (level === 'deep' ? 12 : 6);
+}
+
+function compilerMessageBudget(options: SurfaceOptions, level: HoverDetailLevel): number {
+  return presentationSettings(options).compilerMessages ??
+    (level === 'deep' ? 24 : 10);
+}
+
+function assumptionBudget(options: SurfaceOptions, level: HoverDetailLevel): number {
+  return presentationSettings(options).assumptions ??
+    (level === 'deep' ? 16 : 6);
+}
+
+const ALL_HOVER_SECTIONS: HoverSectionId[] = [
+  'wgslPreview', 'shaderFacts', 'bindings', 'resource', 'schema',
+  'pipelineState', 'pipelineContext', 'declarations', 'compilerMessages',
+  'inspectionNotes', 'assumptions', 'runtime',
+];
+
+function orderedHoverSections(
+  target: MaterializedTarget,
+  options: SurfaceOptions,
+): HoverSectionId[] {
+  const role = target.target.selector.kind;
+  const resourceType = target.report.resource?.resourceType;
+  const adaptive: HoverSectionId[] = resourceType === 'schema'
+    ? ['schema', 'resource', 'bindings', 'wgslPreview', 'shaderFacts', 'pipelineState', 'pipelineContext']
+    : role === 'render-pipeline'
+    ? ['wgslPreview', 'pipelineState', 'bindings', 'pipelineContext', 'shaderFacts', 'resource', 'schema']
+    : role === 'compute-pipeline' || target.analysis
+    ? ['wgslPreview', 'shaderFacts', 'bindings', 'pipelineState', 'pipelineContext', 'resource', 'schema']
+    : ['resource', 'schema', 'bindings', 'wgslPreview', 'pipelineState', 'pipelineContext', 'shaderFacts'];
+  const tail: HoverSectionId[] = [
+    'declarations', 'compilerMessages', 'inspectionNotes', 'assumptions', 'runtime',
+  ];
+  return uniqueSectionIds([
+    ...presentationSettings(options).sectionOrder,
+    ...adaptive,
+    ...tail,
+    ...ALL_HOVER_SECTIONS,
+  ]);
+}
+
+function uniqueSectionIds(values: HoverSectionId[]): HoverSectionId[] {
+  return [...new Set(values)];
+}
+
+function inlayFacts(
+  symbol: DiscoveredSymbol,
+  target: MaterializedTarget,
+  fallback: string[],
+): string[] {
+  const analysis = target.analysis;
+  const resource = target.report.resource;
+  const pipeline = target.pipelineState;
+  const facts: Array<string | undefined> = [];
+  if (symbol.specializationSynthesis) {
+    facts.push(plural(
+      symbol.specializationSynthesis.emitted,
+      'specialization',
+    ));
+  }
+  if (resource?.resourceType === 'collection') {
+    const topLevelKind = resource.itemNames?.length ? 'field' : 'item';
+    facts.push(
+      resource.count !== undefined ? plural(resource.count, topLevelKind) : undefined,
+      plural(flattenResourceCollection(resource).length, 'resource'),
+    );
+  } else if (symbol.role === 'compute-entrypoint' || symbol.role === 'compute-pipeline') {
+    const invocations = analysis?.entryPoints.find((entry) => entry.stage === 'compute')
+      ?.workgroupInvocations;
+    facts.push(invocations !== undefined ? `${invocations} threads` : undefined);
+  } else if (symbol.role === 'render-pipeline') {
+    const format = pipeline?.targets?.[0]?.format;
+    facts.push(typeof format === 'string' ? format : undefined);
+    const samples = pipeline?.multisample?.count;
+    facts.push(typeof samples === 'number' && samples > 1 ? `${samples}× MSAA` : undefined);
+  } else if (symbol.role === 'schema') {
+    facts.push(resource?.schema?.sizeBytes !== undefined
+      ? formatByteSize(resource.schema.sizeBytes)
+      : resource?.sizeBytes !== undefined ? formatByteSize(resource.sizeBytes) : undefined);
+    const fields = resource?.schema?.fields?.length ?? resource?.schema?.fieldCount;
+    facts.push(fields !== undefined ? plural(fields, 'field') : undefined);
+  } else if (symbol.role === 'texture-resource' || symbol.role === 'texture-view') {
+    facts.push(textureDimensions(resource?.properties));
+    const format = resource?.properties?.format;
+    facts.push(typeof format === 'string' ? format : undefined);
+  } else if (symbol.role === 'buffer-resource' || symbol.role === 'gpu-variable') {
+    facts.push(resource?.sizeBytes !== undefined ? formatByteSize(resource.sizeBytes) : undefined);
+    facts.push(resource?.usages?.[0]);
+  }
+  return uniqueStrings([...facts, ...fallback]);
+}
+
+function textureDimensions(properties: Record<string, unknown> | undefined): string | undefined {
+  const width = numberProperty(properties, 'width');
+  const height = numberProperty(properties, 'height');
+  const depth = numberProperty(properties, 'depthOrArrayLayers');
+  if (width === undefined || height === undefined) return undefined;
+  return [width, height, depth && depth > 1 ? depth : undefined].filter(Boolean).join('×');
+}
+
+export function createCodeActions(
+  context: CodeActionContext,
+): CodeAction[] {
+  const actions: CodeAction[] = [];
+  const seen = new Set<string>();
+  for (const diagnostic of context.diagnostics) {
+    if (diagnostic.source !== 'TypeGPU Inspector') continue;
+    const data = isRecord(diagnostic.data) ? diagnostic.data : {};
+    const generatedUri = typeof data.generatedUri === 'string'
+      ? data.generatedUri
+      : undefined;
+    if (diagnostic.code === 'wgsl-compilation' && generatedUri) {
+      const generatedRange = isRange(data.generatedRange)
+        ? data.generatedRange
+        : undefined;
+      const key = `${generatedUri}:${JSON.stringify(generatedRange)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      actions.push({
+        title: 'Open generated WGSL at compiler message',
+        kind: CodeActionKind.QuickFix,
+        diagnostics: [diagnostic],
+        command: {
+          title: 'Open generated WGSL',
+          command: 'typegpuInspector.openGeneratedWgsl',
+          arguments: [{ uri: generatedUri, selection: generatedRange }],
+        },
+      });
+    }
+  }
+  return actions;
+}
+
+function appendTarget(
+  lines: string[],
+  target: MaterializedTarget,
+  output: InspectorOutput,
+  options: SurfaceOptions = defaultSurfaceOptions,
+): void {
+  const { report, analysis } = target;
+  const level = effectiveHoverLevel(options);
+  const structural = report.ok ? undefined : structuralTargetDiagnostic(report);
+  const status = report.ok
+    ? report.resource && analysis
+      ? '✓ Resource inspected and WGSL validated'
+      : report.resource
+      ? '✓ Resource inspected'
+      : target.pipelineState?.kind === 'render'
+      ? '✓ Render pipeline validated'
+      : target.pipelineState?.kind === 'compute'
+      ? '✓ Compute pipeline validated'
+      : '✓ WGSL validated'
+    : structural
+    ? '◌ Not inspectable standalone'
+    : '✗ Inspection failed';
+  lines.push('', `**${status}**`);
+
+  const failureBannerDiagnostic = report.ok
+    ? undefined
+    : appendFailure(lines, report);
+  appendArtifactLinks(lines, target);
+
+  const blocks = new Map<HoverSectionId, string[]>();
+  const addBlock = (id: HoverSectionId, render: (block: string[]) => void) => {
+    const block: string[] = [];
+    render(block);
+    if (block.length > 0) blocks.set(id, block);
+  };
+  const enabled = (id: HoverSectionId, auto: boolean) =>
+    hoverSectionEnabled(options, id, auto);
+
+  if (analysis && enabled('wgslPreview', level !== 'compact')) {
+    addBlock('wgslPreview', (block) =>
+      appendWgslPreview(block, report, previewLineBudget(options, level)));
+  }
+  if (report.resource) {
+    const id: HoverSectionId = report.resource.resourceType === 'schema'
+      ? 'schema'
+      : 'resource';
+    if (enabled(id, true)) {
+      addBlock(id, (block) =>
+        appendResourceReport(
+          block,
+          report.resource!,
+          options,
+          level === 'deep',
+          collectionBudget(options, level),
+        ));
+    }
+  }
+  if (target.pipelineState && enabled('pipelineState', true)) {
+    addBlock('pipelineState', (block) => appendPipelineState(block, target.pipelineState!));
+  }
+  if (target.target.pipelineSource && enabled('pipelineContext', level !== 'compact')) {
+    addBlock('pipelineContext', (block) =>
+      appendPipelineContext(block, target.target.pipelineSource!));
+  }
+  if (analysis && enabled('shaderFacts', true)) {
+    addBlock('shaderFacts', (block) =>
+      appendShaderFacts(block, analysis, output, level !== 'compact'));
+  }
+  if (enabled('bindings', hasAnyBindings(target))) {
+    addBlock('bindings', (block) => appendCorrelatedBindings(block, target, level === 'deep'));
+  }
+  if (
+    analysis?.declarations.length &&
+    enabled('declarations', level === 'deep')
+  ) {
+    addBlock('declarations', (block) =>
+      appendDeclarations(block, analysis, declarationBudget(options, level)));
+  }
+  if ((report.compilationMessages?.length ?? 0) > 0 && enabled('compilerMessages', true)) {
+    addBlock('compilerMessages', (block) =>
+      appendCompilerMessages(block, report, compilerMessageBudget(options, level)));
+  }
+  const remainingDiagnostics = (report.diagnostics ?? []).filter((diagnostic) =>
+    diagnostic !== failureBannerDiagnostic &&
+    (level === 'deep' || isMaterialInspectionNote(diagnostic)));
+  if (
+    remainingDiagnostics.length > 0 &&
+    enabled('inspectionNotes', level !== 'compact')
+  ) {
+    addBlock('inspectionNotes', (block) =>
+      appendInspectionNotes(block, remainingDiagnostics, noteBudget(options, level)));
+  }
+  const ledger = (report.ledger ?? []).filter((entry) =>
+    level === 'deep' || entry.status === 'unsatisfied');
+  if (ledger.length > 0 && enabled('assumptions', level === 'deep')) {
+    addBlock('assumptions', (block) =>
+      appendAssumptions(block, ledger, assumptionBudget(options, level), level === 'deep'));
+  }
+  for (const id of orderedHoverSections(target, options)) {
+    const block = blocks.get(id);
+    if (block) lines.push(...block);
+  }
+}
+
+function appendWgslPreview(
+  lines: string[],
+  report: InspectorTargetReport,
+  maxLines: number,
+): void {
+  if (!report.wgsl || maxLines <= 0) return;
+  const excerpt = smartWgslExcerpt(report, maxLines);
+  section(lines, 'Generated WGSL');
+  lines.push('```wgsl', ...excerpt.lines, '```');
+  if (excerpt.omitted > 0) lines.push(`_${plural(excerpt.omitted, 'WGSL line')} omitted._`);
+}
+
+function appendArtifactLinks(lines: string[], target: MaterializedTarget): void {
+  const links: string[] = [];
+  if (target.generatedUri) {
+    const facts = target.analysis
+      ? ` · ${plural(target.analysis.lines, 'line')} · ${formatByteSize(target.analysis.utf8Bytes)}`
+      : '';
+    links.push(`[Open generated WGSL](${target.generatedUri})${facts}`);
+  }
+  if (target.generatedReportUri) {
+    links.push(`[Open full inspection report](${target.generatedReportUri})`);
+  }
+  if (links.length > 0) lines.push('', links.join('  ·  '));
+}
+
+function smartWgslExcerpt(
+  report: InspectorTargetReport,
+  maxLines: number,
+): { lines: string[]; omitted: number } {
+  const sourceLines = report.wgsl?.split(/\r?\n/) ?? [];
+  if (sourceLines.length <= maxLines) return { lines: sourceLines, omitted: 0 };
+  const compilerLine = (report.compilationMessages ?? [])
+    .find((message) => message.type.toLowerCase() === 'error' && message.lineNum)?.lineNum ??
+    (report.compilationMessages ?? []).find((message) => message.lineNum)?.lineNum;
+  if (compilerLine) {
+    const start = Math.max(0, compilerLine - 1 - Math.floor(maxLines / 2));
+    const selected = sourceLines.slice(start, start + maxLines);
+    return { lines: selected, omitted: sourceLines.length - selected.length };
+  }
+  const entryPoints = analyzeWgsl(report.wgsl ?? '').entryPoints.slice(0, 2);
+  if (entryPoints.length > 1 && maxLines >= 5) {
+    const perEntry = Math.max(2, Math.floor((maxLines - 1) / entryPoints.length));
+    const selected: string[] = [];
+    let sourceCount = 0;
+    for (const [index, entry] of entryPoints.entries()) {
+      if (index > 0) selected.push('…');
+      const start = Math.max(0, entry.line - 1);
+      const chunk = sourceLines.slice(start, start + perEntry);
+      selected.push(...chunk);
+      sourceCount += chunk.length;
+    }
+    return {
+      lines: selected.slice(0, maxLines),
+      omitted: Math.max(0, sourceLines.length - sourceCount),
+    };
+  }
+  const start = entryPoints[0]
+    ? Math.max(0, entryPoints[0].line - 1)
+    : Math.max(0, sourceLines.findIndex((line) => line.trim() !== ''));
+  const selected = sourceLines.slice(start, start + maxLines);
+  return { lines: selected, omitted: sourceLines.length - selected.length };
+}
+
+function hasAnyBindings(target: MaterializedTarget): boolean {
+  return (target.analysis?.bindings.length ?? 0) > 0 ||
+    (target.report.resource?.bindings?.length ?? 0) > 0 ||
+    (target.layouts?.some((layout) => layout.entries.length > 0) ?? false);
+}
+
+type CorrelatedBinding = {
+  group: number;
+  binding: number;
+  name?: string;
+  visibility?: string;
+  wgsl?: string;
+  webgpu?: string;
+};
+
+function appendCorrelatedBindings(
+  lines: string[],
+  target: MaterializedTarget,
+  includeRawSources: boolean,
+): void {
+  const rows = new Map<string, CorrelatedBinding>();
+  const row = (group: number, binding: number) => {
+    const key = `${group}:${binding}`;
+    const existing = rows.get(key);
+    if (existing) return existing;
+    const created: CorrelatedBinding = { group, binding };
+    rows.set(key, created);
+    return created;
+  };
+  for (const binding of target.analysis?.bindings ?? []) {
+    const current = row(binding.group, binding.binding);
+    current.name = binding.name;
+    current.wgsl = [binding.addressSpace, binding.type].filter(Boolean).join(' · ');
+  }
+  for (const binding of target.report.resource?.bindings ?? []) {
+    if (typeof binding.binding !== 'number') continue;
+    const group = typeof binding.group === 'number' ? binding.group : 0;
+    const current = row(group, binding.binding);
+    if (typeof binding.name === 'string') current.name ??= binding.name;
+    const visibility = formatShaderStages(binding.visibility);
+    if (visibility !== '—') current.visibility ??= visibility;
+    const declared = [binding.kind, formatBindingDetails(binding)]
+      .filter((value) => value !== undefined && value !== '—')
+      .map(String).join(' · ');
+    if (declared) current.webgpu ??= declared;
+  }
+  for (const layout of target.layouts ?? []) {
+    for (const entry of layout.entries) {
+      const current = row(layout.group, entry.binding);
+      if (entry.visibility !== '—') current.visibility = entry.visibility;
+      current.webgpu = entry.resource;
+    }
+  }
+  const sorted = [...rows.values()].sort((left, right) =>
+    left.group - right.group || left.binding - right.binding);
+  if (sorted.length === 0) return;
+  section(lines, 'Bindings');
+  lines.push(
+    '| Binding | Name | Visibility | WGSL | WebGPU |',
+    '| --- | --- | --- | --- | --- |',
+  );
+  for (const binding of sorted) {
+    lines.push(
+      `| ${tableCode(`@${binding.group}:${binding.binding}`)} | ${tableCode(binding.name ?? '—')} | ${tableText(binding.visibility ?? '—')} | ${tableText(binding.wgsl ?? '—')} | ${tableText(binding.webgpu ?? '—')} |`,
+    );
+  }
+  if (!includeRawSources) return;
+
+  if ((target.analysis?.bindings.length ?? 0) > 0) {
+    section(lines, 'Generated WGSL binding source');
+    for (const binding of target.analysis!.bindings) {
+      lines.push(`- ${code(`@${binding.group}:${binding.binding}`)} ${code(binding.name)} · ${code(binding.addressSpace ?? 'handle')} · ${code(binding.type)}`);
+    }
+  }
+  if ((target.layouts?.length ?? 0) > 0) {
+    section(lines, 'Recorded WebGPU layout source');
+    for (const layout of target.layouts!) {
+      lines.push(`- **Group ${layout.group} · ${code(layout.label)}**`);
+      for (const entry of layout.entries) {
+        lines.push(`  - ${entry.binding} · ${valueText(entry.visibility)} · ${valueText(entry.resource)}`);
+      }
+    }
+  }
+}
+
+function appendDeclarations(
+  lines: string[],
+  analysis: WgslAnalysis,
+  limit: number,
+): void {
+  const preview = analysis.declarations.slice(0, limit);
+  section(lines, `Declarations (${analysis.declarations.length})`);
+  lines.push(preview.map((declaration) =>
+    `\`${declaration.kind} ${escapeInline(declaration.name)}\` (line ${declaration.line})`)
+    .join(' · '));
+  if (preview.length < analysis.declarations.length) {
+    lines.push(`_…and ${analysis.declarations.length - preview.length} more declarations. Open the full inspection report for all._`);
+  }
+}
+
+function appendCompilerMessages(
+  lines: string[],
+  report: InspectorTargetReport,
+  limit: number,
+): void {
+  section(lines, 'WGSL compiler messages');
+  const messages = report.compilationMessages ?? [];
+  for (const message of messages.slice(0, limit)) {
+    const location = message.lineNum
+      ? `line ${message.lineNum}${message.linePos ? `:${message.linePos}` : ''}: `
+      : '';
+    lines.push(`- **${escapeMarkdown(message.type)}** ${location}${valueText(message.message)}`);
+  }
+  if (messages.length > limit) {
+    lines.push(`_…and ${messages.length - limit} more compiler messages. Open the full inspection report for all._`);
+  }
+}
+
+function appendInspectionNotes(
+  lines: string[],
+  diagnostics: InspectorDiagnostic[],
+  limit: number,
+): void {
+  section(lines, 'Inspection notes');
+  for (const diagnostic of diagnostics.slice(0, limit)) {
+    lines.push(`- ${valueText(diagnostic.message)}${diagnostic.hint ? `  \n  ${valueText(diagnostic.hint)}` : ''}  \n  ${code(diagnostic.code)}`);
+  }
+  if (diagnostics.length > limit) {
+    lines.push(`_…and ${diagnostics.length - limit} more notes. Open the full inspection report for all._`);
+  }
+}
+
+function appendAssumptions(
+  lines: string[],
+  ledger: NonNullable<InspectorTargetReport['ledger']>,
+  limit: number,
+  includeDomSetup: boolean,
+): void {
+  section(lines, 'Inspection assumptions');
+  for (const entry of ledger.slice(0, limit)) {
+    const subject = typeof entry.detail?.slotName === 'string'
+      ? ` ${code(entry.detail.slotName)}`
+      : '';
+    lines.push(entry.status === 'satisfied'
+      ? `- ${code(entry.kind)}${subject} — ${valueText(entry.provenance ?? 'satisfied')}${entry.provider ? ` _(${escapeMarkdown(entry.provider)})_` : ''}`
+      : `- ${code(entry.kind)}${subject} — **unsatisfied**`);
+  }
+  if (ledger.length > limit) {
+    lines.push(`_…and ${ledger.length - limit} more assumptions. Open the full inspection report for all._`);
+  }
+  if (includeDomSetup) {
+    lines.push('- `dom-setup` — synthesized DOM with animation, resize, dispatch, and draw loops quiesced.');
+  }
+}
+
+function appendShaderFacts(
+  lines: string[],
+  analysis: WgslAnalysis,
+  output: InspectorOutput,
+  includeOperations = true,
+): void {
+  const operationEntries = [
+    [analysis.operations.textureSamples, 'texture sample'],
+    [analysis.operations.textureLoads, 'texture load'],
+    [analysis.operations.textureStores, 'texture store'],
+    [analysis.operations.atomics, 'atomic'],
+    [analysis.operations.barriers, 'barrier'],
+    [analysis.operations.derivatives, 'derivative'],
+    [analysis.operations.discards, 'discard'],
+    [analysis.operations.loops, 'loop'],
+    [analysis.operations.branches, 'branch'],
+  ] as const;
+  const operations = operationEntries
+    .filter(([count]) => count > 0)
+    .map(([count, label]) => plural(count, label));
+  if (analysis.entryPoints.length === 0 && (!includeOperations || operations.length === 0)) return;
+
+  section(lines, 'Shader facts');
+  if (analysis.entryPoints.length > 0) {
+    lines.push(
+      `- **Entrypoints:** ${
+        analysis.entryPoints
+          .map((entry) => `${entry.stage} ${code(entry.name)}`)
+          .join(' · ')
+      }`,
+    );
+  }
+
+  const limits = isRecord(output.environment?.limits)
+    ? output.environment.limits
+    : undefined;
+  for (const entry of analysis.entryPoints) {
+    if (!entry.workgroupSize) continue;
+    const dimensions = entry.workgroupSize.map((value) => code(value)).join(' × ');
+    const total = entry.workgroupInvocations;
+    const limitSummary = workgroupLimitSummary(entry, limits);
+    lines.push(
+      `- **Workgroup ${code(entry.name)}:** ${dimensions}${
+        total !== undefined ? ` = ${plural(total, 'invocation')}` : ''
+      }${limitSummary.length > 0 ? ` · ${limitSummary.join(' · ')}` : ''}`,
+    );
+  }
+  if (includeOperations && operations.length > 0) {
+    lines.push(`- **Static occurrences:** ${operations.join(' · ')}`);
+  }
+}
+
+function workgroupLimitSummary(
+  entry: WgslAnalysis['entryPoints'][number],
+  limits: Record<string, unknown> | undefined,
+): string[] {
+  if (!entry.workgroupSize || entry.workgroupInvocations === undefined) {
+    return [];
+  }
+  const dimensions = entry.workgroupSize.map((dimension) =>
+    Number(dimension.replace(/u$/, ''))
+  );
+  const dimensionLimits = [
+    numberProperty(limits, 'maxComputeWorkgroupSizeX'),
+    numberProperty(limits, 'maxComputeWorkgroupSizeY'),
+    numberProperty(limits, 'maxComputeWorkgroupSizeZ'),
+  ];
+  const invocationLimit = numberProperty(
+    limits,
+    'maxComputeInvocationsPerWorkgroup',
+  );
+  const exceedsDimension = dimensions.some((dimension, index) =>
+    dimensionLimits[index] !== undefined &&
+    dimension > dimensionLimits[index]!
+  );
+  const exceedsInvocations =
+    invocationLimit !== undefined &&
+    entry.workgroupInvocations > invocationLimit;
+  const status = exceedsDimension || exceedsInvocations
+    ? '**exceeds device limit**'
+    : invocationLimit !== undefined &&
+        entry.workgroupInvocations === invocationLimit
+    ? '**at device maximum**'
+    : undefined;
+  return [
+    status,
+    invocationLimit !== undefined
+      ? `${invocationLimit} max`
+      : undefined,
+  ].filter((value): value is string => Boolean(value));
+}
+
+function appendPipelineContext(
+  lines: string[],
+  source: NonNullable<InspectionTarget['pipelineSource']>,
+): void {
+  const stages = [
+    source.compute ? `compute ${code(source.compute)}` : undefined,
+    source.vertex ? `vertex ${code(source.vertex)}` : undefined,
+    source.fragment ? `fragment ${code(source.fragment)}` : undefined,
+  ].filter((stage): stage is string => Boolean(stage));
+  if (stages.length === 0 && !source.bindings?.length) return;
+
+  section(lines, 'Pipeline context');
+  if (stages.length > 0) {
+    lines.push(`- **Stages:** ${stages.join(' · ')}`);
+  }
+  for (const binding of source.bindings ?? []) {
+    lines.push(
+      binding.value
+        ? `- ${code(binding.source)} ← ${code(binding.value)}`
+        : `- ${code(binding.source)}`,
+    );
+  }
+}
+
+/**
+ * Renders the failure banner and returns the diagnostic it consumed, if any,
+ * so the caller can keep the remaining diagnostics in the notes section.
+ * Ranking matches targetFailure: failure-explaining diagnostics, then the
+ * actual runtime error, and setup notes only as a last resort.
+ */
+function appendFailure(
+  lines: string[],
+  report: InspectorTargetReport,
+): InspectorDiagnostic | undefined {
+  const diagnostics = report.diagnostics ?? [];
+  const renderDiagnostic = (diagnostic: InspectorDiagnostic) => {
+    lines.push('', `> **${valueText(diagnostic.message)}**`);
+    if (diagnostic.hint) {
+      lines.push(`> ${valueText(diagnostic.hint)}`);
+    }
+    lines.push(`> ${code(diagnostic.code)}`);
+    return diagnostic;
+  };
+  const failureDiagnostic = diagnostics.find((diagnostic) =>
+    !isInformationalDiagnostic(diagnostic));
+  if (failureDiagnostic) return renderDiagnostic(failureDiagnostic);
+  const trace = parseResolutionTrace(report.error);
+  if (trace) {
+    lines.push('', `> **${valueText(formatResolutionTrace(trace))}**`);
+    return undefined;
+  }
+  const error = formatUnknownError(report.error);
+  if (error) {
+    lines.push('', `> ${valueText(error)}`);
+    return undefined;
+  }
+  const note = diagnostics[0];
+  if (note) return renderDiagnostic(note);
+  lines.push('', '> Target did not resolve or validate.');
+  return undefined;
+}
+
+function appendPipelineState(
+  lines: string[],
+  state: GpuPipelineState,
+): void {
+  if (state.kind === 'compute') {
+    return;
+  }
+
+  const primitive = state.primitive ?? {};
+  const multisample = state.multisample ?? {};
+  const summary = [
+    code(primitive.topology ?? 'triangle-list'),
+    `front ${code(primitive.frontFace ?? 'ccw')}`,
+    `cull ${code(primitive.cullMode ?? 'none')}`,
+    plural(
+      typeof multisample.count === 'number' ? multisample.count : 1,
+      'sample',
+    ),
+  ];
+  section(lines, 'Render pipeline state');
+  lines.push(summary.join(' · '));
+
+  if (state.targets && state.targets.length > 0) {
+    section(lines, 'Color targets');
+    for (const [index, target] of state.targets.entries()) {
+      const heading = [
+        `**${index} · ${code(target.format ?? '—')}**`,
+        `write ${code(target.writeMask ?? 'all')}`,
+        target.blend ? undefined : 'blend disabled',
+      ].filter(Boolean).join(' · ');
+      lines.push(`- ${heading}`);
+      if (isRecord(target.blend)) {
+        appendBlendComponent(lines, 'Color', target.blend.color);
+        appendBlendComponent(lines, 'Alpha', target.blend.alpha);
+      }
+    }
+  }
+
+  if (state.depthStencil) {
+    const depth = state.depthStencil;
+    lines.push(
+      '',
+      '**Depth / stencil**',
+      '',
+      `- **Format:** \`${escapeInline(String(depth.format ?? '—'))}\``,
+      `- **Depth:** ${depth.depthWriteEnabled === true ? 'write enabled' : 'write disabled'} · compare \`${escapeInline(String(depth.depthCompare ?? 'always'))}\``,
+    );
+    if (depth.stencilFront || depth.stencilBack) {
+      appendStencilFace(lines, 'Stencil front', depth.stencilFront);
+      appendStencilFace(
+        lines,
+        'Stencil back',
+        depth.stencilBack ?? depth.stencilFront,
+      );
+    }
+  }
+
+  if (state.vertexBuffers && state.vertexBuffers.length > 0) {
+    section(lines, 'Vertex buffers');
+    for (const [index, buffer] of state.vertexBuffers.entries()) {
+      lines.push(
+        `- **Slot ${index}** · ${typeof buffer.arrayStride === 'number' ? `${buffer.arrayStride} B stride` : 'unknown stride'} · ${code(buffer.stepMode ?? 'vertex')}`,
+      );
+      if (!Array.isArray(buffer.attributes) || buffer.attributes.length === 0) {
+        lines.push('  No vertex attributes.');
+        continue;
+      }
+      for (const attribute of buffer.attributes) {
+        if (!isRecord(attribute)) {
+          lines.push(`  - ${valueText(attribute)}`);
+          continue;
+        }
+        lines.push(
+          `  - ${code(`@location(${String(attribute.shaderLocation ?? '?')})`)} ${code(attribute.format ?? '?')} · offset ${typeof attribute.offset === 'number' ? `${attribute.offset} B` : '—'}`,
+        );
+      }
+    }
+  }
+}
+
+function appendBlendComponent(
+  lines: string[],
+  label: string,
+  value: unknown,
+): void {
+  if (!isRecord(value)) return;
+  const parts = [
+    `src ${code(value.srcFactor ?? 'one')}`,
+    `dst ${code(value.dstFactor ?? 'zero')}`,
+    code(value.operation ?? 'add'),
+  ];
+  lines.push(`  - **${label}:** ${parts.join(' · ')}`);
+}
+
+function appendStencilFace(
+  lines: string[],
+  label: string,
+  value: unknown,
+): void {
+  if (!isRecord(value)) {
+    lines.push(`- **${label}:** ${valueText(value)}`);
+    return;
+  }
+  const parts = [
+    `compare ${code(value.compare ?? 'always')}`,
+    `fail ${code(value.failOp ?? 'keep')}`,
+    `depth fail ${code(value.depthFailOp ?? 'keep')}`,
+    `pass ${code(value.passOp ?? 'keep')}`,
+  ];
+  lines.push(`- **${label}:** ${parts.join(' · ')}`);
+}
+
+function appendResourceReport(
+  lines: string[],
+  resource: InspectorResourceReport,
+  options: SurfaceOptions = defaultSurfaceOptions,
+  includeRawBindings = false,
+  collectionLimit = 12,
+): void {
+  const isStandaloneSchema =
+    resource.resourceType === 'schema' && resource.schema !== undefined;
+  const isCollection =
+    resource.resourceType === 'collection' &&
+    resource.items !== undefined;
+  const summary = [
+    `\`${escapeInline(resource.resourceType)}\``,
+    resource.count !== undefined ? plural(resource.count, 'item') : undefined,
+    resource.sizeBytes !== undefined
+      ? `${formatByteSize(resource.sizeBytes)} size`
+      : undefined,
+    resource.alignmentBytes !== undefined
+      ? `${resource.alignmentBytes}-byte alignment`
+      : undefined,
+    resource.usages?.length
+      ? `usage: ${resource.usages.map((usage) => `\`${escapeInline(usage)}\``).join(' + ')}`
+      : undefined,
+  ].filter(Boolean);
+  if (!isStandaloneSchema) {
+    section(lines, isCollection ? 'Resource bundle' : 'Resource');
+    if (isCollection) {
+      const topLevelKind = resource.itemNames?.length ? 'field' : 'item';
+      lines.push([
+        resource.count !== undefined
+          ? plural(resource.count, topLevelKind)
+          : undefined,
+        plural(flattenResourceCollection(resource).length, 'resource leaf', 'resource leaves'),
+      ].filter(Boolean).join(' · '));
+    } else {
+      lines.push(summary.join(' · '));
+    }
+  }
+
+  if (resource.schema) {
+    appendSchemaReport(lines, resource.schema, options);
+  }
+
+  if (includeRawBindings && resource.bindings && resource.bindings.length > 0) {
+    section(lines, 'Declared bindings');
+    lines.push(
+      '| Binding | Kind | Visibility | Details |',
+      '| --- | --- | --- | --- |',
+    );
+    for (const binding of resource.bindings) {
+      const identity = typeof binding.name === 'string'
+        ? `${formatCell(binding.binding)} · ${tableCode(binding.name)}`
+        : formatCell(binding.binding);
+      lines.push(
+        `| ${identity} | ${tableText(binding.kind ?? '—')} | ${tableText(formatShaderStages(binding.visibility))} | ${tableText(formatBindingDetails(binding))} |`,
+      );
+    }
+  }
+
+  if (resource.attributes && resource.attributes.length > 0) {
+    section(lines, 'Vertex attributes');
+    lines.push(
+      '| Name | Format | Offset |',
+      '| --- | --- | ---: |',
+    );
+    for (const attribute of resource.attributes) {
+      lines.push(
+        `| ${tableCode(attribute.name ?? 'value')} | ${tableCode(attribute.format ?? '—')} | ${formatCell(attribute.offsetBytes)} |`,
+      );
+    }
+  }
+
+  if (resource.items && resource.items.length > 0) {
+    appendResourceBundle(lines, resource, collectionLimit);
+  }
+
+  if (resource.properties && Object.keys(resource.properties).length > 0) {
+    section(lines, 'Properties');
+    for (const [name, value] of Object.entries(resource.properties)) {
+      lines.push(`- **${escapeMarkdown(name)}:** ${valueText(value)}`);
+    }
+  }
+}
+
+function appendResourceBundle(
+  lines: string[],
+  resource: InspectorResourceReport,
+  collectionLimit: number,
+): void {
+  const entries = (resource.items ?? []).map((item, index) => ({
+    name: resource.itemNames?.[index] ?? `[${index}]`,
+    item,
+  }));
+  section(lines, resource.itemNames?.length ? 'Bundle fields' : 'Collection items');
+  lines.push(
+    `| ${resource.itemNames?.length ? 'Field' : 'Item'} | Runtime shape |`,
+    '| --- | --- |',
+  );
+  for (const { name, item } of entries.slice(0, collectionLimit)) {
+    lines.push(`| ${tableCode(name)} | ${tableText(summarizeResourceShape(item))} |`);
+  }
+  if (entries.length > collectionLimit) {
+    lines.push('', `_…and ${entries.length - collectionLimit} more fields. Open the full inspection report for all items._`);
+  }
+
+  const bindGroupShapes = collectBindGroupShapes(resource);
+  if (bindGroupShapes.length === 0) return;
+  section(lines, 'Bind-group shapes');
+  lines.push(
+    '| Resource | Declared bindings |',
+    '| --- | --- |',
+  );
+  for (const shape of bindGroupShapes.slice(0, collectionLimit)) {
+    lines.push(
+      `| ${tableCode(collapseIndexedPaths(shape.paths))} | ${tableText(formatBundleBindings(shape.bindings))} |`,
+    );
+  }
+  if (bindGroupShapes.length > collectionLimit) {
+    lines.push('', `_…and ${bindGroupShapes.length - collectionLimit} more bind-group shapes. Open the full inspection report for all items._`);
+  }
+}
+
+function summarizeResourceShape(resource: InspectorResourceReport): string {
+  const leaves = resource.resourceType === 'collection'
+    ? flattenResourceCollection(resource).map(({ item }) => item)
+    : [resource];
+  if (leaves.length === 0) {
+    return resource.count !== undefined
+      ? `collection · ${plural(resource.count, 'item')}`
+      : resource.resourceType;
+  }
+
+  const types = uniqueStrings(leaves.map((item) => item.resourceType));
+  const typeSummary = types.length === 1
+    ? `${types[0]}${resource.resourceType === 'collection' ? ` ×${leaves.length}` : ''}`
+    : plural(leaves.length, 'resource');
+  const commonFacts = commonResourceFacts(leaves);
+  return [typeSummary, ...commonFacts].join(' · ');
+}
+
+function commonResourceFacts(resources: InspectorResourceReport[]): string[] {
+  const facts = resources.map(resourceFacts);
+  if (facts.length === 0) return [];
+  return facts[0]!.filter((fact) => facts.every((candidate) => candidate.includes(fact)));
+}
+
+function resourceFacts(resource: InspectorResourceReport): string[] {
+  const facts: string[] = [];
+  if (resource.resourceType === 'texture') {
+    const size = resource.properties?.size;
+    if (Array.isArray(size) && size.every((value) => typeof value === 'number')) {
+      facts.push(size.join('×'));
+    }
+    if (typeof resource.properties?.format === 'string') {
+      facts.push(resource.properties.format);
+    }
+  }
+  if (resource.resourceType === 'bind-group' && resource.bindings) {
+    facts.push(plural(resource.bindings.length, 'binding'));
+  }
+  if (resource.sizeBytes !== undefined) facts.push(formatByteSize(resource.sizeBytes));
+  if (resource.usages?.length) facts.push(resource.usages.join(' + '));
+  return facts;
+}
+
+function collectBindGroupShapes(
+  resource: InspectorResourceReport,
+): Array<{ paths: string[]; bindings: Array<Record<string, unknown>> }> {
+  const byShape = new Map<
+    string,
+    { paths: string[]; bindings: Array<Record<string, unknown>> }
+  >();
+  for (const { path, item } of flattenResourceCollection(resource)) {
+    if (item.resourceType !== 'bind-group' || !item.bindings?.length) continue;
+    const key = JSON.stringify(item.bindings);
+    const current = byShape.get(key);
+    if (current) {
+      current.paths.push(path);
+    } else {
+      byShape.set(key, { paths: [path], bindings: item.bindings });
+    }
+  }
+  return [...byShape.values()];
+}
+
+function collapseIndexedPaths(paths: string[]): string {
+  if (paths.length < 2) return paths.join(', ');
+  const parsed = paths.map((path) => /^(.*)\[(\d+)]$/.exec(path));
+  const prefix = parsed[0]?.[1];
+  if (
+    prefix !== undefined &&
+    parsed.every((match) => match?.[1] === prefix) &&
+    parsed.map((match) => Number(match?.[2])).sort((a, b) => a - b)
+      .every((value, index) => value === index)
+  ) {
+    return `${prefix}[*]`;
+  }
+  return paths.join(', ');
+}
+
+function formatBundleBindings(bindings: Array<Record<string, unknown>>): string {
+  return bindings.map((binding) => {
+    const index = typeof binding.binding === 'number' ? `@${binding.binding}` : '@?';
+    const name = typeof binding.name === 'string' ? ` ${binding.name}` : '';
+    const kind = typeof binding.kind === 'string' ? binding.kind : 'unknown';
+    const detail = formatBindingDetails(binding);
+    return `${index}${name}: ${kind}${detail === '—' ? '' : ` (${detail})`}`;
+  }).join('; ');
+}
+
+function flattenResourceCollection(
+  resource: InspectorResourceReport,
+): Array<{ path: string; item: InspectorResourceReport }> {
+  const rows: Array<{ path: string; item: InspectorResourceReport }> = [];
+  const visit = (
+    collection: InspectorResourceReport,
+    prefix: string,
+    depth: number,
+  ): void => {
+    if (depth >= 6 || rows.length >= 1_000) return;
+    for (const [index, item] of (collection.items ?? []).entries()) {
+      if (rows.length >= 1_000) return;
+      const name = collection.itemNames?.[index];
+      const segment = name ?? `[${index}]`;
+      const path = prefix
+        ? name
+          ? `${prefix}.${segment}`
+          : `${prefix}${segment}`
+        : segment;
+      if (item.resourceType === 'collection' && item.items?.length) {
+        visit(item, path, depth + 1);
+      } else {
+        rows.push({ path, item });
+      }
+    }
+  };
+  visit(resource, '', 0);
+  return rows;
+}
+
+function appendSchemaReport(
+  lines: string[],
+  schema: InspectorSchemaReport,
+  options: SurfaceOptions = defaultSurfaceOptions,
+): void {
+  const analysis = analyzeSchemaLayout(schema, {
+    packingSuggestions: options.schemaPackingSuggestions,
+  });
+  const details = [
+    `\`${escapeInline(schema.type)}\``,
+    schema.sizeBytes !== undefined ? `${formatByteSize(schema.sizeBytes)} size` : undefined,
+    schema.alignmentBytes !== undefined
+      ? `${schema.alignmentBytes}-byte alignment`
+      : undefined,
+    schema.elementCount !== undefined
+      ? plural(schema.elementCount, 'element')
+      : undefined,
+    schema.elementStrideBytes !== undefined
+      ? `${schema.elementStrideBytes}-byte stride`
+      : undefined,
+  ].filter(Boolean);
+  section(lines, 'Schema');
+  lines.push(details.join(' · '));
+
+  const hostShareability = analysis.hostShareability;
+  if (hostShareability.status !== 'not-applicable') {
+    lines.push(
+      `- **Host-shareable:** ${hostShareability.status === 'yes' ? 'Yes' : hostShareability.status === 'no' ? 'No' : 'Unknown'}${
+        hostShareability.reason ? ` — ${valueText(hostShareability.reason)}` : ''
+      }`,
+    );
+  }
+
+  const showLayoutHealth = options.schemaLayoutHealth &&
+    ((schema.fields?.length ?? 0) > 0 ||
+    (
+      schema.element !== undefined &&
+      schema.elementCount !== undefined &&
+      schema.elementStrideBytes !== undefined
+    ));
+  if (
+    showLayoutHealth &&
+    analysis.allocatedBytes !== undefined &&
+    analysis.dataBytes !== undefined &&
+    analysis.paddingBytes !== undefined
+  ) {
+    const health = analysis.paddingBytes > 0
+      ? [
+          `${formatByteSize(analysis.allocatedBytes)} allocated`,
+          `${formatByteSize(analysis.dataBytes)} data`,
+          `${formatByteSize(analysis.paddingBytes)} padding (${
+            Math.round((analysis.paddingRatio ?? 0) * 100)
+          }%)`,
+        ]
+      : [
+          `${formatByteSize(analysis.allocatedBytes)} allocated`,
+          'no padding',
+        ];
+    lines.push('', `- **Memory layout:** ${health.join(' · ')}`);
+    if (analysis.paddingRegions.length > 0) {
+      const preview = analysis.paddingRegions.slice(0, 6);
+      const omitted = analysis.paddingRegions.length - preview.length;
+      lines.push(
+        `- **Padding map:** ${
+          preview.map((region) =>
+            `${formatByteSize(region.bytes)} ${code(region.label)}`
+          ).join(' · ')
+        }${omitted > 0 ? ` · …${omitted} more ${omitted === 1 ? 'region' : 'regions'}` : ''}`,
+      );
+    }
+    if (analysis.reorder) {
+      lines.push(
+        `- **Possible tighter order:** ${analysis.reorder.suggestedOrder.map((field) => code(field)).join(' → ')} · ${formatByteSize(analysis.reorder.currentBytes)} → ${formatByteSize(analysis.reorder.optimizedBytes)} · save ${formatByteSize(analysis.reorder.savingsBytes)}`,
+      );
+    }
+  }
+
+  if (!analysis.completeness.complete) {
+    const omittedFields = analysis.completeness.omittedFields !== undefined
+      ? ` · ${plural(analysis.completeness.omittedFields, 'field')} beyond the WGSL-required limit omitted`
+      : '';
+    const location = analysis.completeness.path
+      ? ` at ${code(analysis.completeness.path)}`
+      : '';
+    lines.push(
+      '',
+      `_Schema report is incomplete${location}${omittedFields}. See the full report for its truncation reason._`,
+    );
+  }
+
+  if (analysis.fields.length > 0) {
+    lines.push(
+      '',
+      '| Field | Offset | Type | Layout |',
+      '| --- | ---: | --- | --- |',
+    );
+    for (const field of analysis.fields) {
+      const layout = [
+        field.schema.sizeBytes !== undefined
+          ? formatByteSize(field.schema.sizeBytes)
+          : undefined,
+        field.schema.alignmentBytes !== undefined
+          ? `align ${formatByteSize(field.schema.alignmentBytes)}`
+          : undefined,
+      ].filter(Boolean).join(' · ');
+      lines.push(
+        `| ${tableCode(field.path)} | ${formatCell(field.offsetBytes)} | ${tableCode(field.schema.type)} | ${tableText(layout || '—')} |`,
+      );
+    }
+  }
+}
+
+function formatShaderStages(value: unknown): string {
+  if (!Array.isArray(value)) return formatInspectableValue(value);
+  const stages = value.filter((stage): stage is string =>
+    typeof stage === 'string'
+  );
+  if (
+    stages.includes('compute') &&
+    stages.includes('vertex') &&
+    stages.includes('fragment')
+  ) {
+    return 'all stages';
+  }
+  return stages.join(' + ') || '—';
+}
+
+function formatBindingDetails(binding: Record<string, unknown>): string {
+  const schema = isRecord(binding.schema) ? binding.schema : undefined;
+  const schemaProperties = isRecord(schema?.properties)
+    ? schema.properties
+    : undefined;
+  const details = [
+    typeof schema?.type === 'string' ? schema.type : undefined,
+    schemaProperties?.format,
+    schemaProperties?.access,
+    binding.access,
+    binding.samplerType,
+    binding.sampleType,
+  ].filter((value) =>
+    typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
+  );
+  return details.map(String).join(' · ') || '—';
+}
+
+function formatCell(value: unknown): string {
+  return typeof value === 'number' ? String(value) : '—';
+}
+
+function appendRuntimeSummary(
+  lines: string[],
+  output: InspectorOutput,
+  includeMetadata = true,
+): void {
+  const summary = output.summary;
+  const stats = output.stats;
+  const environmentGpuType = stringProperty(output.environment, 'gpuType');
+  const environmentBrowser = stringProperty(
+    output.environment,
+    'browserVersion',
+  );
+  const totalMs = output.summary?.totalMs ??
+    nestedNumberProperty(stats, 'timings', 'totalMs');
+  const runtimeIssues = uniqueStrings([
+    ...(output.warnings ?? []),
+    ...(output.pageErrors ?? []),
+  ]).slice(0, MAX_RUNTIME_NOTES);
+  if (runtimeIssues.length > 0) {
+    section(lines, 'Runtime notes');
+    for (const issue of runtimeIssues) {
+      lines.push(`- ${valueText(issue)}`);
+    }
+  }
+  const details = includeMetadata ? [
+    totalMs !== undefined ? `${Math.round(totalMs)} ms` : undefined,
+    formatGpuType(summary?.gpuType ?? environmentGpuType),
+    formatBrowserVersion(summary?.browserVersion ?? environmentBrowser),
+  ].filter(Boolean) : [];
+  if (details.length > 0) {
+    lines.push('', `_${details.join(' · ')}_`);
+  }
+}
+
+function formatGpuType(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  return `${value} WebGPU`;
+}
+
+function formatBrowserVersion(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const major = /^\d+/.exec(value)?.[0];
+  return major ? `Chromium ${major}` : value;
+}
+
+function stringProperty(
+  value: Record<string, unknown> | undefined,
+  key: string,
+): string | undefined {
+  const property = value?.[key];
+  return typeof property === 'string' ? property : undefined;
+}
+
+function numberProperty(
+  value: Record<string, unknown> | undefined,
+  key: string,
+): number | undefined {
+  const property = value?.[key];
+  return typeof property === 'number' ? property : undefined;
+}
+
+function nestedNumberProperty(
+  value: Record<string, unknown> | undefined,
+  objectKey: string,
+  numberKey: string,
+): number | undefined {
+  const nested = value?.[objectKey];
+  if (typeof nested !== 'object' || nested === null || Array.isArray(nested)) {
+    return undefined;
+  }
+  const property = (nested as Record<string, unknown>)[numberKey];
+  return typeof property === 'number' ? property : undefined;
+}
+
+function hover(
+  lines: string[],
+  range: Range,
+  presentation: SurfaceOptions['presentation'] = 'zed',
+): Hover {
+  const presented = presentation === 'vscode' ? presentForVsCode(lines) : lines;
+  const contents: MarkupContent = {
+    kind: MarkupKind.Markdown,
+    value: presented.join('\n'),
+  };
+  return { contents, range };
+}
+
+const MAX_GRID_CELL_WIDTH = 30;
+
+/**
+ * VS Code renders markdown tables in hovers nearly unstyled, so convert them
+ * to aligned mono grids inside fenced blocks, and separate sections with
+ * horizontal rules. Operates on our own regular output: a table is always a
+ * header row, a `| --- |` separator, then data rows.
+ */
+function presentForVsCode(lines: string[]): string[] {
+  const result: string[] = [];
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index]!;
+    const next = lines[index + 1];
+    if (
+      line.startsWith('|') &&
+      next !== undefined &&
+      /^\|(\s*:?---+:?\s*\|)+$/.test(next.replaceAll(' ', ''))
+    ) {
+      const rows: string[][] = [parseTableRow(line)];
+      let cursor = index + 2;
+      while (cursor < lines.length && lines[cursor]!.startsWith('|')) {
+        rows.push(parseTableRow(lines[cursor]!));
+        cursor++;
+      }
+      result.push(...renderMonoGrid(rows));
+      index = cursor - 1;
+      continue;
+    }
+    // A full-bold line is a section heading (see markdown.ts `section`).
+    if (/^\*\*[^*].*\*\*$/.test(line) && result.length > 1) {
+      result.push('---', '');
+    }
+    result.push(line);
+  }
+  return result;
+}
+
+function parseTableRow(line: string): string[] {
+  const inner = line.replace(/^\|\s*/, '').replace(/\s*\|$/, '');
+  return inner.split(/(?<!\\)\|/).map((cell) => plainCellText(cell));
+}
+
+/** Strips the markdown-table formatting our own emitters apply to cells. */
+function plainCellText(cell: string): string {
+  const text = cell
+    .trim()
+    .replaceAll('\u200b', '')
+    .replaceAll('`', '')
+    .replaceAll(/\\([\\`*_[\]<>|])/g, '$1');
+  return text.length > MAX_GRID_CELL_WIDTH
+    ? `${text.slice(0, MAX_GRID_CELL_WIDTH - 1)}…`
+    : text;
+}
+
+function renderMonoGrid(rows: string[][]): string[] {
+  const columnCount = Math.max(...rows.map((row) => row.length));
+  const widths = Array.from({ length: columnCount }, (_, column) =>
+    Math.max(...rows.map((row) => (row[column] ?? '').length)));
+  const rendered = rows.map((row) =>
+    widths
+      .map((width, column) => (row[column] ?? '').padEnd(width))
+      .join('  ')
+      .trimEnd());
+  return ['```text', ...rendered, '```'];
+}
+
+async function writeGeneratedWgsl(
+  workspaceRoot: string,
+  modulePath: string,
+  target: InspectionTarget,
+  wgsl: string,
+): Promise<string> {
+  const workspaceKey = shortHash(workspaceRoot);
+  const moduleKey = shortHash(modulePath);
+  const directory = join(
+    tmpdir(),
+    'typegpu-inspector',
+    workspaceKey,
+    moduleKey,
+  );
+  await mkdir(directory, { recursive: true });
+  const fileName = `${stripExtension(basename(modulePath))}__${safeName(target.label)}.wgsl`;
+  const outputPath = join(directory, fileName);
+  await writeFile(outputPath, wgsl, 'utf8');
+  return pathToFileURL(outputPath).toString();
+}
+
+async function writeGeneratedReport(
+  workspaceRoot: string,
+  modulePath: string,
+  target: MaterializedTarget,
+  output: InspectorOutput,
+): Promise<string> {
+  const workspaceKey = shortHash(workspaceRoot);
+  const moduleKey = shortHash(modulePath);
+  const directory = join(
+    tmpdir(),
+    'typegpu-inspector',
+    workspaceKey,
+    moduleKey,
+  );
+  await mkdir(directory, { recursive: true });
+  const fileName = `${stripExtension(basename(modulePath))}__${safeName(target.target.label)}.typegpu.md`;
+  const outputPath = join(directory, fileName);
+  const lines = [`# TypeGPU inspection · ${escapeMarkdown(target.target.label)}`];
+  appendTarget(lines, target, output, {
+    ...defaultSurfaceOptions,
+    hoverDetailLevel: 'deep',
+    inlayDetailLevel: 'detailed',
+    hoverPresentation: {
+      sections: {},
+      sectionOrder: [],
+      wgslPreviewLines: 20,
+      collectionItems: 1_000,
+      declarations: Math.max(1, target.analysis?.declarations.length ?? 1),
+      compilerMessages: Math.max(1, target.report.compilationMessages?.length ?? 1),
+      inspectionNotes: Math.max(1, target.report.diagnostics?.length ?? 1),
+      assumptions: Math.max(1, target.report.ledger?.length ?? 1),
+    },
+  });
+  appendRuntimeSummary(lines, output, true);
+  await writeFile(outputPath, `${lines.join('\n')}\n`, 'utf8');
+  return pathToFileURL(outputPath).toString();
+}
+
+// Codes emitted by inspector versions that predate the diagnostic `severity`
+// field. Newer runtimes tag setup context with severity 'note' directly.
+const INFORMATIONAL_TARGET_DIAGNOSTIC_CODES = new Set([
+  'inspection-defaults-applied',
+  'direct-symbol-inspection',
+  'pipeline-wrapper-unwrapped',
+  'pipeline-validated-without-recorded-creation',
+]);
+
+/** Setup context, not a failure reason; must never shadow the actual error. */
+function isInformationalDiagnostic(diagnostic: InspectorDiagnostic): boolean {
+  if (diagnostic.severity !== undefined) return diagnostic.severity === 'note';
+  return INFORMATIONAL_TARGET_DIAGNOSTIC_CODES.has(diagnostic.code);
+}
+
+/** Notes that change the meaning of a successful result belong in Standard. */
+function isMaterialInspectionNote(diagnostic: InspectorDiagnostic): boolean {
+  return !isInformationalDiagnostic(diagnostic) ||
+    diagnostic.code === 'inspection-defaults-applied' ||
+    diagnostic.code === 'pipeline-wrapper-unwrapped' ||
+    diagnostic.code === 'pipeline-validated-without-recorded-creation';
+}
+
+// The target cannot be inspected in isolation (unbound slot, needs a wrapper,
+// not a shader-resolvable value, ...). The user's code is not wrong, so these
+// must never surface as red errors — they render as a subtle hint, a neutral
+// "◌" inlay, and an explanatory hover note instead.
+const STRUCTURAL_TARGET_DIAGNOSTIC_CODES = new Set([
+  'slot-binding-required',
+  'wrapper-required',
+  'reference-wrapper-required',
+  'not-shader-resolvable',
+  'plain-object-not-inspectable',
+  'cpu-function-not-inspectable',
+  'typegpu-vertex-function-not-resolvable',
+  'typegpu-fragment-function-not-resolvable',
+  'typegpu-compute-function-not-resolvable',
+  'typegpu-value-not-resolvable',
+  'three-node-not-inspectable',
+  'value-not-inspectable',
+  'unsupported-internal-resource',
+  'pipeline-resource-shape',
+  'raw-webgpu-pipeline-unsupported',
+]);
+
+/** The diagnostic explaining why this target is not standalone-inspectable, if that is what failed. */
+function structuralTargetDiagnostic(
+  report: InspectorTargetReport,
+): InspectorDiagnostic | undefined {
+  const failure = (report.diagnostics ?? []).find((diagnostic) =>
+    !isInformationalDiagnostic(diagnostic));
+  return failure && STRUCTURAL_TARGET_DIAGNOSTIC_CODES.has(failure.code)
+    ? failure
+    : undefined;
+}
+
+function structuralHintLabel(code: string): string {
+  switch (code) {
+    case 'slot-binding-required':
+      return 'needs slot binding';
+    case 'wrapper-required':
+      return 'needs wrapper';
+    default:
+      return 'not standalone';
+  }
+}
+
+function formatTargetDiagnostic(diagnostic: InspectorDiagnostic): string {
+  return `${diagnostic.message}${diagnostic.hint ? ` — ${diagnostic.hint}` : ''}`;
+}
+
+function targetFailure(report: InspectorTargetReport): string {
+  const diagnostics = report.diagnostics ?? [];
+  const failureDiagnostic = diagnostics.find((diagnostic) =>
+    !isInformationalDiagnostic(diagnostic));
+  if (failureDiagnostic) return formatTargetDiagnostic(failureDiagnostic);
+  const trace = parseResolutionTrace(report.error);
+  if (trace) return formatResolutionTrace(trace);
+  const error = formatUnknownError(report.error);
+  if (error) return error;
+  const note = diagnostics[0];
+  if (note) return formatTargetDiagnostic(note);
+  return 'Target did not resolve or validate.';
+}
+
+function resolutionTraceTokenRange(
+  symbols: DiscoveredSymbol[],
+  trace: ResolutionTrace,
+): Range | undefined {
+  for (let index = trace.path.length - 1; index >= 0; index--) {
+    const range = uniqueShaderTokenRange(symbols, traceItemToken(trace.path[index]!));
+    if (range) return range;
+  }
+  return undefined;
+}
+
+/**
+ * TypeGPU errors often quote the offending authored statement verbatim
+ * (`'MutableBoid.$.pos = newPos' is invalid ...`). When the resolution trace
+ * has no mappable named item — the failure is a statement inside the target
+ * itself — matching the quoted snippet's identifier sequence against the
+ * authored shader tokens still pins the exact line.
+ */
+function quotedErrorSnippetRange(
+  symbols: DiscoveredSymbol[],
+  error: unknown,
+): Range | undefined {
+  const message = readErrorText(error);
+  if (!message) return undefined;
+  for (const [, snippet] of message.matchAll(/'([^'\n]{2,160})'/g)) {
+    const words = snippet!.match(/[A-Za-z_$][\w$]*/g) ?? [];
+    // Single identifiers are too ambiguous to pin a location safely.
+    if (words.length < 2) continue;
+    for (const symbol of symbols) {
+      const range = tightestTokenWindow(symbol.shaderSourceTokens ?? [], words);
+      if (range) return range;
+    }
+  }
+  return undefined;
+}
+
+/** The tightest in-order occurrence of `words` in the token stream, if any. */
+function tightestTokenWindow(
+  tokens: ShaderSourceToken[],
+  words: string[],
+): Range | undefined {
+  let best: { start: number; end: number } | undefined;
+  for (let start = 0; start < tokens.length; start++) {
+    if (tokens[start]!.text !== words[0]) continue;
+    let matched = 1;
+    let cursor = start + 1;
+    // Punctuation and operators sit between identifiers in the token stream,
+    // so allow slack, but bounded — a window scattered across the whole body
+    // is a coincidence, not the quoted statement.
+    while (
+      matched < words.length &&
+      cursor < tokens.length &&
+      cursor - start < words.length * 3
+    ) {
+      if (tokens[cursor]!.text === words[matched]) matched++;
+      cursor++;
+    }
+    if (matched === words.length) {
+      const end = cursor - 1;
+      if (!best || end - start < best.end - best.start) {
+        best = { start, end };
+      }
+    }
+  }
+  return best
+    ? {
+        start: tokens[best.start]!.range.start,
+        end: tokens[best.end]!.range.end,
+      }
+    : undefined;
+}
+
+function readErrorText(error: unknown): string | undefined {
+  if (typeof error === 'string') return error;
+  if (typeof error === 'object' && error !== null) {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === 'string') return message;
+  }
+  return undefined;
+}
+
+/** `rotateXY(f32)` and similar signature-carrying trace names token-match on `rotateXY`. */
+function traceItemToken(name: string): string {
+  const parenIndex = name.indexOf('(');
+  return (parenIndex === -1 ? name : name.slice(0, parenIndex)).trim();
+}
+
+function uniqueShaderTokenRange(
+  symbols: DiscoveredSymbol[],
+  tokenText: string,
+): Range | undefined {
+  if (tokenText === '') return undefined;
+  const matches = symbols.flatMap((symbol) =>
+    (symbol.shaderSourceTokens ?? []).filter((token) => token.text === tokenText)
+  );
+  return matches.length === 1 ? matches[0]!.range : undefined;
+}
+
+type ResolutionTrace = {
+  /** Deepest named item in the failed resolution tree, e.g. `asin`. */
+  name: string;
+  /** Error detail attached to the deepest item, when present. */
+  detail?: string;
+  /** Named path through the tree, root first, e.g. `rotateXY(f32) → asin`. */
+  path: string[];
+};
+
+const RESOLUTION_TREE_HEADER = 'Resolution of the following tree failed:';
+
+/**
+ * TypeGPU resolution errors arrive as a multi-line tree dump whose only
+ * actionable line is the deepest entry. Parse the trace so failures read as
+ * `asin: Unsupported data types: …` instead of the raw tree.
+ */
+function parseResolutionTrace(error: unknown, depth = 0): ResolutionTrace | undefined {
+  if (depth > 4) return undefined;
+  const message = typeof error === 'string'
+    ? error
+    : typeof error === 'object' && error !== null &&
+        typeof (error as { message?: unknown }).message === 'string'
+    ? (error as { message: string }).message
+    : undefined;
+  if (message === undefined) return undefined;
+  const headerIndex = message.indexOf(RESOLUTION_TREE_HEADER);
+  if (headerIndex === -1) {
+    const cause = typeof error === 'object' && error !== null
+      ? (error as { cause?: unknown }).cause
+      : undefined;
+    return cause === undefined ? undefined : parseResolutionTrace(cause, depth + 1);
+  }
+  const named = message
+    .slice(headerIndex + RESOLUTION_TREE_HEADER.length)
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('- '))
+    .map((line) => {
+      const entry = line.slice(2);
+      const kindPrefix = /^[A-Za-z*]+:/.exec(entry);
+      const rest = kindPrefix ? entry.slice(kindPrefix[0].length) : entry;
+      const detailIndex = rest.indexOf(': ');
+      return {
+        name: (detailIndex === -1 ? rest : rest.slice(0, detailIndex)).trim(),
+        detail: detailIndex === -1
+          ? undefined
+          : rest.slice(detailIndex + 2).trim(),
+      };
+    })
+    .filter((entry) =>
+      entry.name !== '' && entry.name !== '<root>' && entry.name !== '<unnamed>'
+    );
+  const deepest = named[named.length - 1];
+  if (!deepest) return undefined;
+  return {
+    name: deepest.name,
+    ...(deepest.detail !== undefined && deepest.detail !== ''
+      ? { detail: deepest.detail }
+      : {}),
+    path: named.map((entry) => entry.name),
+  };
+}
+
+function formatResolutionTrace(trace: ResolutionTrace): string {
+  const headline = trace.detail
+    ? `${trace.name}: ${trace.detail}`
+    : `resolution failed at ${trace.name}`;
+  const context = trace.path.length > 1
+    ? ` (while resolving ${trace.path.join(' → ')})`
+    : '';
+  return `${headline}${context}`;
+}
+
+function formatUnknownError(error: unknown): string | undefined {
+  if (typeof error === 'string') return error;
+  if (typeof error !== 'object' || error === null) return undefined;
+  const value = error as Record<string, unknown>;
+  const message = typeof value.message === 'string' ? value.message : undefined;
+  const cause = formatUnknownError(value.cause);
+  return [message, cause].filter(Boolean).join(' — ') || undefined;
+}
+
+function compilerSeverity(type: string): DiagnosticSeverity | undefined {
+  const normalized = type.toLowerCase();
+  if (normalized === 'error') return DiagnosticSeverity.Error;
+  if (normalized === 'warning') return DiagnosticSeverity.Warning;
+  if (normalized === 'info') return DiagnosticSeverity.Information;
+  return undefined;
+}
+
+function humanRole(role: TypeGpuRole): string {
+  return role.replaceAll('-', ' ');
+}
+
+function shortRole(role: TypeGpuRole): string {
+  const names: Partial<Record<TypeGpuRole, string>> = {
+    'bind-group-layout': 'bind group layout',
+    'vertex-layout': 'vertex layout',
+    'binding-resource': 'binding resource',
+    'buffer-resource': 'buffer',
+    'texture-resource': 'texture',
+    'texture-view': 'texture view',
+    'sampler-resource': 'sampler',
+    'bind-group': 'bind group',
+    'query-resource': 'query set',
+    'gpu-variable': 'GPU variable',
+    'resource-collection': 'resource collection',
+    'pipeline-factory': 'pipeline factory',
+    'resource-factory': 'resource factory',
+  };
+  return names[role] ?? humanRole(role);
+}
+
+function staticRoleDescription(role: TypeGpuRole): string {
+  if (role === 'pipeline-factory' || role === 'resource-factory') {
+    return 'Detected as a factory, but safe inspection needs project-specific arguments. Hover or inspect a concrete value produced by this factory.';
+  }
+  return `Detected as ${humanRole(role)}, but no safe standalone runtime target was derived. Inspect the containing helper or pipeline for runtime details.`;
+}
+
+function deduplicateDiagnostics(diagnostics: Diagnostic[]): Diagnostic[] {
+  const seen = new Set<string>();
+  return diagnostics.filter((diagnostic) => {
+    const key = `${diagnostic.range.start.line}:${diagnostic.range.start.character}:${diagnostic.severity}:${diagnostic.message}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function rangesOverlap(left: Range, right: Range): boolean {
+  return comparePosition(left.end, right.start) >= 0 &&
+    comparePosition(right.end, left.start) >= 0;
+}
+
+function comparePosition(
+  left: { line: number; character: number },
+  right: { line: number; character: number },
+): number {
+  return left.line - right.line || left.character - right.character;
+}
+
+function plural(count: number, noun: string, pluralNoun = `${noun}s`): string {
+  return `${count} ${count === 1 ? noun : pluralNoun}`;
+}
+
+function uniqueStrings(values: Array<string | undefined>): string[] {
+  return [...new Set(values.filter((value): value is string => Boolean(value)))];
+}
+
+function compactHintLabel(
+  value: string,
+  maxLength = MAX_INLAY_LABEL_LENGTH,
+): string {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength - 1).trimEnd()}…`;
+}
+
+function shortHash(value: string): string {
+  return createHash('sha256').update(value).digest('hex').slice(0, 12);
+}
+
+function safeName(value: string): string {
+  return value.replaceAll(/[^A-Za-z0-9_.-]+/g, '_').slice(0, 100);
+}
+
+function stripExtension(value: string): string {
+  return value.replace(/\.[^.]+$/, '');
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isRange(value: unknown): value is Range {
+  if (!isRecord(value) || !isRecord(value.start) || !isRecord(value.end)) {
+    return false;
+  }
+  return typeof value.start.line === 'number' &&
+    typeof value.start.character === 'number' &&
+    typeof value.end.line === 'number' &&
+    typeof value.end.character === 'number';
+}

@@ -1,0 +1,16 @@
+node_modules/
+target/
+server/dist/
+extension.wasm
+.DS_Store
+*.log
+editors/vscode/dist/
+*.vsix
+artifacts/
+/.local/
+/reports/
+/*.local.md
+/BOOKKEEPING.md
+/NOTES.md
+/PLAN.md
+/STATE.md

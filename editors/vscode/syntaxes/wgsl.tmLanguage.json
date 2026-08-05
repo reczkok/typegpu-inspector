@@ -1,0 +1,391 @@
+{
+	"name": "WGSL",
+	"scopeName": "source.wgsl",
+	"patterns": [
+		{ "include": "#line_ending_comments" },
+		{ "include": "#block_comments" },
+		{ "include": "#attributes" },
+		{ "include": "#functions" },
+		{ "include": "#keywords" },
+		{ "include": "#function_calls" },
+		{ "include": "#literals" },
+		{ "include": "#types" },
+		{ "include": "#variables" },
+		{ "include": "#punctuation" },
+		{ "include": "#reserved_words" },
+		{ "include": "#address_spaces" },
+		{ "include": "#memory_access_modes" },
+		{ "include": "#operators" },
+		{ "include": "#built-in_value_names" }
+	],
+	"repository": {
+		"line_ending_comments": {
+			"comment": "single line comment",
+			"name": "comment.line.double-slash.wgsl",
+			"match": "\\s*//.*"
+		},
+		"block_comments": {
+			"comment": "Block comment",
+			"name": "comment.block.wgsl",
+			"begin": "/\\*",
+			"end": "\\*/",
+			"patterns": [{ "include": "#block_comments" }]
+		},
+		"function_arguments": {
+			"patterns": [
+				{ "include": "#line_ending_comments" },
+				{ "include": "#block_comments" },
+				{ "include": "#attributes" },
+				{ "include": "#keywords" },
+				{ "include": "#function_calls" },
+				{ "include": "#literals" },
+				{ "include": "#types" },
+				{ "include": "#variables" },
+				{ "include": "#punctuation" },
+				{ "include": "#reserved_words" },
+				{ "include": "#address_spaces" },
+				{ "include": "#memory_access_modes" },
+				{ "include": "#operators" },
+				{ "include": "#built-in_value_names" }
+			]
+		},
+		"functions": {
+			"patterns": [
+				{
+					"comment": "function definition",
+					"name": "meta.function.definition.wgsl",
+					"begin": "\\b(fn)\\s+([_$[:alpha:]][_$[:alnum:]]*)\\s*((\\()|(<))",
+					"beginCaptures": {
+						"1": { "name": "keyword.fn.wgsl" },
+						"2": { "name": "entity.name.function.definition.wgsl" },
+						"4": { "name": "punctuation.brackets.round.wgsl" }
+					},
+					"end": "\\{",
+					"endCaptures": { "0": { "name": "punctuation.brackets.curly.wgsl" } },
+					"patterns": [{ "include": "#function_arguments" }]
+				}
+			]
+		},
+		"function_calls": {
+			"patterns": [
+				{
+					"comment": "function/method calls with best effort generics",
+					"name": "meta.function.wgsl",
+					"begin": "([_$[:alpha:]][_$[:alnum:]]*)\\s*(?:(<)([^|&()]+)(>))?(\\()",
+					"beginCaptures": {
+						"1": { "name": "entity.name.function.wgsl" },
+						"2": { "name": "punctuation.brackets.angle.wgsl" },
+						"3": { "patterns": [{ "include": "#function_arguments" }] },
+						"4": { "name": "punctuation.brackets.angle.wgsl" },
+						"5": { "name": "punctuation.brackets.round.wgsl" }
+					},
+					"end": "\\)",
+					"endCaptures": { "0": { "name": "punctuation.brackets.round.wgsl" } },
+					"patterns": [{ "include": "#function_arguments" }]
+				}
+			]
+		},
+		"literals": {
+			"patterns": [
+				{
+					"comment": "decimal_int_literal: https://www.w3.org/TR/WGSL/#syntax-decimal_int_literal",
+					"name": "constant.numeric.decimal.int.wgsl",
+					"match": "\\b(0[iu]?|[1-9][0-9]*[iu]?)\\b"
+				},
+				{
+					"comment": "hex_int_literal: https://www.w3.org/TR/WGSL/#syntax-hex_int_literal",
+					"name": "constant.numeric.hex.int.wgsl",
+					"match": "\\b(0[xX][0-9a-fA-F]+[iu]?)\\b"
+				},
+				{
+					"comment": "decimal_float_literal: https://www.w3.org/TR/WGSL/#syntax-decimal_float_literal",
+					"name": "constant.numeric.decimal.float.wgsl",
+					"match": "\\b(0[fh]|[1-9][0-9]*[fh]|[0-9]*\\.[0-9]+([eE][+-]?[0-9]+)?[fh]?|[0-9]+\\.[0-9]*([eE][+-]?[0-9]+)?[fh]?|[0-9]+[eE][+-]?[0-9]+[fh]?)\\b"
+				},
+				{
+					"comment": "hex_float_literal: https://www.w3.org/TR/WGSL/#syntax-hex_float_literal",
+					"name": "constant.numeric.hex.float.wgsl",
+					"match": "\\b(0[xX][0-9a-fA-F]*\\.[0-9a-fA-F]+([pP][+-]?[0-9]+[fh]?)?|0[xX][0-9a-fA-F]+\\.[0-9a-fA-F]*([pP][+-]?[0-9]+[fh]?)?|0[xX][0-9a-fA-F]+[pP][+-]?[0-9]+[fh]?)\\b"
+				},
+				{
+					"comment": "bool_literal: https://www.w3.org/TR/WGSL/#syntax-bool_literal",
+					"name": "constant.language.boolean.wgsl",
+					"match": "\\b(true|false)\\b"
+				}
+			]
+		},
+		"types": {
+			"patterns": [
+				{ "include": "#template_types" },
+				{ "include": "#plain_types" },
+				{ "include": "#memory_views" },
+				{ "include": "#texture_and_sampler_types" }
+			]
+		},
+		"template_types": {
+			"comment": "types with template arguments",
+			"name": "meta.type.template.wgsl",
+			"begin": "\\b(array|atomic|ptr|vec[2-4]|mat[2-4]x[2-4]|texture_storage_(?:1d|2d|2d_array|3d))\\s*(<)",
+			"beginCaptures": {
+				"1": { "name": "storage.type.wgsl" },
+				"2": { "name": "punctuation.brackets.angle.wgsl" }
+			},
+			"end": ">",
+			"endCaptures": {
+				"0": { "name": "punctuation.brackets.angle.wgsl" }
+			},
+			"patterns": [{ "include": "#function_arguments" }]
+		},
+		"plain_types": {
+			"comment": "types: https://www.w3.org/TR/WGSL/#types",
+			"patterns": [
+				{
+					"comment": "boolean type",
+					"name": "storage.type.boolean.wgsl",
+					"match": "\\b(bool)\\b"
+				},
+				{
+					"comment": "integer type",
+					"name": "storage.type.integer.wgsl",
+					"match": "\\b(i32|u32)\\b"
+				},
+				{
+					"comment": "floating point types",
+					"name": "storage.type.floating-point.wgsl",
+					"match": "\\b(f32|f16)\\b"
+				},
+				{ "include": "#vector_types" },
+				{ "include": "#matrix_types" },
+				{
+					"comment": "atomic types",
+					"name": "storage.type.wgsl",
+					"match": "\\b(atomic)\\b"
+				},
+				{
+					"comment": "array types",
+					"name": "storage.type.wgsl",
+					"match": "\\b(array)\\b"
+				},
+				{
+					"comment": "Custom type",
+					"name": "entity.name.type.wgsl",
+					"match": "\\b([A-Z][_$[:alnum:]]*)\\b"
+				},
+				{
+					"comment": "naga extension types",
+					"name": "storage.type.wgsl",
+					"match": "\\b(i64|u64|f64)\\b"
+				}
+			]
+		},
+		"vector_types": {
+			"patterns": [
+				{
+					"comment": "vector types: https://www.w3.org/TR/WGSL/#vector-types",
+					"name": "storage.type.vectors.wgsl",
+					"match": "\\b(vec)([2-4])\\b"
+				},
+				{
+					"comment": "vector type aliases: https://www.w3.org/TR/WGSL/#vector-types",
+					"name": "storage.type.vectors.wgsl",
+					"match": "\\b(vec)([2-4])(i|u|f|h)\\b"
+				}
+			]
+		},
+		"matrix_types": {
+			"patterns": [
+				{
+					"comment": "matrix types: https://www.w3.org/TR/WGSL/#matrix-types",
+					"name": "storage.type.matrixes.wgsl",
+					"match": "\\b(mat[2-4]x[2-4])\\b"
+				},
+				{
+					"comment": "matrix type aliases: https://www.w3.org/TR/WGSL/#matrix-types",
+					"name": "storage.type.matrixes.wgsl",
+					"match": "\\b(mat[2-4]x[2-4])(f|h)\\b"
+				}
+			]
+		},
+		"memory_views": {
+			"comment": "pointer types",
+			"name": "storage.type.ptr.wgsl",
+			"match": "\\b(ptr)\\b"
+		},
+		"texture_and_sampler_types": {
+			"patterns": [
+				{
+					"comment": "sampled texture types",
+					"name": "storage.type.sampled-texture.wgsl",
+					"match": "\\b(texture_1d|texture_2d|texture_2d_array|texture_3d|texture_cube|texture_cube_array)\\b"
+				},
+				{
+					"comment": "multisampled texture types",
+					"name": "storage.type.sampled-texture.wgsl",
+					"match": "\\b(texture_multisampled_2d|texture_depth_multisampled_2d)\\b"
+				},
+				{
+					"comment": "external sampled texture types",
+					"name": "storage.type.external-sampled-texture.wgsl",
+					"match": "\\b(texture_external)\\b"
+				},
+				{
+					"comment": "storage texture types",
+					"name": "storage.type.external-sampled-texture.wgsl",
+					"match": "\\b(texture_storage_1d|texture_storage_2d|texture_storage_2d_array|texture_storage_3d)\\b"
+				},
+				{
+					"comment": "depth texture types",
+					"name": "storage.type.depth-texture.wgsl",
+					"match": "\\b(texture_depth_2d|texture_depth_2d_array|texture_depth_cube|texture_depth_cube_array)\\b"
+				},
+				{
+					"comment": "sampler types",
+					"name": "storage.type.sampler.wgsl",
+					"match": "\\b(sampler|sampler_comparison)\\b"
+				}
+			]
+		},
+		"variables": {
+			"patterns": [
+				{
+					"comment": "variables",
+					"name": "variable.other.wgsl",
+					"match": "\\b([_$[:alpha:]][_$[:alnum:]]*)\\b"
+				}
+			]
+		},
+		"punctuation": {
+			"patterns": [
+				{
+					"comment": "comma",
+					"name": "punctuation.comma.wgsl",
+					"match": ","
+				},
+				{
+					"comment": "curly braces",
+					"name": "punctuation.brackets.curly.wgsl",
+					"match": "[{}]"
+				},
+				{
+					"comment": "parentheses, round brackets",
+					"name": "punctuation.brackets.round.wgsl",
+					"match": "[()]"
+				},
+				{
+					"comment": "semicolon",
+					"name": "punctuation.semi.wgsl",
+					"match": ";"
+				},
+				{
+					"comment": "square brackets",
+					"name": "punctuation.brackets.square.wgsl",
+					"match": "[\\[\\]]"
+				}
+			]
+		},
+		"keywords": {
+			"comment": "https://www.w3.org/TR/WGSL/#keyword-summary",
+			"patterns": [
+				{
+					"comment": "declaration and type keywords: https://www.w3.org/TR/WGSL/#declaration-and-scope, https://www.w3.org/TR/WGSL/#types",
+					"name": "keyword.other.declarations-and-types.wgsl",
+					"match": "\\b(alias|const|fn|let|override|struct|var)\\b"
+				},
+				{
+					"comment": "control-flow keywords: https://www.w3.org/TR/WGSL/#control-flow",
+					"name": "keyword.control.wgsl",
+					"match": "\\b(break|case|continue|continuing|default|discard|(?<!#)else|for|if|loop|return|switch|while)\\b"
+				},
+				{
+					"comment": "assertion keywords: https://www.w3.org/TR/WGSL/#assertions",
+					"name": "keyword.other.assertions.wgsl",
+					"match": "\\b(const_assert)\\b"
+				},
+				{
+					"comment": "directive keywords: https://www.w3.org/TR/WGSL/#directives",
+					"name": "keyword.other.directive.wgsl",
+					"match": "(?<!@)\\b(diagnostic|enable|requires)\\b"
+				}
+			]
+		},
+		"operators": {
+			"patterns": [
+				{
+					"comment": "logical operators",
+					"name": "keyword.operator.logical.wgsl",
+					"match": "(\\^|\\||\\|\\||&&|<<|>>|!)(?!=)"
+				},
+				{
+					"comment": "logical AND, address-of",
+					"name": "keyword.operator.address-of.and.wgsl",
+					"match": "&(?![&=])"
+				},
+				{
+					"comment": "assignment operators",
+					"name": "keyword.operator.assignment.wgsl",
+					"match": "(\\+=|-=|\\*=|/=|%=|\\^=|&=|\\|=|<<=|>>=)"
+				},
+				{
+					"comment": "single equal",
+					"name": "keyword.operator.assignment.equal.wgsl",
+					"match": "(?<![<>])=(?!=|>)"
+				},
+				{
+					"comment": "comparison operators",
+					"name": "keyword.operator.comparison.wgsl",
+					"match": "(==|!=|<=|>=|<|>)"
+				},
+				{
+					"comment": "math operators",
+					"name": "keyword.operator.math.wgsl",
+					"match": "(([+%]|(\\*(?!\\w)))(?!=))|(-(?!>))|(/(?!/))"
+				},
+				{
+					"comment": "dot access",
+					"name": "keyword.operator.access.dot.wgsl",
+					"match": "\\.(?!\\.)"
+				},
+				{
+					"comment": "dashrocket, skinny arrow",
+					"name": "keyword.operator.arrow.skinny.wgsl",
+					"match": "->"
+				},
+				{
+					"comment": "colon",
+					"name": "keyword.operator.type.annotation.wgsl",
+					"match": ":"
+				}
+			]
+		},
+		"reserved_words": {
+			"comment": "https://www.w3.org/TR/WGSL/#reserved-words",
+			"name": "keyword.other.reserved_words.wgsl",
+			"match": "\\b(aNULL|Self|abstract|active|alignas|alignof|as|asm|asm_fragment|async|attribute|auto|await|become|cast|catch|class|co_await|co_return|co_yield|coherent|column_major|common|compile|compile_fragment|concept|const_cast|consteval|constexpr|constinit|crate|debugger|decltype|delete|demote|demote_to_helper|do|dynamic_cast|enum|explicit|export|extends|extern|external|fallthrough|filter|final|finally|friend|from|fxgroup|get|goto|groupshared|highp|impl|implements|import|inline|instanceof|interface|layout|lowp|macro|macro_rules|match|mediump|meta|mod|module|move|mut|mutable|namespace|new|nil|noexcept|noinline|nointerpolation|non_coherent|noncoherent|noperspective|null|nullptr|of|operator|package|packoffset|partition|pass|patch|pixelfragment|precise|precision|premerge|priv|protected|pub|public|readonly|ref|regardless|register|reinterpret_cast|require|resource|restrict|self|set|shared|sizeof|smooth|snorm|static|static_assert|static_cast|std|subroutine|super|target|template|this|thread_local|throw|trait|try|type|typedef|typeid|typename|typeof|union|unless|unorm|unsafe|unsized|use|using|varying|virtual|volatile|wgsl|where|with|writeonly|yield)\\b"
+		},
+		"address_spaces": {
+			"comment": "https://www.w3.org/TR/WGSL/#address-spaces",
+			"name": "storage.modifier.address_spaces.wgsl",
+			"match": "\\b(function|private|workgroup|uniform|storage|handle)\\b"
+		},
+		"memory_access_modes": {
+			"comment": "https://www.w3.org/TR/WGSL/#memory-access-mode",
+			"name": "storage.modifier.memory_access_modes.wgsl",
+			"match": "\\b(read|write|read_write)\\b"
+		},
+		"attributes": {
+			"comment": "https://www.w3.org/TR/WGSL/#attribute-names",
+			"patterns": [
+				{
+					"comment": "attribute",
+					"match": "@\\s*[_$[:alpha:]][_$[:alnum:]]*\\b",
+					"name": "entity.other.attribute.wgsl"
+				}
+			]
+		},
+		"built-in_value_names": {
+			"comment": "built-ins: https://www.w3.org/TR/WGSL/#builtin-value-names",
+			"name": "variable.language.built-ins.wgsl",
+			"match": "\\b(vertex_index|instance_index|position|front_facing|frag_depth|sample_index|sample_mask|local_invocation_id|local_invocation_index|global_invocation_id|workgroup_id|num_workgroups|subgroup_invocation_id|subgroup_size)\\b"
+		}
+	}
+}

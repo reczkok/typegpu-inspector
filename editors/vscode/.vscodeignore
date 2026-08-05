@@ -1,0 +1,7 @@
+**
+!dist/extension.js
+!dist/server.cjs
+!README.md
+!LICENSE
+!package.json
+!syntaxes/**

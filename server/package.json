@@ -1,0 +1,36 @@
+{
+  "name": "typegpu-inspector-language-server",
+  "version": "0.4.3",
+  "description": "Language server for TypeGPU runtime inspection: hovers, inlay hints, diagnostics, and generated WGSL.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/reczkok/typegpu-inspector.git",
+    "directory": "server"
+  },
+  "bin": {
+    "typegpu-inspector-language-server": "./dist/server.cjs"
+  },
+  "files": [
+    "dist/server.cjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json --noEmit && esbuild src/server.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/server.cjs",
+    "prepublishOnly": "pnpm build",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:e2e": "node test/lsp-smoke.cjs dist/server.cjs ../inspector/test/fixtures/symbol-targets.ts"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "@types/node": "24.1.0",
+    "esbuild": "0.28.1",
+    "typescript": "5.9.3",
+    "vitest": "3.2.4",
+    "vscode-languageserver": "10.1.0",
+    "vscode-languageserver-textdocument": "1.0.12"
+  }
+}

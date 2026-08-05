@@ -1,0 +1,3 @@
+The WGSL TextMate grammar (wgsl.tmLanguage.json) is vendored from the
+wgsl-analyzer project (https://github.com/wgsl-analyzer/wgsl-analyzer),
+licensed under MIT OR Apache-2.0.

@@ -1,0 +1,241 @@
+{
+  "name": "typegpu-inspector",
+  "displayName": "TypeGPU Inspector",
+  "publisher": "reczkok",
+  "version": "0.4.3",
+  "private": true,
+  "description": "Deep TypeGPU inspection: exact pipelines, resources, memory layouts, generated WGSL, bindings, and synthesized probes.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/reczkok/typegpu-inspector.git",
+    "directory": "editors/vscode"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Other"
+  ],
+  "keywords": [
+    "typegpu",
+    "webgpu",
+    "wgsl",
+    "shader",
+    "gpu"
+  ],
+  "activationEvents": [
+    "onLanguage:typescript",
+    "onLanguage:typescriptreact",
+    "onLanguage:javascript",
+    "onLanguage:javascriptreact"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "typegpuInspector.restart",
+        "title": "TypeGPU Inspector: Restart Server"
+      },
+      {
+        "command": "typegpuInspector.showOutput",
+        "title": "TypeGPU Inspector: Show Output Log"
+      },
+      {
+        "command": "typegpuInspector.doctor",
+        "title": "TypeGPU Inspector: Run Environment Doctor"
+      },
+      {
+        "command": "typegpuInspector.selectVerbosity",
+        "title": "TypeGPU Inspector: Select Hover Detail"
+      },
+      {
+        "command": "typegpuInspector.selectInlayDetail",
+        "title": "TypeGPU Inspector: Select Inlay Detail"
+      }
+    ],
+    "configuration": {
+      "title": "TypeGPU Inspector",
+      "properties": {
+        "typegpuInspector.inspectOn": {
+          "type": "string",
+          "enum": [
+            "save",
+            "hover",
+            "save-and-hover",
+            "off"
+          ],
+          "default": "save",
+          "description": "When to run deep runtime inspection."
+        },
+        "typegpuInspector.hoverDetailLevel": {
+          "type": "string",
+          "enum": [
+            "compact",
+            "standard",
+            "deep"
+          ],
+          "enumDescriptions": [
+            "Complete core resource shape without secondary evidence.",
+            "Role-focused facts and a bounded generated WGSL excerpt.",
+            "Diagnostics, provenance, runtime metadata, and raw evidence."
+          ],
+          "description": "How much detail hover reports show. Defaults to standard."
+        },
+        "typegpuInspector.inlayDetailLevel": {
+          "type": "string",
+          "enum": ["compact", "summary", "detailed"],
+          "enumDescriptions": [
+            "Status only.",
+            "Status plus one role-specific fact.",
+            "Status plus up to two role-specific facts."
+          ],
+          "description": "Inlay density, independent of hover detail. Defaults to compact."
+        },
+        "typegpuInspector.hoverPresentation": {
+          "type": "object",
+          "description": "Advanced hover section visibility, ordering, and budgets for unbounded content.",
+          "properties": {
+            "sections": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string",
+                "enum": ["auto", "show", "hide"]
+              }
+            },
+            "sectionOrder": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "wgslPreview", "shaderFacts", "bindings", "resource",
+                  "schema", "pipelineState", "pipelineContext", "declarations",
+                  "compilerMessages", "inspectionNotes", "assumptions", "runtime"
+                ]
+              }
+            },
+            "wgslPreviewLines": { "type": "number", "minimum": 0, "maximum": 20 },
+            "collectionItems": { "type": "number", "minimum": 1, "maximum": 100 },
+            "declarations": { "type": "number", "minimum": 1, "maximum": 100 },
+            "compilerMessages": { "type": "number", "minimum": 1, "maximum": 100 },
+            "inspectionNotes": { "type": "number", "minimum": 1, "maximum": 50 },
+            "assumptions": { "type": "number", "minimum": 1, "maximum": 50 }
+          }
+        },
+        "typegpuInspector.detailLevel": {
+          "type": "string",
+          "enum": ["minimal", "default", "verbose"],
+          "markdownDeprecationMessage": "Use `hoverDetailLevel` and `inlayDetailLevel` instead.",
+          "description": "Deprecated combined detail preset retained for existing configurations."
+        },
+        "typegpuInspector.warmUpOnOpen": {
+          "type": "boolean",
+          "default": true,
+          "description": "Inspect TypeGPU files once when they open, so the expensive first session (headless browser + bundler) is warmed before your first save."
+        },
+        "typegpuInspector.timeoutMs": {
+          "type": "number",
+          "default": 45000,
+          "description": "Per-inspection timeout in milliseconds (clamped to [1000, 600000]). Session setup on a cold start has its own separate allowance and does not count against this."
+        },
+        "typegpuInspector.maxWgslBytes": {
+          "type": "number",
+          "default": 2000000,
+          "description": "Maximum generated WGSL size in bytes (clamped to [16384, 64000000])."
+        },
+        "typegpuInspector.strictNames": {
+          "type": "boolean",
+          "default": true,
+          "description": "Require strict TypeGPU naming during resolution."
+        },
+        "typegpuInspector.hover": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show runtime hover reports."
+        },
+        "typegpuInspector.inlayHints": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show compact \u2713/\u2717 inlay hints in the buffer."
+        },
+        "typegpuInspector.diagnostics": {
+          "type": "boolean",
+          "default": true,
+          "description": "Publish compiler and runtime diagnostics."
+        },
+        "typegpuInspector.documentLinks": {
+          "type": "boolean",
+          "default": true,
+          "description": "Link to the generated .wgsl document."
+        },
+        "typegpuInspector.sourceMapping": {
+          "type": "boolean",
+          "default": true,
+          "description": "Heuristically map WGSL diagnostics back to TypeScript source (early feature)."
+        },
+        "typegpuInspector.schemaLayoutHealth": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show padding/allocated layout notes in schema hovers."
+        },
+        "typegpuInspector.schemaPackingSuggestions": {
+          "type": "boolean",
+          "default": true,
+          "description": "Suggest a tighter structure-field order only when it proves a smaller allocation. Disable to skip the packing search while retaining layout notes."
+        },
+        "typegpuInspector.inspectorPackage": {
+          "type": "string",
+          "default": "bundled",
+          "description": "\"bundled\" or a plain npm package name for the runtime inspector."
+        },
+        "typegpuInspector.projectRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Override workspace-root inference for unusual repository layouts."
+        },
+        "typegpuInspector.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to a language server build to use instead of the bundled one (for development)."
+        }
+      }
+    },
+    "languages": [
+      {
+        "id": "wgsl",
+        "extensions": [
+          ".wgsl"
+        ],
+        "aliases": [
+          "WGSL"
+        ],
+        "configuration": "./syntaxes/wgsl-language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "wgsl",
+        "scopeName": "source.wgsl",
+        "path": "./syntaxes/wgsl.tmLanguage.json"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && esbuild src/extension.ts --bundle --platform=node --format=cjs --target=node20 --external:vscode --outfile=dist/extension.js && node -e \"require('node:fs').copyFileSync(require.resolve('typegpu-inspector-language-server/dist/server.cjs'), 'dist/server.cjs')\"",
+    "check": "tsc --noEmit",
+    "package": "pnpm build && vsce package --no-dependencies"
+  },
+  "dependencies": {
+    "typegpu-inspector-language-server": "workspace:*",
+    "vscode-languageclient": "9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.1.0",
+    "@types/vscode": "1.90.0",
+    "@vscode/vsce": "3.6.2",
+    "esbuild": "0.28.1",
+    "typescript": "5.9.3"
+  }
+}

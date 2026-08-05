@@ -1,0 +1,13 @@
+[package]
+name = "typegpu-inspector"
+version = "0.4.3"
+edition = "2024"
+license = "MIT"
+description = "Zed extension for inspecting TypeGPU shaders"
+repository = "https://github.com/reczkok/typegpu-inspector"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "0.7.0"

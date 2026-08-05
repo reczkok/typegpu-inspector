@@ -1,0 +1,67 @@
+{
+  "name": "typegpu-runtime-inspector-mcp",
+  "version": "0.4.3",
+  "type": "module",
+  "description": "Editor-focused TypeGPU inspector with synthesized probes, render defaults, and real WebGPU validation.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/reczkok/typegpu-inspector.git",
+    "directory": "inspector"
+  },
+  "exports": {
+    "./package.json": "./package.json"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "typegpu",
+    "webgpu",
+    "wgsl",
+    "codex",
+    "claude-code",
+    "opencode"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "bin",
+    "harness.html",
+    "LICENSE",
+    "src",
+    "README.md"
+  ],
+  "bin": {
+    "typegpu-runtime-inspector-mcp": "bin/typegpu-runtime-inspector-mcp.mjs"
+  },
+  "scripts": {
+    "check": "pnpm typecheck && pnpm test",
+    "start": "tsx src/index.ts",
+    "test:browser": "TYPEGPU_MCP_RUN_BROWSER_TESTS=1 vitest run test/browser-smoke.test.ts test/complex-examples.test.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --exclude test/browser-smoke.test.ts --exclude test/complex-examples.test.ts --exclude test/docs-survey.test.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "confbox": "^0.2.4",
+    "exsolve": "^1.0.8",
+    "jsonc-parser": "3.3.1",
+    "pkg-types": "^2.3.1",
+    "playwright-chromium": "^1.61.0",
+    "tsx": "^4.22.4",
+    "typegpu": "0.11.9",
+    "typescript": "^6.0.3",
+    "unplugin-typegpu": "0.11.6",
+    "vite": "^8.0.16",
+    "which": "^4.0.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@typegpu/noise": "0.11.0",
+    "@types/node": "^24.10.0",
+    "@types/which": "^3.0.4",
+    "@webgpu/types": "^0.1.70",
+    "vitest": "^4.1.9"
+  }
+}

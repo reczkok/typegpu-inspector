@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "cases": {
+    "camera-thresholding": {
+      "modulePath": "src/examples/image-processing/camera-thresholding/index.ts",
+      "targets": {}
+    },
+    "react-confetti": {
+      "modulePath": "src/examples/react/confetti/index.tsx",
+      "targets": {
+        "vertexShader": {
+          "outcome": "blocked",
+          "codes": ["wrapper-required"]
+        },
+        "App": {
+          "outcome": "unsupported",
+          "codes": ["cpu-function-not-inspectable"]
+        }
+      }
+    },
+    "fluid-double-buffering": {
+      "modulePath": "src/examples/simulation/fluid-double-buffering/index.ts",
+      "targets": {}
+    },
+    "bitpacked-compute": {
+      "modulePath": "src/examples/simulation/game-of-life/shaders/bitpacked-compute.ts",
+      "targets": {
+        "golNextStateBitpacked": {
+          "outcome": "blocked",
+          "codes": ["wrapper-required"]
+        }
+      }
+    },
+    "fluid-with-atomics": {
+      "modulePath": "src/examples/simulation/fluid-with-atomics/index.ts",
+      "targets": {
+        "flowDown": {
+          "outcome": "blocked",
+          "codes": ["reference-wrapper-required"]
+        },
+        "flowSidewaysTo": {
+          "outcome": "blocked",
+          "codes": ["reference-wrapper-required"]
+        },
+        "flowLeft": {
+          "outcome": "blocked",
+          "codes": ["reference-wrapper-required"]
+        },
+        "flowRight": {
+          "outcome": "blocked",
+          "codes": ["reference-wrapper-required"]
+        },
+        "flowUp": {
+          "outcome": "blocked",
+          "codes": ["reference-wrapper-required"]
+        }
+      }
+    },
+    "gravity-render": {
+      "modulePath": "src/examples/simulation/gravity/render.ts",
+      "targets": {}
+    }
+  }
+}

@@ -1,0 +1,68 @@
+name: Validate
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate monorepo
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # corepack must run before setup-node@v5: its default package-manager
+      # cache probes for pnpm during node setup.
+      - name: Enable pnpm
+        run: corepack enable
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Cache Playwright Chromium
+        id: playwright-cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+
+      - name: Install Playwright Chromium with system dependencies
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: pnpm --dir inspector exec playwright install --with-deps chromium
+
+      - name: Install Playwright system dependencies only
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: pnpm --dir inspector exec playwright install-deps chromium
+
+      - name: Typecheck and unit tests
+        run: pnpm check && pnpm test
+
+      - name: Browser and WebGPU tests
+        run: pnpm test:browser
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Rust check
+        run: cargo check
+
+      - name: Build language server
+        run: pnpm build
+
+      - name: End-to-end LSP smoke test
+        run: pnpm --dir server test:e2e
