@@ -89,6 +89,28 @@ describe('formatInspectionReport', () => {
     expect(formatted.calls?.[0]?.descriptor?.code).toContain('truncated');
   });
 
+  it('classifies a TypeGPU resolution failure as a source error', () => {
+    const report = sampleReport();
+    report.ok = false;
+    report.targets[0] = {
+      ...report.targets[0]!,
+      ok: false,
+      error: {
+        name: 'Error',
+        message: [
+          'Resolution of the following tree failed:',
+          '- <root>',
+          "- fn*:getSliderNormal(vec3f): 'position.z = absZ' is invalid, because non-pointer arguments cannot be mutated.",
+        ].join('\n'),
+        cause: { __object: 'WgslTypeError' },
+      },
+    };
+    const formatted = formatInspectionReport(report) as {
+      targets: Array<{ failureCategory?: string }>;
+    };
+    expect(formatted.targets[0]?.failureCategory).toBe('source');
+  });
+
   it('classifies failures and hides browser stacks outside full output', () => {
     const report = sampleReport();
     report.ok = false;

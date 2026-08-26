@@ -4,10 +4,12 @@ TypeGPU shader inspection in the editor. The extension runs the module you are
 editing in a headless Chromium with WebGPU and reports what TypeGPU produced
 back in the TypeScript buffer:
 
-- hovers with generated WGSL, memory layouts, bindings, and pipeline state;
+- hovers with generated WGSL, memory layouts, bindings, and pipeline state,
+  below the TypeScript quick info;
+- a generated-WGSL document and an inspection report beside the editor, both
+  following the cursor;
 - ✓/✗ inlay hints per declaration;
-- WGSL compiler and WebGPU validation diagnostics, mapped onto your source;
-- links to the generated `.wgsl` documents and the full inspection report.
+- WGSL compiler and WebGPU validation diagnostics, mapped onto your source.
 
 ## First run
 
@@ -28,6 +30,19 @@ download is safe. Answer "Not now" to skip inspection for the session, or set
 The first inspection in a workspace can take a few minutes; later ones reuse
 the warm session and finish in seconds. Node.js 20 or newer is required.
 
+## Generated WGSL beside the editor
+
+The editor title of a TypeGPU file has an "Open Generated WGSL to the Side"
+button. The document it opens follows the cursor: move onto another pipeline
+or shader function and it shows that target's WGSL, with the compiler's
+diagnostics in place and a link back to the source at the top. "Pin" keeps one
+target open in its own tab. Hovers offer the same document as *Open WGSL* and
+*Peek*. "Open Inspection Report to the Side" does the same for the full report,
+rendered in the Markdown preview.
+
+A file written by a tool or an agent while it is open is inspected as if you
+had saved it.
+
 ## Settings and commands
 
 Settings live under `typegpuInspector.*` and appear in the settings UI:
@@ -36,9 +51,10 @@ surface. The
 [project README](https://github.com/reczkok/typegpu-inspector#configuration)
 documents them.
 
-Under "TypeGPU Inspector:" the command palette offers Restart Server, Show
-Output Log, Run Environment Doctor, Select Hover Detail, and Select Inlay
-Detail. The status bar item opens the same detail pickers.
+Under "TypeGPU Inspector:" the command palette offers Open Generated WGSL to
+the Side, Open Inspection Report to the Side, Restart Server, Show Output Log,
+Run Environment Doctor, Select Hover Detail, and Select Inlay Detail. The
+status bar item opens the same menu.
 
 ## WGSL syntax
 

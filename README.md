@@ -13,7 +13,9 @@ trust.
 - Inlay hints carrying each declaration's inspection status.
 - Diagnostics from the WGSL compiler and from WebGPU validation, mapped onto
   the TypeScript token where that mapping is reliable.
-- Document links to the generated `.wgsl` file and the full report.
+- Document links to the generated `.wgsl` file and the full report. In
+  VS Code, a generated-WGSL document and an inspection report open beside the
+  editor and follow the cursor.
 - Schema layout: offsets, alignment, padding, host shareability, and a tighter
   field order when one is provably smaller.
 
@@ -132,6 +134,10 @@ directory. Playwright caches browsers separately in
 The same runtime ships as a stdio MCP server. The Zed extension registers it
 automatically; other clients use the published `typegpu-runtime-inspector-mcp`
 package. See [`inspector/README.md`](inspector/README.md).
+
+Editor-hosted agents get the same evidence through diagnostics: a file an
+agent writes while it is open in the editor is inspected as if saved, and the
+results land in the problems panel.
 
 ## Development
 

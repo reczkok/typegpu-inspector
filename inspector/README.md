@@ -134,7 +134,8 @@ Responses carry `summary`, `targets`, `dependencySummary`, `warnings`, and
 `<projectRoot>`, `<packageRoot>`, `<workspaceRoot>`, and `<mcpPackage>`. A
 failed target carries `failureCategory`: `source`, `shader-compiler`,
 `webgpu-validation`, `environment`, `timeout`, or `harness`. Browser stack
-frames appear only at `"full"`.
+frames appear only at `"full"`. The text block of each result repeats the
+JSON payload, for clients that do not surface `structuredContent`.
 
 `body`, `setupBody`, and `browserSetup` are source snippets. Pass real newline
 characters; double-escaped text such as `\nconst x = 1` is parsed as literal

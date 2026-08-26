@@ -7,9 +7,22 @@ The four packages are versioned and released together.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.5.1] - 2026-08-26
+## [0.6.0] - 2026-08-26
 
 ### Added
+
+- VS Code: a generated-WGSL document beside the editor ("Open Generated WGSL
+  to the Side", also a button in the editor title of TypeGPU files). It follows
+  the cursor across targets, carries the WGSL compiler's diagnostics, and has a
+  CodeLens back to the source; "Pin" keeps one target in its own tab. Hovers
+  link to it as *Open WGSL* and *Peek* (the editor's peek view).
+- VS Code: "Open Inspection Report to the Side" renders the full report in the
+  Markdown preview, following the cursor the same way.
+- Language server: `typegpu/targets`, `typegpu/wgsl`, and `typegpu/report`
+  requests behind those views. Editors that do not send them are unaffected.
+- An open document that changes on disk — a file written by a tool or an
+  agent — is inspected as if it had been saved, in editors that support file
+  watching.
 
 - `hoverDetailLevel: "wgsl"`: generated WGSL only for shaders and pipelines,
   compact facts for everything else. The generated WGSL now precedes the
@@ -22,6 +35,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pipelineContext` address the same section.
 
 ### Changed
+
+- VS Code: the TypeScript quick info renders above the TypeGPU hover, so the
+  type is visible without scrolling.
+- MCP: the text block of every tool result carries the full JSON payload.
+  Clients such as Claude Code show only text, and previously saw a four-line
+  headline.
+- A target whose TypeGPU resolution fails is classified `source`, not
+  `harness`.
+- Resolution errors no longer mention the inspector's probe wrappers.
+- A compiler diagnostic that maps only to a declaration no longer claims an
+  approximate location; the related location names the generated WGSL line.
 
 - A hover states each role's facts in one two-column table — stages, primitive
   state, colour targets, and one row per vertex slot and attribute for a

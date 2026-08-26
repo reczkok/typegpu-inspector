@@ -362,10 +362,28 @@ function inferFailureCategory(target: TypeGpuTargetReport): FailureCategory | un
   ) {
     return 'webgpu-validation';
   }
-  if ([...codes].some((code) => SOURCE_DIAGNOSTIC_CODES.has(code))) {
+  if (
+    [...codes].some((code) => SOURCE_DIAGNOSTIC_CODES.has(code)) ||
+    isResolutionFailure(target.error)
+  ) {
     return 'source';
   }
   return 'harness';
+}
+
+/** TypeGPU rejected the authored shader code while resolving it to WGSL. */
+function isResolutionFailure(error: TypeGpuTargetReport['error']): boolean {
+  if (!isRecordLike(error)) return false;
+  const message = typeof error.message === 'string' ? error.message : '';
+  const cause = isRecordLike(error.cause) ? error.cause : undefined;
+  const causeName = typeof cause?.__object === 'string'
+    ? cause.__object
+    : typeof cause?.name === 'string'
+    ? cause.name
+    : '';
+  return message.includes('Resolution of the following tree failed') ||
+    /^Wgsl\w*Error$|^ResolutionError$/.test(causeName) ||
+    /^Wgsl\w*Error$|^ResolutionError$/.test(typeof error.name === 'string' ? error.name : '');
 }
 
 function formatSerializedError<T>(error: T, includeStack: boolean): T {
