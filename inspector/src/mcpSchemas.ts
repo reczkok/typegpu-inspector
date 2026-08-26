@@ -113,6 +113,13 @@ const runtimeOptionsSchema = {
     .describe(
       'Optional plain browser JavaScript executed before the inspected module is imported. It runs as an async function with root, device, tgpu, d, std, and common parameters, and is intended for DOM/global mocks rather than shader declarations. Use actual newlines in this source body; double-escaped strings such as "\\nconst x = 1" are treated as JavaScript source text.',
     ),
+  quiescent: z
+    .boolean()
+    .optional()
+    .default(true)
+    .describe(
+      'Run the inspected module quiescently: requestAnimationFrame, ResizeObserver, queue.submit, and pipeline dispatch/draw are stubbed before import so an import-time frame loop cannot draw over the inspector validation scopes and lose the WebGPU device. Reported through a device-session quiescent-run ledger entry, so a passing target is static validation evidence, not evidence the app renders. When browserSetup is also passed, it runs after the quiescent prologue and may override individual stubs. Set false only when the run must observe real frame/submit behaviour.',
+    ),
   staticAssetRoutes: z
     .array(staticAssetRouteSchema)
     .optional()
@@ -164,6 +171,7 @@ const agentEnvironmentSchema = z
   .object({
     documentHtml: runtimeOptionsSchema.documentHtml,
     browserSetup: runtimeOptionsSchema.browserSetup,
+    quiescent: runtimeOptionsSchema.quiescent,
     staticAssetRoutes: runtimeOptionsSchema.staticAssetRoutes,
     features: runtimeOptionsSchema.features,
     strictNames: runtimeOptionsSchema.strictNames,

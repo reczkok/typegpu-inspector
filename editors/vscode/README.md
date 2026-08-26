@@ -17,6 +17,36 @@ inspector and Playwright Chromium once, then boots and caches a bundler
 session. Every later inspection reuses the warm session and finishes in
 seconds. Node.js 20+ is required.
 
+## What it downloads and runs
+
+The extension asks once, before the first inspection, and then downloads into
+its own global storage directory:
+
+- `typegpu-runtime-inspector-mcp` — the runtime inspector, from npm;
+- a Playwright Chromium build (~150 MB) — the headless browser it runs in.
+
+It then executes your project's **top-level TypeGPU module code** in that
+browser. That is what makes real pipelines, real memory layouts, and the
+actually generated WGSL available in the editor, and it also means a module
+with import-time side effects will perform them. For that reason the extension
+declares itself unsupported in Restricted Mode: trust the folder to enable it.
+
+Nothing is sent anywhere — no telemetry, no analytics, no network traffic
+beyond those two downloads and whatever your own module requests. Results
+never leave your machine.
+
+The runtime lives in the extension's global storage:
+
+- macOS: `~/Library/Application Support/Code/User/globalStorage/reczkok.typegpu-inspector/runtime`
+- Linux: `~/.config/Code/User/globalStorage/reczkok.typegpu-inspector/runtime`
+- Windows: `%APPDATA%\Code\User\globalStorage\reczkok.typegpu-inspector\runtime`
+
+Playwright's browsers are cached separately in `~/Library/Caches/ms-playwright`
+(macOS), `~/.cache/ms-playwright` (Linux), or `%LOCALAPPDATA%\ms-playwright`
+(Windows). Deleting either is safe — the next inspection re-downloads what it
+needs. Answer "Not now" to the first-run notice to skip runtime inspection for
+the session, or set `typegpuInspector.inspectOn` to `off` permanently.
+
 The extension bundles WGSL syntax highlighting (grammar vendored from
 [wgsl-analyzer](https://github.com/wgsl-analyzer/wgsl-analyzer)) for hover
 previews and generated `.wgsl` files. It coexists with dedicated WGSL

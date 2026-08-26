@@ -102,7 +102,7 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
     },
     serverInfo: {
       name: 'TypeGPU Inspector',
-      version: '0.4.7',
+      version: __TYPEGPU_SERVER_VERSION__,
     },
   };
 });

@@ -7,6 +7,41 @@ descriptors, then puts the useful parts back into the TypeScript editor.
 It is not another static linter. It executes top level module code, so use it
 on projects you trust.
 
+## What it downloads and runs
+
+The first time you inspect something, the extension downloads two things into
+its own storage directory, once per machine:
+
+- `typegpu-runtime-inspector-mcp` — the runtime inspector, from npm;
+- a Playwright Chromium build (~150 MB) — the headless browser the inspection
+  runs in.
+
+It then executes your project's **top-level TypeGPU module code** in that
+browser. That is how it can report real pipelines, real layouts, and the WGSL
+TypeGPU actually generated, but it also means a module with side effects at
+import time will perform them. Inspect projects you trust; the VS Code
+extension declares itself unsupported in Restricted Mode for the same reason,
+and asks once before the first download.
+
+Nothing is sent anywhere. There is no telemetry, no analytics, and no network
+traffic beyond the two downloads above and whatever your own module requests.
+Inspection results never leave your machine.
+
+The download lives in the editor's per-extension global storage:
+
+| Editor | Location |
+| --- | --- |
+| VS Code (macOS) | `~/Library/Application Support/Code/User/globalStorage/reczkok.typegpu-inspector/runtime` |
+| VS Code (Linux) | `~/.config/Code/User/globalStorage/reczkok.typegpu-inspector/runtime` |
+| VS Code (Windows) | `%APPDATA%\Code\User\globalStorage\reczkok.typegpu-inspector\runtime` |
+| Zed / npx | npm's cache (`npx` `_npx` directory) |
+
+Playwright's browsers are cached separately, under `~/Library/Caches/ms-playwright`
+(macOS), `~/.cache/ms-playwright` (Linux), or `%LOCALAPPDATA%\ms-playwright`
+(Windows). Deleting either directory is safe: the next inspection downloads
+what it needs again. To stop the extension from running anything at all, set
+`typegpuInspector.inspectOn` to `off`.
+
 ## Configure it
 
 The defaults are meant to be usable without configuration. Inspection runs on
@@ -435,5 +470,11 @@ contains the Rust Zed extension. `server` contains discovery, the language
 server, and editor presentation. `inspector` contains the Chromium WebGPU
 runtime and MCP server. `editors/vscode` contains the VS Code client. `scripts`
 contains corpus and coverage tools.
+
+Releases move every package at once. `pnpm bump <version>` rewrites the
+version in `Cargo.toml`, `extension.toml`, and all four `package.json` files;
+run `cargo check` afterwards to refresh `Cargo.lock`, and record the release in
+`CHANGELOG.md`. Version strings in source are injected at build time from the
+owning package's `package.json`, so nothing else needs editing.
 
 The root lockfile is authoritative. Run repository scripts from the root.

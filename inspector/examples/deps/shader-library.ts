@@ -1,4 +1,4 @@
-import tgpu, { d, std } from 'typegpu';
+import { tgpu, d, std } from 'typegpu';
 
 export const posterize = tgpu.fn([d.vec3f, d.f32], d.vec3f)((color, steps) => {
   'use gpu';

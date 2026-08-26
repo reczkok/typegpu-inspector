@@ -10,6 +10,10 @@ describe('complex examples', () => {
     const report = await inspectTypegpuModule({
       cwd,
       source: { kind: 'modulePath', modulePath: 'examples/complex/noise-cache-compute.ts' },
+      // perlin2d.staticCache initializes its own compute pipeline as probe
+      // setup. A quiescent run stubs pipeline init, so the second pipeline
+      // would never reach the device; this assertion needs the real thing.
+      quiescent: false,
       timeoutMs: 30_000,
     });
 

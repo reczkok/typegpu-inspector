@@ -20,6 +20,7 @@ import {
   normalizeDependencyResolution,
   normalizeStaticAssetRoutes,
 } from './options.ts';
+import { DEFAULT_QUIESCENT } from './quiescentSetup.ts';
 
 export type NormalizedSymbolInput = Required<
   Pick<
@@ -38,7 +39,9 @@ export type NormalizedSymbolInput = Required<
   setupBody?: string | undefined;
   viteConfigPath?: string | undefined;
   documentHtml?: string | undefined;
+  /** Raw caller setup; the quiescent prologue is composed once, in normalizeInput. */
   browserSetup?: string | undefined;
+  quiescent: boolean;
   dependencyAliases: Record<string, string>;
   fsAllow: string[];
   staticAssetRoutes: StaticAssetRoute[];
@@ -69,6 +72,7 @@ export function normalizeSymbolInput(input: InspectTypegpuSymbolsInput): Normali
     setupBody: input.setupBody,
     documentHtml: input.documentHtml,
     browserSetup: input.browserSetup,
+    quiescent: input.quiescent ?? DEFAULT_QUIESCENT,
     timeoutMs: input.timeoutMs ?? DEFAULT_INSPECTION_TIMEOUT_MS,
     viteConfigPath: input.viteConfigPath
       ? resolve(cwd, input.viteConfigPath)

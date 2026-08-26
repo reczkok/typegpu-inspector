@@ -1,5 +1,5 @@
 // @ts-nocheck
-import tgpu, { d } from 'typegpu';
+import { tgpu, d } from 'typegpu';
 
 // Private, default-less, never bound anywhere in the module: nothing for the
 // inspector to harvest, so the consumer below must fail with the improved

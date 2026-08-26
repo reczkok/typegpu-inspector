@@ -326,7 +326,7 @@ describe('listTypegpuExportsFromFile', () => {
     await writeFile(
       modulePath,
       `
-import tgpu, { d } from 'typegpu';
+import { tgpu, d } from 'typegpu';
 export const helper = tgpu.fn([], d.f32)(() => { 'use gpu'; return 1; });
 export const ParticleInstance = d.struct({ position: d.vec2f });
 export const Vertex = d.struct({ position: d.vec3f });
@@ -438,7 +438,7 @@ export function buildPipeline(root: { createRenderPipeline(input: unknown): unkn
     await writeFile(
       modulePath,
       `
-import tgpu, { d } from 'typegpu';
+import { tgpu, d } from 'typegpu';
 export const vertexFn = tgpu.vertexFn({ out: { position: d.builtin.position } })(() => {
   'use gpu';
   return { position: d.vec4f(0, 0, 0, 1) };

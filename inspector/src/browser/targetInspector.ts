@@ -1,4 +1,4 @@
-import tgpu, { type Configurable as TgpuConfigurable } from 'typegpu';
+import { tgpu, type Configurable as TgpuConfigurable } from 'typegpu';
 import {
   MIN_BROWSER_WAIT_MS,
   serializeError,

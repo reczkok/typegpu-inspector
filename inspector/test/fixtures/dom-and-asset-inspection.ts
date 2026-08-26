@@ -1,5 +1,5 @@
 // @ts-nocheck
-import tgpu, { d } from 'typegpu';
+import { tgpu, d } from 'typegpu';
 
 const canvas = document.querySelector('canvas') as HTMLCanvasElement | null;
 if (!canvas) {

@@ -12,7 +12,14 @@ import {
   diagnoseTargetFailure,
 } from '../src/browser/diagnostics.ts';
 import { inferTargetKind } from '../src/browser/typegpuIntrospection.ts';
-import { symbolTargetSchema } from '../src/mcpSchemas.ts';
+import {
+  agentInspectionInputObjectSchema,
+  symbolTargetSchema,
+} from '../src/mcpSchemas.ts';
+import {
+  composeBrowserSetup,
+  QUIESCENT_BROWSER_SETUP,
+} from '../src/inspect/quiescentSetup.ts';
 
 describe('normalizeInput', () => {
   it('resolves defaults and relative module paths', () => {
@@ -847,5 +854,85 @@ describe('diagnostic classifiers', () => {
     expect(diagnostic?.code).toBe('raw-webgpu-pipeline-unsupported');
     expect(diagnostic?.message).toContain('raw WebGPU compute pipeline');
     expect(diagnostic?.hint).toContain('TypeGPU compute entrypoint');
+  });
+});
+
+describe('quiescent browser setup', () => {
+  const cwd = resolve(import.meta.dirname, '..');
+  const source = { kind: 'modulePath', modulePath: 'test/fixtures/success-compute.ts' } as const;
+
+  it('defaults to the quiescent prologue when no browserSetup is passed', () => {
+    const result = normalizeInput({ cwd, source });
+
+    expect(result.quiescent).toBe(true);
+    expect(result.browserSetup).toBe(QUIESCENT_BROWSER_SETUP);
+  });
+
+  it('prepends the prologue so caller setup can override individual stubs', () => {
+    const result = normalizeInput({
+      cwd,
+      source,
+      browserSetup: 'window.__APP__ = 1;',
+    });
+
+    expect(result.browserSetup).toBe(`${QUIESCENT_BROWSER_SETUP}\nwindow.__APP__ = 1;`);
+    expect(result.browserSetup?.indexOf('window.__APP__'))
+      .toBeGreaterThan(result.browserSetup?.indexOf('requestAnimationFrame') ?? -1);
+  });
+
+  it('leaves caller setup untouched when quiescent is disabled', () => {
+    const result = normalizeInput({
+      cwd,
+      source,
+      quiescent: false,
+      browserSetup: 'window.__APP__ = 1;',
+    });
+
+    expect(result.quiescent).toBe(false);
+    expect(result.browserSetup).toBe('window.__APP__ = 1;');
+  });
+
+  it('omits browser setup entirely when quiescent is disabled and none is passed', () => {
+    const result = normalizeInput({ cwd, source, quiescent: false });
+
+    expect(result.browserSetup).toBeUndefined();
+  });
+
+  it('keeps symbol input raw so the prologue is composed exactly once', () => {
+    const withDefault = normalizeSymbolInput({
+      cwd,
+      modulePath: 'test/fixtures/symbol-targets.ts',
+      targets: [{ selector: 'computeEntry' }],
+    });
+    expect(withDefault.quiescent).toBe(true);
+    expect(withDefault.browserSetup).toBeUndefined();
+
+    const withSetup = normalizeSymbolInput({
+      cwd,
+      modulePath: 'test/fixtures/symbol-targets.ts',
+      targets: [{ selector: 'computeEntry' }],
+      quiescent: false,
+      browserSetup: 'window.__APP__ = 1;',
+    });
+    expect(withSetup.quiescent).toBe(false);
+    expect(withSetup.browserSetup).toBe('window.__APP__ = 1;');
+  });
+
+  it('composeBrowserSetup is idempotent about undefined input', () => {
+    expect(composeBrowserSetup(undefined, false)).toBeUndefined();
+    expect(composeBrowserSetup(undefined, true)).toBe(QUIESCENT_BROWSER_SETUP);
+  });
+
+  it('defaults the agent environment option to a quiescent run', () => {
+    const parsed = agentInspectionInputObjectSchema.parse({
+      target: { kind: 'module', path: 'src/index.ts' },
+    });
+    expect(parsed.environment.quiescent).toBe(true);
+
+    const explicit = agentInspectionInputObjectSchema.parse({
+      target: { kind: 'module', path: 'src/index.ts' },
+      environment: { quiescent: false },
+    });
+    expect(explicit.environment.quiescent).toBe(false);
   });
 });

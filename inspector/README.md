@@ -377,7 +377,9 @@ Fields:
 
 - `documentHtml`: assigned to `document.body.innerHTML` before import.
 - `browserSetup`: browser JavaScript executed before import with `root`,
-  `device`, `tgpu`, `d`, `std`, and `common` parameters.
+  `device`, `tgpu`, `d`, `std`, and `common` parameters. It runs *after* the
+  quiescent prologue, so it can deliberately restore any stub it needs back.
+- `quiescent`: defaults to `true`. See below.
 - `staticAssetRoutes`: serves files from local directories through the inspector
   Vite server.
 - `features`: WebGPU features to request from the adapter.
@@ -385,6 +387,27 @@ Fields:
 - `viteConfigPath`: optional project Vite config. Low-level calls resolve it
   relative to `cwd`; agent-facing project hints resolve relative paths from the
   target package first, then project/workspace roots.
+
+### Quiescent Runs
+
+Browser-oriented modules commonly start a `requestAnimationFrame` loop at import
+time. Under inspection that loop draws to a canvas and submits work while the
+inspector's per-target WebGPU validation scopes are open, which loses the device
+(`webgpu-device-lost`) and blocks *every* target of the module.
+
+So `quiescent` defaults to `true`: before the module is imported, the inspector
+stubs `requestAnimationFrame`, `cancelAnimationFrame`, `ResizeObserver`,
+`queue.submit`, and the compute/guarded-compute/render pipeline
+dispatch/draw/init methods. Synchronous resource construction still runs, and
+the inspector's own pipeline creation and validation are unaffected.
+
+Because no application frame executes, a passing target is **static validation
+evidence, not proof that the app renders**. Every quiescent run records this in
+the report ledger as `device-session:quiescent-run`.
+
+Set `quiescent: false` when the run must observe real frame or submit behaviour
+— for example when probe setup itself needs a pipeline to actually initialize on
+the device (`perlin2d.staticCache`, warm-up dispatches).
 
 ## Output
 

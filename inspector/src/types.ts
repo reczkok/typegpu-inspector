@@ -46,6 +46,8 @@ export type BrowserInspectRequest = Required<
   typegpuVersion?: string | undefined;
   documentHtml?: string | undefined;
   browserSetup?: string | undefined;
+  /** Whether `browserSetup` carries the quiescent prologue; recorded in the ledger. */
+  quiescent: boolean;
   /** In-page serialization budget for WGSL/code fields. */
   maxWgslBytes?: number | undefined;
 };

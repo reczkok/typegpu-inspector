@@ -1,4 +1,4 @@
-import tgpu from 'typegpu';
+import { tgpu } from 'typegpu';
 import * as common from 'typegpu/common';
 import * as d from 'typegpu/data';
 import * as std from 'typegpu/std';
@@ -94,6 +94,21 @@ async function inspectTypegpuModuleInBrowser(
 ): Promise<BrowserInspectResult> {
   const waitBudget = createBrowserWaitBudget(request.timeoutMs);
   const environmentLedger = installEnvironmentProviders();
+  if (request.quiescent) {
+    // A quiescent run never executes the application's frame loop, so a
+    // passing target is static validation evidence and must not be read as
+    // proof the app renders. Say so in the ledger the report carries.
+    environmentLedger.push({
+      tier: 'environment',
+      kind: 'device-session',
+      key: 'device-session:quiescent-run',
+      status: 'satisfied',
+      discoveredBy: 'shape',
+      provider: 'synthesis',
+      provenance:
+        'Quiescent run: animation frames, ResizeObserver, queue submits, and pipeline dispatch/draw were stubbed before import. Targets validated statically; no application frame was executed.',
+    });
+  }
 
   if (!navigator.gpu) {
     throw new Error('WebGPU is not supported by this browser.');

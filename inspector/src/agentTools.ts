@@ -275,6 +275,7 @@ function createCommonInspectionInput(
     autoBind: environment.autoBind,
     documentHtml: environment.documentHtml,
     browserSetup: environment.browserSetup,
+    quiescent: environment.quiescent,
     staticAssetRoutes: environment.staticAssetRoutes,
     reuseBrowser: true,
     dependencyResolution: context.dependencyResolution,

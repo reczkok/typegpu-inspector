@@ -1,12 +1,11 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { mkdir, open, readFile, unlink } from 'node:fs/promises';
 import { dirname, join, relative, resolve, isAbsolute } from 'node:path';
 import type { InspectionTarget } from './discovery.js';
 import { createInspectionDocumentHtml } from './documentFixture.js';
-import { QUIESCENT_EDITOR_BROWSER_SETUP } from './editorBrowserSetup.js';
 import type { InspectorOutput, InspectorSettings } from './protocol.js';
 
 export class RuntimeInspectorClient {
@@ -119,7 +118,9 @@ export class RuntimeInspectorClient {
               modulePath,
               settings.projectRoot ?? this.workspaceRoot,
             ),
-            browserSetup: QUIESCENT_EDITOR_BROWSER_SETUP,
+            // The inspector applies its quiescent prologue (rAF/submit/dispatch
+            // stubs) by default; passing it again would redeclare its locals.
+            quiescent: true,
           },
         },
       },
@@ -201,7 +202,7 @@ export class RuntimeInspectorClient {
       });
       const client = new Client({
         name: 'typegpu-zed-language-server',
-        version: '0.4.7',
+        version: __TYPEGPU_SERVER_VERSION__,
       });
       await client.connect(transport, { timeout: CONNECT_TIMEOUT_MS });
       if (this.generation !== generation) {
@@ -333,10 +334,12 @@ export async function resolveInspectorLaunch(
   };
 }
 
-// Keep in lockstep with the runtime inspector version released alongside
-// this server (both live in the typegpu-inspector monorepo).
-const FALLBACK_INSPECTOR_SPEC = 'typegpu-runtime-inspector-mcp@0.4.7';
-const FALLBACK_INSPECTOR_VERSION = '0.4.7';
+// Injected at build time from this package's own version: the monorepo
+// releases the server and the runtime inspector in lockstep, so one bump
+// moves both. See src/buildInfo.d.ts.
+const FALLBACK_INSPECTOR_VERSION = __TYPEGPU_INSPECTOR_VERSION__;
+const FALLBACK_INSPECTOR_SPEC =
+  `typegpu-runtime-inspector-mcp@${FALLBACK_INSPECTOR_VERSION}`;
 
 const runtimeInstallPromises = new Map<string, Promise<string>>();
 
@@ -395,9 +398,114 @@ async function installedRuntimeMatches(
   }
 }
 
+/** How the runtime install will shell out to npm, and where that came from. */
+export type NpmInvocation = {
+  command: string;
+  /** Leading arguments (the npm-cli.js path when npm is run through node). */
+  args: string[];
+  /** True only for Windows `.cmd` shims, which Node refuses to spawn directly. */
+  shell: boolean;
+  /** Human-readable provenance, quoted in install failure messages. */
+  source: string;
+};
+
+function pathEntries(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): string[] {
+  // Windows environment variable lookup is case-insensitive, but the object
+  // we are handed (a sanitized MCP launch env) is not.
+  const raw = env.PATH ?? env.Path ?? env.path ?? '';
+  return raw
+    .split(platform === 'win32' ? ';' : ':')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== '');
+}
+
+function isExecutableFile(candidate: string, platform: NodeJS.Platform): boolean {
+  try {
+    const stats = statSync(candidate);
+    if (!stats.isFile()) return false;
+    // Windows has no execute bit; the extension in the name is the signal.
+    return platform === 'win32' ? true : (stats.mode & 0o111) !== 0;
+  } catch {
+    return false;
+  }
+}
+
+function findOnPath(
+  names: string[],
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+): string | undefined {
+  for (const directory of pathEntries(env, platform)) {
+    for (const name of names) {
+      const candidate = join(directory, name);
+      if (isExecutableFile(candidate, platform)) return candidate;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Find npm without assuming it is on PATH. Editors frequently launch language
+ * servers from a GUI session whose PATH predates any Node version manager, so
+ * an `npm` that works in the user's terminal is simply absent here. When it
+ * is, npm is still reachable as the `npm-cli.js` that ships inside the Node
+ * installation, run through that same node binary.
+ */
+export function resolveNpmInvocation(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): NpmInvocation {
+  const searched: string[] = [];
+
+  const npmNames = platform === 'win32'
+    ? ['npm.cmd', 'npm.exe', 'npm']
+    : ['npm'];
+  const onPath = findOnPath(npmNames, env, platform);
+  if (onPath) {
+    return {
+      command: onPath,
+      args: [],
+      shell: platform === 'win32' && onPath.toLowerCase().endsWith('.cmd'),
+      source: `npm on PATH (${onPath})`,
+    };
+  }
+  searched.push(`${npmNames.join(' / ')} on PATH`);
+
+  const configuredNode = env.TYPEGPU_INSPECTOR_NODE;
+  const nodeNames = platform === 'win32' ? ['node.exe', 'node'] : ['node'];
+  const node = configuredNode && configuredNode.trim() !== ''
+    ? configuredNode
+    : findOnPath(nodeNames, env, platform);
+  if (node) {
+    // npm lives beside node in the installation prefix: `lib/node_modules`
+    // on macOS/Linux, `node_modules` directly next to node.exe on Windows.
+    const nodeDirectory = dirname(node);
+    const cli = platform === 'win32'
+      ? join(nodeDirectory, 'node_modules', 'npm', 'bin', 'npm-cli.js')
+      : resolve(nodeDirectory, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js');
+    if (existsSync(cli)) {
+      return {
+        command: node,
+        args: [cli],
+        shell: false,
+        source: `npm-cli.js beside ${node}`,
+      };
+    }
+    searched.push(cli);
+  } else {
+    searched.push(`${nodeNames.join(' / ')} on PATH or $TYPEGPU_INSPECTOR_NODE`);
+  }
+
+  throw new Error(
+    `Could not find npm to install ${FALLBACK_INSPECTOR_SPEC}. Searched: ${searched.join('; ')}. Run "TypeGPU Inspector: Run Environment Doctor" to see the environment this server was launched with, or set TYPEGPU_INSPECTOR_NODE to an absolute path to a Node.js binary whose installation includes npm.`,
+  );
+}
+
 async function runRuntimeInstall(runtimeDir: string): Promise<void> {
-  const command = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  const env = getDefaultEnvironment();
+  const npm = resolveNpmInvocation(env);
   const args = [
+    ...npm.args,
     'install',
     '--no-save',
     '--package-lock=false',
@@ -410,10 +518,11 @@ async function runRuntimeInstall(runtimeDir: string): Promise<void> {
     FALLBACK_INSPECTOR_SPEC,
   ];
   await new Promise<void>((resolveInstall, rejectInstall) => {
-    const child = spawn(command, args, {
+    const child = spawn(npm.command, args, {
       cwd: runtimeDir,
-      env: getDefaultEnvironment(),
+      env,
       stdio: ['ignore', 'pipe', 'pipe'],
+      ...(npm.shell ? { shell: true } : {}),
     });
     let tail = '';
     const collect = (chunk: unknown) => {
@@ -428,7 +537,7 @@ async function runRuntimeInstall(runtimeDir: string): Promise<void> {
       } else {
         rejectInstall(
           new Error(
-            `Could not install ${FALLBACK_INSPECTOR_SPEC} (npm exited ${code}).${tail ? `\n${tail}` : ''}`,
+            `Could not install ${FALLBACK_INSPECTOR_SPEC} using ${npm.source} (npm exited ${code}).${tail ? `\n${tail}` : ''}`,
           ),
         );
       }

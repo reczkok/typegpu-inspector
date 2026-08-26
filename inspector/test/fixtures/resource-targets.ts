@@ -1,5 +1,5 @@
 // @ts-nocheck
-import tgpu, { d, std } from 'typegpu';
+import { tgpu, d, std } from 'typegpu';
 
 const resourceRoot = await tgpu.init();
 
@@ -99,4 +99,32 @@ export const resourceSlot = tgpu.slot(7);
 export const resourceAccessor = tgpu.accessor(ResourceSettings, {
   filterDim: 3,
   blockDim: 126,
+});
+
+// TypeGPU 0.12 runtime resources: the root itself, the guarded compute
+// pipeline wrapper, and the command-encoder/pass/bundle-encoder family.
+export const inspectedRoot = resourceRoot;
+
+export const guardedPipeline = resourceRoot.createGuardedComputePipeline(() => {
+  'use gpu';
+});
+
+export const commandEncoder = resourceRoot.createCommandEncoder({
+  label: 'resource encoder',
+});
+
+export const computePass = commandEncoder.beginComputePass({
+  label: 'resource compute pass',
+});
+computePass.end();
+
+export const renderPass = commandEncoder.beginRenderPass({
+  label: 'resource render pass',
+  colorAttachments: [{ view: imageTexture }],
+});
+renderPass.end();
+
+export const renderBundleEncoder = resourceRoot.createRenderBundleEncoder({
+  label: 'resource bundle encoder',
+  colorFormats: ['rgba8unorm'],
 });

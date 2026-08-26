@@ -232,6 +232,7 @@ function preparedInput(
     strictNames: true,
     autoBind: true,
     reuseBrowser: true,
+    quiescent: true,
     diagnosticsOnly: false,
     sourceKind: 'inlineCode',
     modulePath: '/workspace/src/probe.ts',

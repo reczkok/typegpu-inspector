@@ -15,6 +15,7 @@ import {
   normalizeStaticAssetRoutes,
 } from './options.ts';
 import { createInlineModuleUrl } from './vite.ts';
+import { composeBrowserSetup, DEFAULT_QUIESCENT } from './quiescentSetup.ts';
 
 export type NormalizedInput = Required<
   Pick<
@@ -33,7 +34,9 @@ export type NormalizedInput = Required<
   inlineCode?: string | undefined;
   inlineSourcePath?: string | undefined;
   documentHtml?: string | undefined;
+  /** Effective setup handed to the page: the quiescent prologue plus any caller setup. */
   browserSetup?: string | undefined;
+  quiescent: boolean;
   sourceKind: 'modulePath' | 'inlineCode';
   viteConfigPath?: string | undefined;
   dependencyAliases: Record<string, string>;
@@ -56,6 +59,7 @@ export function normalizeInput(input: InspectTypegpuModuleInput): NormalizedInpu
     throw new Error("Pass source with kind 'modulePath', 'inlineCode', or 'inspectBody'.");
   }
 
+  const quiescent = input.quiescent ?? DEFAULT_QUIESCENT;
   const base = {
     cwd,
     exportName: input.exportName ?? 'inspect',
@@ -69,7 +73,8 @@ export function normalizeInput(input: InspectTypegpuModuleInput): NormalizedInpu
     reuseBrowser: input.reuseBrowser ?? false,
     diagnosticsOnly: input.diagnosticsOnly ?? false,
     documentHtml: input.documentHtml,
-    browserSetup: input.browserSetup,
+    quiescent,
+    browserSetup: composeBrowserSetup(input.browserSetup, quiescent),
     dependencyAliases: normalizeDependencyAliases(cwd, input.dependencyAliases ?? {}),
     fsAllow: (input.fsAllow ?? []).map((path) => resolve(cwd, path)),
     staticAssetRoutes: normalizeStaticAssetRoutes(cwd, input.staticAssetRoutes ?? []),

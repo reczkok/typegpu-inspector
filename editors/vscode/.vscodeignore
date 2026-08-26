@@ -2,6 +2,11 @@
 !dist/extension.js
 !dist/server.cjs
 !README.md
+!CHANGELOG.md
 !LICENSE
+!icon.png
 !package.json
 !syntaxes/**
+
+# Build-time tooling (icon generation) is never part of the shipped VSIX.
+scripts/**

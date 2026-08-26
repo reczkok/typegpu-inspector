@@ -1,5 +1,5 @@
 // @ts-nocheck
-import tgpu, { d, std } from 'typegpu';
+import { tgpu, d, std } from 'typegpu';
 
 export const lightingSlot = tgpu.slot();
 

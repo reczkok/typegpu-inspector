@@ -1,0 +1,3 @@
+# Copied from the repository root at build time so the Marketplace can render
+# it from the package root; the root file is the single source of truth.
+CHANGELOG.md

@@ -2,10 +2,20 @@
   "name": "typegpu-inspector",
   "displayName": "TypeGPU Inspector",
   "publisher": "reczkok",
-  "version": "0.4.7",
+  "version": "0.5.0",
   "private": true,
   "description": "Deep TypeGPU inspection: exact pipelines, resources, memory layouts, generated WGSL, bindings, and synthesized probes.",
   "license": "MIT",
+  "icon": "icon.png",
+  "homepage": "https://github.com/reczkok/typegpu-inspector#readme",
+  "bugs": {
+    "url": "https://github.com/reczkok/typegpu-inspector/issues"
+  },
+  "pricing": "Free",
+  "galleryBanner": {
+    "color": "#171A21",
+    "theme": "dark"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/reczkok/typegpu-inspector.git",
@@ -26,7 +36,18 @@
     "shader",
     "gpu"
   ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "TypeGPU Inspector executes the workspace's TypeGPU modules in a headless browser."
+    },
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "Inspection bundles and runs files from disk, which a virtual file system cannot provide."
+    }
+  },
   "activationEvents": [
+    "workspaceContains:**/node_modules/typegpu/package.json",
     "onLanguage:typescript",
     "onLanguage:typescriptreact",
     "onLanguage:javascript",
@@ -268,7 +289,7 @@
     ]
   },
   "scripts": {
-    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && esbuild src/extension.ts --bundle --platform=node --format=cjs --target=node20 --external:vscode --outfile=dist/extension.js && node -e \"require('node:fs').copyFileSync(require.resolve('typegpu-inspector-language-server/dist/server.cjs'), 'dist/server.cjs')\"",
+    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && node -e \"require('node:fs').copyFileSync('../../CHANGELOG.md', 'CHANGELOG.md')\" && esbuild src/extension.ts --bundle --platform=node --format=cjs --target=node20 --external:vscode --define:__TYPEGPU_INSPECTOR_VERSION__=$(node -p \"JSON.stringify(require('./package.json').version)\") --outfile=dist/extension.js && node -e \"require('node:fs').copyFileSync(require.resolve('typegpu-inspector-language-server/dist/server.cjs'), 'dist/server.cjs')\"",
     "check": "tsc --noEmit",
     "package": "pnpm build && vsce package --no-dependencies"
   },

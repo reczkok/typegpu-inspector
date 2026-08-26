@@ -240,6 +240,7 @@ async function runInspection(
       autoBind: normalized.autoBind,
       documentHtml: normalized.documentHtml,
       browserSetup: normalized.browserSetup,
+      quiescent: normalized.quiescent,
       maxWgslBytes: input.maxWgslBytes,
       typegpuVersion: await withDeadline(
         readPackageVersionFrom(normalized.cwd, 'typegpu', normalized.dependencyResolution),
@@ -378,6 +379,7 @@ export async function inspectTypegpuSymbols(
     reuseBrowser: normalized.reuseBrowser,
     documentHtml: normalized.documentHtml,
     browserSetup: normalized.browserSetup,
+    quiescent: normalized.quiescent,
     dependencyAliases: normalized.dependencyAliases,
     fsAllow: normalized.fsAllow,
     staticAssetRoutes: normalized.staticAssetRoutes,

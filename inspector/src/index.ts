@@ -60,7 +60,7 @@ export const READ_ONLY_TOOL_ANNOTATIONS = {
 export const INSPECT_TYPEGPU_TOOL_CONFIG = {
   title: 'Inspect TypeGPU',
   description:
-    "Agent-first TypeGPU inspection. Use this for probes, inspection modules, and exported TypeGPU symbols. It infers project/workspace roots, local TypeGPU dependencies, and Vite context; add project.root, project.dependencyAliases, target.virtualPath, or environment fields only when diagnostics ask for them. Returns top-level summary, targets, dependencySummary, warnings, and nextActions.",
+    "Agent-first TypeGPU inspection. Use this for probes, inspection modules, and exported TypeGPU symbols. It infers project/workspace roots, local TypeGPU dependencies, and Vite context; add project.root, project.dependencyAliases, target.virtualPath, or environment fields only when diagnostics ask for them. Runs modules quiescently by default (frame loops, queue submits, and pipeline dispatch/draw stubbed), so results are static validation evidence rather than proof the app renders; set environment.quiescent=false to observe real frame/submit behaviour. Returns top-level summary, targets, dependencySummary, warnings, and nextActions.",
   inputSchema: agentInspectionInputSchema,
   outputSchema: agentInspectionOutputSchema,
   annotations: INSPECTION_TOOL_ANNOTATIONS,

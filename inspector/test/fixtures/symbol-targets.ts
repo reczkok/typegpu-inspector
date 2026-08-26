@@ -1,5 +1,5 @@
 // @ts-nocheck
-import tgpu, { d } from 'typegpu';
+import { tgpu, d } from 'typegpu';
 import { fullScreenTriangle } from 'typegpu/common';
 
 const vertices = tgpu.const(d.arrayOf(d.vec2f, 3), [

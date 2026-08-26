@@ -1,10 +1,11 @@
 {
   "name": "typegpu-inspector",
-  "version": "0.4.7",
+  "version": "0.5.0",
   "private": true,
   "packageManager": "pnpm@10.34.4",
   "scripts": {
     "setup": "pnpm install",
+    "bump": "node scripts/bump-version.mjs",
     "audit:examples": "pnpm --dir inspector exec tsx ../scripts/audit-examples.ts",
     "audit:runtime": "pnpm --dir inspector exec tsx ../scripts/runtime-corpus.mts",
     "audit:runtime:snapshot": "pnpm --dir inspector exec tsx ../scripts/runtime-corpus.mts --snapshot",

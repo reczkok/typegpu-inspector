@@ -1,5 +1,5 @@
 // @ts-nocheck
-import tgpu from 'typegpu';
+import { tgpu } from 'typegpu';
 
 const applicationRoot = await tgpu.init();
 const applicationCompute = tgpu.computeFn({ workgroupSize: [1] })(() => {

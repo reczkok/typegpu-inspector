@@ -14,7 +14,6 @@ import {
   getInspectorSessionCount,
 } from '../src/inspect/session.ts';
 import { discoverTypeGpuModule } from '../../server/src/discovery.ts';
-import { QUIESCENT_EDITOR_BROWSER_SETUP } from '../../server/src/editorBrowserSetup.ts';
 
 const maybeIt = process.env.TYPEGPU_MCP_RUN_BROWSER_TESTS === '1' ? it : it.skip;
 const cwd = resolve(import.meta.dirname, '..');
@@ -228,7 +227,7 @@ describe('browser harness', () => {
     const helperPath = join(tempDir, 'helper.ts');
     const probePath = join(tempDir, 'probe.ts');
     const helperSource = (value: number) => `
-      import tgpu, { d } from 'typegpu';
+      import { tgpu, d } from 'typegpu';
       export const helper = tgpu.fn([], d.f32)(() => {
         'use gpu';
         return d.f32(${value});
@@ -659,7 +658,7 @@ describe('browser harness', () => {
         kind: 'inlineCode',
         inlineSourcePath: 'test/fixtures/package-root-alias-probe.ts',
         inlineCode: `
-          import tgpu from 'typegpu';
+          import { tgpu } from 'typegpu';
           import { vec4f } from 'typegpu/data';
           import { cos } from 'typegpu/std';
           import { fullScreenTriangle } from 'typegpu/common';
@@ -861,13 +860,93 @@ describe('browser harness', () => {
         },
       ],
       documentHtml: '<main></main>',
-      browserSetup: QUIESCENT_EDITOR_BROWSER_SETUP,
       timeoutMs: 30_000,
     });
 
     expect(report.ok, JSON.stringify(report.targets, null, 2)).toBe(true);
     expect(report.pageErrors).toEqual([]);
     expect(report.targets[0]?.wgsl).toContain('applicationCompute');
+    expect(report.ledger?.map((entry) => entry.key)).toContain(
+      'device-session:quiescent-run',
+    );
+  });
+
+  maybeIt('lets an explicit browserSetup run after the quiescent prologue', async () => {
+    const report = await inspectTypegpuSymbols({
+      cwd: resolve(import.meta.dirname, '..'),
+      modulePath: 'test/fixtures/quiescent-import.ts',
+      targets: [
+        {
+          label: 'quiescent application pipeline',
+          kind: 'compute-pipeline',
+          selector: 'applicationPipeline',
+        },
+      ],
+      documentHtml: '<main></main>',
+      browserSetup: 'window.__TYPEGPU_MCP_QUIESCENT_PROBE = typeof requestAnimationFrame;',
+      timeoutMs: 30_000,
+    });
+
+    expect(report.ok, JSON.stringify(report.targets, null, 2)).toBe(true);
+    expect(report.pageErrors).toEqual([]);
+  });
+
+  maybeIt('inspects TypeGPU 0.12 root, guarded pipeline, encoder, and pass resources', async () => {
+    const names = [
+      'inspectedRoot',
+      'guardedPipeline',
+      'commandEncoder',
+      'computePass',
+      'renderPass',
+      'renderBundleEncoder',
+    ];
+    const report = await inspectTypegpuSymbols({
+      cwd: resolve(import.meta.dirname, '..'),
+      modulePath: 'test/fixtures/resource-targets.ts',
+      targets: names.map((selector) => ({
+        label: selector,
+        selector,
+        kind: 'resource' as const,
+      })),
+      timeoutMs: 30_000,
+    });
+
+    expect(report.ok, JSON.stringify(report.targets, null, 2)).toBe(true);
+    const byLabel = Object.fromEntries(
+      report.targets.map((target) => [target.label, target.resource]),
+    );
+
+    expect(byLabel.inspectedRoot).toMatchObject({ resourceType: 'root' });
+    expect(byLabel.inspectedRoot?.properties?.nameRegistry).toBe('strict');
+
+    expect(byLabel.guardedPipeline).toMatchObject({
+      resourceType: 'guarded-compute-pipeline',
+      itemNames: ['pipeline', 'sizeUniform'],
+    });
+    expect(byLabel.guardedPipeline?.properties?.pipelineResourceType)
+      .toBe('compute-pipeline');
+    expect(byLabel.guardedPipeline?.items?.[1]?.schema?.type).toBe('vec3u');
+
+    expect(byLabel.commandEncoder).toMatchObject({
+      resourceType: 'command-encoder',
+      properties: { label: 'resource encoder', adopted: false },
+    });
+
+    expect(byLabel.computePass).toMatchObject({
+      resourceType: 'compute-pass',
+      properties: { label: 'resource compute pass', hasOwningEncoder: true },
+    });
+    expect(byLabel.computePass?.properties).not.toHaveProperty('vertexBufferCount');
+
+    expect(byLabel.renderPass).toMatchObject({
+      resourceType: 'render-pass',
+      properties: { label: 'resource render pass', vertexBufferCount: 0 },
+    });
+
+    expect(byLabel.renderBundleEncoder).toMatchObject({
+      resourceType: 'render-bundle-encoder',
+      properties: { label: 'resource bundle encoder' },
+    });
   });
 
   maybeIt('inspects schemas, buffers, textures, views, samplers, layouts, variables, and bind groups', async () => {
@@ -1527,7 +1606,7 @@ describe('browser harness', () => {
       await writeFile(
         join(tempDir, 'node_modules/@typegpu/noise/src/index.ts'),
         `
-          import tgpu, { d } from 'typegpu';
+          import { tgpu, d } from 'typegpu';
           import { cos, dot, fract } from 'typegpu/std';
 
           const sampleShell = tgpu.fn([], d.f32);
@@ -1566,7 +1645,7 @@ describe('browser harness', () => {
       await writeFile(
         join(tempDir, 'target.ts'),
         `
-          import tgpu, { d } from 'typegpu';
+          import { tgpu, d } from 'typegpu';
           import { randf } from '@typegpu/noise';
 
           const layout = tgpu.bindGroupLayout({

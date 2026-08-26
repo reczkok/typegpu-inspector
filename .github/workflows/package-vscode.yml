@@ -1,0 +1,61 @@
+name: Package VS Code extension
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Package VS Code extension
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # corepack must run before setup-node@v5: its default package-manager
+      # cache probes for pnpm during node setup.
+      - name: Enable pnpm
+        run: corepack enable
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      - name: Verify release tag matches package version
+        run: |
+          PACKAGE_VERSION="$(node -p "require('./editors/vscode/package.json').version")"
+          RELEASE_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$PACKAGE_VERSION" != "$RELEASE_VERSION" ]; then
+            echo "Release tag ${GITHUB_REF_NAME} does not match editors/vscode/package.json version ${PACKAGE_VERSION}."
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm --dir server check && pnpm --dir editors/vscode check
+
+      - name: Build language server
+        run: pnpm --dir server build
+
+      - name: Build extension
+        run: pnpm --dir editors/vscode build
+
+      # Deliberately package only. Marketplace publishing stays a manual step
+      # so a mistagged commit cannot ship to users.
+      - name: Package VSIX
+        working-directory: editors/vscode
+        run: pnpm exec vsce package --no-dependencies -o "typegpu-inspector-${GITHUB_REF_NAME#v}.vsix"
+
+      - name: Upload VSIX
+        uses: actions/upload-artifact@v4
+        with:
+          name: typegpu-inspector-vsix
+          path: editors/vscode/*.vsix
+          if-no-files-found: error

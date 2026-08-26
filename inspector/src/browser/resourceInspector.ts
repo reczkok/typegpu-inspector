@@ -206,6 +206,77 @@ function inspectResourceValueAtDepth(
       available: readBoolean(value, 'available'),
       destroyed: readBoolean(value, 'destroyed'),
     });
+  } else if (resourceType === 'root') {
+    // TypeGPU 0.12 exposes the root itself as an inspectable resource. Its
+    // device is a raw GPUDevice, so only its label and feature set are read.
+    const device = readProperty(value, 'device');
+    report.properties = compactRecord({
+      label: readString(soul, 'label'),
+      nameRegistry: readString(value, 'nameRegistrySetting') ??
+        readString(soul, 'nameRegistrySetting'),
+      minify: readBoolean(soul, 'minify'),
+      deviceLabel: readString(device, 'label'),
+      deviceFeatures: readIterableStrings(readProperty(device, 'features')),
+      logOptions: sanitize(readProperty(soul, 'logOptions')),
+    });
+  } else if (resourceType === 'guarded-compute-pipeline') {
+    // A guarded pipeline is a thin wrapper: the interesting parts are the
+    // compute pipeline it dispatches and the vec3u uniform carrying the
+    // thread count the generated bounds check compares against.
+    const pipeline = readProperty(value, 'pipeline') ?? readProperty(soul, 'pipeline');
+    const sizeUniform = readProperty(value, 'sizeUniform') ??
+      readProperty(soul, 'sizeUniform');
+    report.properties = compactRecord({
+      label: readString(soul, 'label'),
+      workgroupSize: sanitize(readProperty(soul, 'workgroupSize')),
+      pipelineResourceType: readString(pipeline, 'resourceType'),
+    });
+    const nested: Array<[string, unknown]> = [];
+    if (pipeline !== undefined) nested.push(['pipeline', pipeline]);
+    if (sizeUniform !== undefined) nested.push(['sizeUniform', sizeUniform]);
+    if (nested.length > 0 && depth < 6) {
+      const nextAncestors = new Set(ancestors).add(value as object);
+      report.itemNames = nested.map(([name]) => name);
+      report.items = nested.map(([, item]) =>
+        inspectResourceValueAtDepth(item, depth + 1, nextAncestors)
+      );
+    }
+  } else if (resourceType === 'command-encoder') {
+    // Encoders keep everything behind $internal; `adopted` distinguishes an
+    // encoder TypeGPU created from one wrapped around a caller's raw encoder.
+    const internal = readPrivateRecord(value, '$internal');
+    report.properties = compactRecord({
+      label: readString(readProperty(internal, 'rawEncoder'), 'label'),
+      adopted: readBoolean(internal, 'adopted'),
+      pendingBeforeFinish: readCollectionSize(readProperty(internal, 'beforeFinish')),
+      pendingAfterSubmit: readCollectionSize(readProperty(internal, 'afterSubmit')),
+    });
+  } else if (
+    resourceType === 'render-pass' ||
+    resourceType === 'compute-pass' ||
+    resourceType === 'render-bundle-encoder'
+  ) {
+    // Passes and bundle encoders share one draw-state shape; the render-only
+    // fields are simply absent on a compute pass and compact away.
+    const internal = readPrivateRecord(value, '$internal');
+    const state = readRecord(internal, 'state');
+    const indexBuffer = readRecord(state, 'indexBuffer');
+    report.properties = compactRecord({
+      label: readString(readProperty(internal, 'rawPass'), 'label'),
+      hasOwningEncoder: readProperty(internal, 'owner') !== undefined,
+      // Raw access through root.unwrap(pass) lets state change invisibly, so
+      // the recorded draw state below is only trustworthy while this is false.
+      rawAccessed: readBoolean(state, 'rawAccessed'),
+      stateVersion: readNumber(state, 'version'),
+      boundGroupCount: readCollectionSize(readProperty(state, 'bindGroups')),
+      currentPipelineResourceType: readString(
+        readProperty(state, 'currentPipeline'),
+        'resourceType',
+      ),
+      vertexBufferCount: readCollectionSize(readProperty(state, 'vertexBuffers')),
+      indexFormat: readString(indexBuffer, 'indexFormat'),
+      stencilReference: readNumber(state, 'stencilReference'),
+    });
   } else {
     report.properties = compactRecord({
       runtimeType: describeRuntimeType(value),
@@ -639,6 +710,24 @@ function readProperty(value: unknown, key: string): unknown {
 function readString(value: unknown, key: string): string | undefined {
   const property = readProperty(value, key);
   return typeof property === 'string' ? property : undefined;
+}
+
+/** Size of a Map/Set held in TypeGPU private state, without exposing its contents. */
+function readCollectionSize(value: unknown): number | undefined {
+  return readNumber(value, 'size');
+}
+
+/** Bounded, sorted projection of a set-like such as `GPUDevice.features`. */
+function readIterableStrings(value: unknown, limit = 64): string[] | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  try {
+    return [...(value as Iterable<unknown>)]
+      .filter((entry): entry is string => typeof entry === 'string')
+      .sort()
+      .slice(0, limit);
+  } catch {
+    return undefined;
+  }
 }
 
 function readNumber(value: unknown, key: string): number | undefined {

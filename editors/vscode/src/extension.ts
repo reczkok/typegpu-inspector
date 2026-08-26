@@ -2,13 +2,17 @@ import * as path from 'node:path';
 import {
   ConfigurationTarget,
   StatusBarAlignment,
+  Uri,
   commands,
+  env,
   window,
   workspace,
   type ExtensionContext,
   type StatusBarItem,
+  type TextDocument,
 } from 'vscode';
 import {
+  DidChangeConfigurationNotification,
   LanguageClient,
   TransportKind,
   type LanguageClientOptions,
@@ -16,6 +20,20 @@ import {
 } from 'vscode-languageclient/node';
 
 let client: LanguageClient | undefined;
+/** Set while `startClient` is in flight so concurrent triggers do not race. */
+let clientStarting: Promise<void> | undefined;
+let statusItem: StatusBarItem | undefined;
+
+/**
+ * Set when the user answers "Not now" to the runtime notice. It forces
+ * `inspectOn: off` for the window's lifetime without writing user settings —
+ * declining once must not silently reconfigure the editor.
+ */
+let runtimeDeclinedForSession = false;
+
+const RUNTIME_CONSENT_KEY = 'typegpuInspector.runtimeConsent';
+const RUNTIME_NOTICE_URL =
+  'https://github.com/reczkok/typegpu-inspector#what-it-downloads-and-runs';
 
 type InspectionStatus = {
   state: 'inspecting' | 'done' | 'failed' | 'idle';
@@ -63,6 +81,20 @@ function renderStatus(item: StatusBarItem, status: InspectionStatus): void {
   }
 }
 
+function renderRestrictedStatus(item: StatusBarItem): void {
+  item.text = '$(shield) TypeGPU restricted';
+  item.tooltip =
+    'Restricted Mode: TypeGPU Inspector is not running. It executes this workspace\'s TypeGPU modules in a headless browser, so it stays off until you trust the folder.';
+  item.command = 'workbench.trust.manage';
+}
+
+function renderWaitingStatus(item: StatusBarItem): void {
+  item.text = '$(beaker) TypeGPU';
+  item.tooltip =
+    'Waiting for a file that imports typegpu. The language server starts on the first one.';
+  item.command = 'typegpuInspector.statusMenu';
+}
+
 const SETTING_KEYS = [
   'inspectOn',
   'warmUpOnOpen',
@@ -103,7 +135,154 @@ function initializationOptions(): Record<string, unknown> {
       options[key] = value;
     }
   }
+  if (runtimeDeclinedForSession) {
+    // `off` also suppresses warm-up on the server side, so nothing is
+    // downloaded and no project code is executed this session.
+    options.inspectOn = 'off';
+  }
   return options;
+}
+
+const TYPEGPU_LANGUAGES = new Set([
+  'typescript',
+  'typescriptreact',
+  'javascript',
+  'javascriptreact',
+]);
+
+/**
+ * Cheap textual probe for a TypeGPU import. The language server does the real
+ * discovery; this only decides whether it is worth spawning at all, so that
+ * unrelated TypeScript projects never load the ~10 MB server bundle.
+ */
+const TYPEGPU_IMPORT_PATTERN =
+  /(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*)['"](?:typegpu|@typegpu\/[^'"]+)(?:\/[^'"]*)?['"]/;
+
+function importsTypeGpu(document: TextDocument): boolean {
+  if (document.uri.scheme !== 'file') return false;
+  if (!TYPEGPU_LANGUAGES.has(document.languageId)) return false;
+  return TYPEGPU_IMPORT_PATTERN.test(document.getText());
+}
+
+/**
+ * The runtime notice, shown once per installation before anything is
+ * downloaded or executed. Modal on purpose: the extension is about to fetch
+ * ~150 MB and run the user's own module code, which is not a toast-sized fact.
+ */
+async function ensureRuntimeConsent(context: ExtensionContext): Promise<boolean> {
+  if (runtimeDeclinedForSession) return false;
+  if (context.globalState.get<boolean>(RUNTIME_CONSENT_KEY) === true) return true;
+
+  for (;;) {
+    const picked = await window.showInformationMessage(
+      'TypeGPU Inspector runs your shaders for real',
+      {
+        modal: true,
+        detail: [
+          'To report exact pipelines, layouts, and generated WGSL, this extension:',
+          '',
+          `• downloads the typegpu-runtime-inspector-mcp package and a Playwright Chromium (~150 MB) into ${context.globalStorageUri.fsPath};`,
+          '• executes this project\'s top-level TypeGPU module code inside that headless browser whenever you save or hover.',
+          '',
+          'Nothing is sent anywhere and no telemetry is collected. You can delete the download at any time.',
+        ].join('\n'),
+      },
+      'Continue',
+      'Learn more',
+      'Not now',
+    );
+    if (picked === 'Learn more') {
+      await env.openExternal(Uri.parse(RUNTIME_NOTICE_URL));
+      continue;
+    }
+    if (picked === 'Continue') {
+      await context.globalState.update(RUNTIME_CONSENT_KEY, true);
+      return true;
+    }
+    // "Not now" and dialog dismissal are the same answer.
+    runtimeDeclinedForSession = true;
+    return false;
+  }
+}
+
+function createClient(context: ExtensionContext): LanguageClient {
+  const module = serverModule(context);
+  const serverEnv = {
+    ...process.env,
+    TYPEGPU_INSPECTOR_RUNTIME_DIR: path.join(
+      context.globalStorageUri.fsPath,
+      'runtime',
+    ),
+  };
+  const serverOptions: ServerOptions = {
+    run: { module, transport: TransportKind.stdio, options: { env: serverEnv } },
+    debug: { module, transport: TransportKind.stdio, options: { env: serverEnv } },
+  };
+  const clientOptions: LanguageClientOptions = {
+    documentSelector: [
+      { scheme: 'file', language: 'typescript' },
+      { scheme: 'file', language: 'typescriptreact' },
+      { scheme: 'file', language: 'javascript' },
+      { scheme: 'file', language: 'javascriptreact' },
+    ],
+    initializationOptions: initializationOptions(),
+  };
+  return new LanguageClient(
+    'typegpuInspector',
+    'TypeGPU Inspector',
+    serverOptions,
+    clientOptions,
+  );
+}
+
+async function startClient(context: ExtensionContext): Promise<void> {
+  if (client) return;
+  if (clientStarting) return clientStarting;
+  clientStarting = (async () => {
+    const started = createClient(context);
+    await started.start();
+    client = started;
+    started.onNotification(
+      'typegpu/inspectionStatus',
+      (payload: InspectionStatus) => {
+        if (statusItem) renderStatus(statusItem, payload);
+        if (payload.state === 'failed') {
+          void notifyInspectionFailure(payload);
+        }
+      },
+    );
+    if (statusItem) {
+      statusItem.command = 'typegpuInspector.statusMenu';
+      renderStatus(statusItem, { state: 'idle', uri: '' });
+    }
+  })();
+  try {
+    await clientStarting;
+  } finally {
+    clientStarting = undefined;
+  }
+}
+
+/**
+ * Start the server the first time a TypeGPU document shows up, and only after
+ * the runtime notice has been answered.
+ */
+async function considerDocument(
+  context: ExtensionContext,
+  document: TextDocument,
+): Promise<void> {
+  if (client || clientStarting) return;
+  if (!workspace.isTrusted) return;
+  if (!importsTypeGpu(document)) return;
+  await ensureRuntimeConsent(context);
+  await startClient(context);
+}
+
+async function considerOpenDocuments(context: ExtensionContext): Promise<void> {
+  for (const document of workspace.textDocuments) {
+    await considerDocument(context, document);
+    if (client || clientStarting) return;
+  }
 }
 
 let lastNotifiedFailure: string | undefined;
@@ -144,64 +323,34 @@ async function notifyInspectionFailure(status: InspectionStatus): Promise<void> 
 }
 
 export async function activate(context: ExtensionContext): Promise<void> {
-  const module = serverModule(context);
-  const serverEnv = {
-    ...process.env,
-    TYPEGPU_INSPECTOR_RUNTIME_DIR: path.join(
-      context.globalStorageUri.fsPath,
-      'runtime',
-    ),
-  };
-  const serverOptions: ServerOptions = {
-    run: { module, transport: TransportKind.stdio, options: { env: serverEnv } },
-    debug: { module, transport: TransportKind.stdio, options: { env: serverEnv } },
-  };
-  const clientOptions: LanguageClientOptions = {
-    documentSelector: [
-      { scheme: 'file', language: 'typescript' },
-      { scheme: 'file', language: 'typescriptreact' },
-      { scheme: 'file', language: 'javascript' },
-      { scheme: 'file', language: 'javascriptreact' },
-    ],
-    initializationOptions: initializationOptions(),
-    synchronize: { configurationSection: 'typegpuInspector' },
-  };
-
-  client = new LanguageClient(
-    'typegpuInspector',
-    'TypeGPU Inspector',
-    serverOptions,
-    clientOptions,
-  );
-  await client.start();
-
   const status = window.createStatusBarItem(StatusBarAlignment.Left, 50);
+  statusItem = status;
   status.name = 'TypeGPU Inspector';
   status.command = 'typegpuInspector.statusMenu';
-  renderStatus(status, { state: 'idle', uri: '' });
+  renderWaitingStatus(status);
   status.show();
-  client.onNotification(
-    'typegpu/inspectionStatus',
-    (payload: InspectionStatus) => {
-      renderStatus(status, payload);
-      if (payload.state === 'failed') {
-        void notifyInspectionFailure(payload);
-      }
-    },
-  );
 
   context.subscriptions.push(
     status,
     commands.registerCommand('typegpuInspector.showOutput', () => {
-      client?.outputChannel.show(true);
+      if (!client) {
+        void window.showInformationMessage(
+          'TypeGPU Inspector has not started yet — open a file that imports typegpu.',
+        );
+        return;
+      }
+      client.outputChannel.show(true);
     }),
     commands.registerCommand('typegpuInspector.doctor', () => {
       const terminal = window.createTerminal('TypeGPU Inspector doctor');
       terminal.show();
       // Keep this spec identical to the server's FALLBACK_INSPECTOR_SPEC:
       // npx caches per spec string, so probing @latest would exercise a
-      // different install than the one inspections actually run.
-      terminal.sendText('npx -y typegpu-runtime-inspector-mcp@0.4.7 doctor');
+      // different install than the one inspections actually run. Both are
+      // injected from their package versions, which move in lockstep.
+      terminal.sendText(
+        `npx -y typegpu-runtime-inspector-mcp@${__TYPEGPU_INSPECTOR_VERSION__} doctor`,
+      );
     }),
     commands.registerCommand('typegpuInspector.selectVerbosity', async () => {
       const config = workspace.getConfiguration('typegpuInspector');
@@ -258,19 +407,58 @@ export async function activate(context: ExtensionContext): Promise<void> {
       if (picked) await commands.executeCommand(picked.action);
     }),
     commands.registerCommand('typegpuInspector.restart', async () => {
-      await client?.restart();
+      if (client) {
+        await client.restart();
+        return;
+      }
+      // Restarting before the first TypeGPU document is the user asking for
+      // the server explicitly; honour that and start it.
+      if (!workspace.isTrusted) {
+        void window.showWarningMessage(
+          'TypeGPU Inspector stays off in Restricted Mode because it executes workspace code. Trust this folder to enable it.',
+        );
+        return;
+      }
+      await ensureRuntimeConsent(context);
+      await startClient(context);
+    }),
+    workspace.onDidOpenTextDocument((document) => {
+      void considerDocument(context, document);
+    }),
+    workspace.onDidSaveTextDocument((document) => {
+      void considerDocument(context, document);
+    }),
+    workspace.onDidGrantWorkspaceTrust(() => {
+      renderWaitingStatus(status);
+      void considerOpenDocuments(context);
     }),
     workspace.onDidChangeConfiguration(async (event) => {
+      if (!event.affectsConfiguration('typegpuInspector')) return;
       // serverPath changes the spawned process itself, which only a full
       // restart can apply; everything else flows through didChangeConfiguration.
       if (event.affectsConfiguration('typegpuInspector.serverPath')) {
         await client?.restart();
+        return;
       }
+      // Sent by hand rather than via `synchronize.configurationSection` so the
+      // session-level `inspectOn` override survives unrelated setting changes.
+      await client?.sendNotification(DidChangeConfigurationNotification.type, {
+        settings: initializationOptions(),
+      });
     }),
   );
+
+  if (!workspace.isTrusted) {
+    // Restricted Mode: the server executes workspace code, so it must not run.
+    renderRestrictedStatus(status);
+    return;
+  }
+
+  await considerOpenDocuments(context);
 }
 
 export async function deactivate(): Promise<void> {
   await client?.stop();
   client = undefined;
+  statusItem = undefined;
 }
