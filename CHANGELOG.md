@@ -7,7 +7,7 @@ The four packages are versioned and released in lockstep.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.5.0] - Unreleased (YYYY-MM-DD)
+## [0.5.0] - 2026-08-26
 
 First public store release: VS Code Marketplace and the Zed extension registry.
 
