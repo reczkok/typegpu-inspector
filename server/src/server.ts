@@ -4,6 +4,8 @@ import { fileURLToPath } from 'node:url';
 import {
   createConnection,
   DidChangeConfigurationNotification,
+  DidChangeWatchedFilesNotification,
+  FileChangeType,
   ProposedFeatures,
   TextDocumentSyncKind,
   type Diagnostic,
@@ -81,6 +83,7 @@ const inspectionRequests = new Map<string, Promise<DocumentInspection | undefine
 let workspaceRoot = process.cwd();
 let settings: InspectorSettings = { ...defaultSettings };
 let presentation: 'zed' | 'vscode' = 'zed';
+let watchedFilesSupported = false;
 let defaultHoverColumns = WIDE_MAX_COLUMNS;
 let inspector = new RuntimeInspectorClient(workspaceRoot, () => settings);
 
@@ -90,6 +93,8 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
     presentation = 'vscode';
   }
   defaultHoverColumns = defaultMaxColumnsForClient(params.clientInfo?.name);
+  watchedFilesSupported =
+    params.capabilities.workspace?.didChangeWatchedFiles?.dynamicRegistration === true;
   settings = applySettings(params.initializationOptions);
   inspector = new RuntimeInspectorClient(workspaceRoot, () => settings);
   return {
@@ -123,6 +128,15 @@ connection.onInitialized(() => {
     DidChangeConfigurationNotification.type,
     undefined,
   );
+  // The runtime executes what is on disk, so a file written by a tool or an
+  // agent is as inspectable as an editor save.
+  if (watchedFilesSupported) {
+    connection.client.register(DidChangeWatchedFilesNotification.type, {
+      watchers: [{ globPattern: '**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs}' }],
+    }).catch((error: unknown) => {
+      connection.console.warn(`File watching unavailable: ${errorMessage(error)}`);
+    });
+  }
   connection.console.info(
     `TypeGPU Inspector ready (${settings.inspectOn}, runtime ${settings.inspectorPackage})`,
   );
@@ -202,6 +216,9 @@ documents.onDidOpen(({ document }) => {
 documents.onDidChangeContent(({ document }) => {
   scheduler.cancelDocument(document.uri);
   progress.clearDocument(document.uri);
+  // An editor reloading an externally written file arrives here; let the
+  // disk change settle on the new version before inspecting it.
+  if (externalSaves.has(document.uri)) scheduleExternalSave(document.uri);
   // Discovery is deferred until a consumer (hover/inlay/save) needs it, so
   // typing does not re-parse the module on every keystroke.
   if (states.has(document.uri)) {
@@ -210,6 +227,9 @@ documents.onDidChangeContent(({ document }) => {
 });
 
 documents.onDidClose(({ document }) => {
+  const pending = externalSaves.get(document.uri);
+  if (pending) clearTimeout(pending);
+  externalSaves.delete(document.uri);
   scheduler.cancelDocument(document.uri);
   progress.clearDocument(document.uri);
   states.delete(document.uri);
@@ -223,6 +243,10 @@ documents.onDidClose(({ document }) => {
 });
 
 documents.onDidSave(({ document }) => {
+  inspectSavedDocument(document);
+});
+
+function inspectSavedDocument(document: TextDocument): void {
   let state = ensureFreshState(document);
   if (state) {
     state = { ...state, savedVersion: document.version };
@@ -235,7 +259,38 @@ documents.onDidSave(({ document }) => {
       'background',
     );
   }
+}
+
+const EXTERNAL_SAVE_SETTLE_MS = 400;
+const externalSaves = new Map<string, NodeJS.Timeout>();
+
+connection.onDidChangeWatchedFiles(({ changes }) => {
+  for (const change of changes) {
+    if (change.type === FileChangeType.Deleted) continue;
+    const document = openDocumentForFile(change.uri);
+    if (document) scheduleExternalSave(document.uri);
+  }
 });
+
+/** Watcher URIs may be encoded differently from the editor's; match on path. */
+function openDocumentForFile(uri: string): TextDocument | undefined {
+  const direct = documents.get(uri);
+  if (direct) return direct;
+  const changedPath = fileNameFromUri(uri);
+  if (!changedPath) return undefined;
+  return documents.all().find((document) => fileNameFromUri(document.uri) === changedPath);
+}
+
+function scheduleExternalSave(documentUri: string): void {
+  const pending = externalSaves.get(documentUri);
+  if (pending) clearTimeout(pending);
+  externalSaves.set(documentUri, setTimeout(() => {
+    externalSaves.delete(documentUri);
+    const document = documents.get(documentUri);
+    // A same-version request is deduplicated against the editor's own save.
+    if (document) inspectSavedDocument(document);
+  }, EXTERNAL_SAVE_SETTLE_MS));
+}
 
 connection.onHover(async ({ textDocument, position }) => {
   const document = documents.get(textDocument.uri);
