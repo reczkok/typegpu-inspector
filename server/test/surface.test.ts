@@ -2308,8 +2308,49 @@ describe('statement-map diagnostics', () => {
     expect(diagnostic!.range.start).toEqual({ line: 11, character: 2 });
   });
 
-  it('routes a compiler message in an inlined helper to the call site with related source', async () => {
-    const offset = offsetOnLine(statementMapWgsl, 14, '(vel + vec3f(0.10000000149011612))');
+  const operatorMessage = {
+    type: 'error',
+    message: 'no matching overload for operator +',
+    offset: offsetOnLine(statementMapWgsl, 14, '(vel + vec3f(0.10000000149011612))'),
+    length: '(vel + vec3f(0.10000000149011612))'.length,
+    lineNum: 15,
+    linePos: 15,
+  };
+  const compilerReport = (name: string, messages: typeof operatorMessage[]) => ({
+    label: targetOf(name).label,
+    kind: 'resolvable',
+    ok: false,
+    wgsl: statementMapWgsl,
+    statementMap,
+    compilationMessages: messages,
+    callIds: [1],
+  });
+
+  it('settles a compiler message from an inlined helper on its statement when nothing else reports it', async () => {
+    const inspection = await materializeInspection(
+      '/workspace',
+      '/workspace/boids.ts',
+      1,
+      discovered,
+      { ok: false, targets: [compilerReport('mainCompute', [operatorMessage])] },
+    );
+    const diagnostics = createDiagnostics('file:///workspace/boids.ts', discovered, inspection);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]!.range).toEqual(sourceRangeOnLine(16, 'vel = vel + d.vec3f(0.1);'));
+    expect(diagnostics[0]!.message).not.toContain('approximate');
+    expect(diagnostics[0]!.relatedInformation).toEqual([
+      {
+        location: { uri: 'file:///workspace/boids.ts', range: sourceRangeOnLine(30, 'stepBoid') },
+        message: `called from ${targetOf('mainCompute').label}`,
+      },
+      expect.objectContaining({ message: 'in fn stepBoid' }),
+    ]);
+    expect(diagnostics[0]!.data).toMatchObject({
+      mapping: { strategy: 'statement-call-site', confidence: 'high', sourceSymbol: 'stepBoid' },
+    });
+  });
+
+  it('keeps a compiler message on the call site when the helper reports it itself', async () => {
     const inspection = await materializeInspection(
       '/workspace',
       '/workspace/boids.ts',
@@ -2317,37 +2358,81 @@ describe('statement-map diagnostics', () => {
       discovered,
       {
         ok: false,
-        targets: [{
-          label: targetOf('mainCompute').label,
-          kind: 'resolvable',
-          ok: false,
-          wgsl: statementMapWgsl,
-          statementMap,
-          compilationMessages: [{
-            type: 'error',
-            message: 'no matching overload for operator +',
-            offset,
-            length: '(vel + vec3f(0.10000000149011612))'.length,
-            lineNum: 15,
-            linePos: 15,
-          }],
-          callIds: [1],
-        }],
+        targets: [
+          compilerReport('mainCompute', [operatorMessage]),
+          compilerReport('stepBoid', [operatorMessage]),
+        ],
       },
     );
     const diagnostics = createDiagnostics('file:///workspace/boids.ts', discovered, inspection);
-    expect(diagnostics).toHaveLength(1);
-    expect(diagnostics[0]!.range).toEqual(sourceRangeOnLine(30, 'stepBoid'));
-    expect(diagnostics[0]!.message).not.toContain('approximate');
-    expect(diagnostics[0]!.relatedInformation?.map((info) => info.message)).toEqual([
+    expect(diagnostics).toHaveLength(2);
+    const entry = diagnostics.find((diagnostic) => String(diagnostic.message).startsWith('mainCompute'))!;
+    expect(entry.range).toEqual(sourceRangeOnLine(30, 'stepBoid'));
+    expect(entry.relatedInformation?.map((info) => info.message)).toEqual([
       'in stepBoid',
       'in fn stepBoid',
     ]);
-    expect(diagnostics[0]!.relatedInformation?.[0]?.location.range).toEqual(
+    expect(entry.relatedInformation?.[0]?.location.range).toEqual(
       sourceRangeOnLine(16, 'vel = vel + d.vec3f(0.1);'),
     );
-    expect(diagnostics[0]!.data).toMatchObject({
-      mapping: { strategy: 'statement-call-site', confidence: 'high', sourceSymbol: 'stepBoid' },
-    });
+    const helper = diagnostics.find((diagnostic) => String(diagnostic.message).startsWith('stepBoid'))!;
+    expect(helper.range).toEqual(sourceRangeOnLine(16, 'vel = vel + d.vec3f(0.1);'));
+  });
+
+  it('folds compiler notes into the error they explain', async () => {
+    const notes = [
+      {
+        type: 'info',
+        message: 'control flow depends on possibly non-uniform value',
+        offset: offsetOnLine(statementMapWgsl, 9, 'if'),
+        length: 2,
+        lineNum: 10,
+        linePos: 5,
+      },
+      {
+        type: 'info',
+        message: "parameter 'index' of 'stepBoid' may be non-uniform",
+        offset: offsetOnLine(statementMapWgsl, 6, 'index'),
+        length: 5,
+        lineNum: 7,
+        linePos: 13,
+      },
+      {
+        type: 'info',
+        message: 'possibly non-uniform value passed here',
+        offset: offsetOnLine(statementMapWgsl, 25, 'gid'),
+        length: 3,
+        lineNum: 26,
+        linePos: 12,
+      },
+    ];
+    const inspection = await materializeInspection(
+      '/workspace',
+      '/workspace/boids.ts',
+      1,
+      discovered,
+      {
+        ok: false,
+        targets: [compilerReport('mainCompute', [operatorMessage, ...notes, { ...notes[0]!, type: 'warning' }])],
+      },
+    );
+    const diagnostics = createDiagnostics('file:///workspace/boids.ts', discovered, inspection);
+    expect(diagnostics.map((diagnostic) => diagnostic.severity)).toEqual([
+      DiagnosticSeverity.Error,
+      DiagnosticSeverity.Warning,
+    ]);
+    const [error, warning] = diagnostics;
+    expect(error!.relatedInformation?.map((info) => [info.message, info.location.range.start.line])).toEqual([
+      [`called from ${targetOf('mainCompute').label}`, 30],
+      ['in fn stepBoid', 14],
+      ['control flow depends on possibly non-uniform value', 13],
+      ["parameter 'index' of 'stepBoid' may be non-uniform", 9],
+      ['possibly non-uniform value passed here', 30],
+    ]);
+    expect(warning!.range).toEqual(sourceRangeOnLine(13, 'if'));
+    expect(warning!.relatedInformation?.map((info) => info.message)).toEqual([
+      `called from ${targetOf('mainCompute').label}`,
+      'in fn stepBoid',
+    ]);
   });
 });

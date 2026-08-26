@@ -15,8 +15,11 @@ and released together. The format follows
   produced each line (`statementMap` on every target report), and the
   language server places compiler diagnostics and resolution errors on that
   statement. A helper inlined into another target's WGSL maps to its call site
-  with the statement as related information. Older TypeGPU versions keep the
-  token heuristics.
+  with the statement as related information, or sits on the statement itself
+  when the helper reports nothing of its own (uniformity errors only exist in
+  the caller's context). Compiler notes join the error or warning they
+  explain as related information instead of appearing as diagnostics of their
+  own. Older TypeGPU versions keep the token heuristics.
 
 ### Fixed
 

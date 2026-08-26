@@ -551,12 +551,17 @@ export function createDiagnostics(
     });
   }
 
+  const mappedEntries: MappedDiagnosticEntry[] = [];
   for (const [id, target] of inspection.targets) {
     const targetSymbols = discovered.symbols.filter((symbol) =>
       target.target.symbolNames.includes(symbol.name) || symbol.targetIds.includes(id)
     );
     const fallbackSymbol = targetSymbols[0];
     if (!fallbackSymbol) continue;
+    // Compiler notes (Tint's uniformity chains, "value passed here", ...)
+    // explain the error or warning before them; they join it as related
+    // information instead of scattering as diagnostics of their own.
+    let anchor: Diagnostic | undefined;
     for (const message of target.report.compilationMessages ?? []) {
       const severity = compilerSeverity(message.type);
       if (!severity) continue;
@@ -573,6 +578,22 @@ export function createDiagnostics(
         (target.report.wgsl
           ? compilerGeneratedRange(target.report.wgsl, message)
           : undefined);
+      if (severity === DiagnosticSeverity.Information && anchor) {
+        const noteRange = mapping?.sourceRange !== undefined &&
+            mapping.strategy !== 'declaration-name'
+          ? mapping.relatedSource?.range ?? mapping.sourceRange
+          : undefined;
+        const location = noteRange
+          ? { uri: sourceUri, range: noteRange }
+          : target.generatedUri && generatedRange
+          ? { uri: target.generatedUri, range: generatedRange }
+          : { uri: sourceUri, range: anchor.range };
+        anchor.relatedInformation = [
+          ...(anchor.relatedInformation ?? []),
+          { location, message: message.message },
+        ];
+        continue;
+      }
       const relatedInformation: DiagnosticRelatedInformation[] = [];
       if (mapping?.relatedSource) {
         relatedInformation.push({
@@ -601,7 +622,7 @@ export function createDiagnostics(
         : !pinned && relatedInformation.length === 0 && message.lineNum
         ? ` (generated WGSL line ${message.lineNum})`
         : '';
-      diagnostics.push({
+      const diagnostic: Diagnostic = {
         range: mapping?.sourceRange ?? fallbackSymbol.range,
         severity,
         source: 'TypeGPU Inspector',
@@ -631,7 +652,16 @@ export function createDiagnostics(
               }
             : {}),
         },
+      };
+      diagnostics.push(diagnostic);
+      mappedEntries.push({
+        diagnostic,
+        coverageKey: `wgsl:${message.message}`,
+        ...(mapping?.relatedSource
+          ? { statement: mapping.relatedSource.range, targetLabel: target.target.label }
+          : {}),
       });
+      if (severity !== DiagnosticSeverity.Information) anchor = diagnostic;
     }
 
     if (!target.report.ok && (target.report.compilationMessages?.length ?? 0) === 0) {
@@ -674,7 +704,7 @@ export function createDiagnostics(
       // target just cannot be inspected standalone — the code is not wrong.
       // Hint severity keeps it out of the Problems panel and off the red path.
       const structural = structuralTargetDiagnostic(target.report);
-      diagnostics.push({
+      const diagnostic: Diagnostic = {
         range: tokenRange ?? fallbackSymbol.range,
         severity: structural ? DiagnosticSeverity.Hint : DiagnosticSeverity.Error,
         source: 'TypeGPU Inspector',
@@ -698,10 +728,72 @@ export function createDiagnostics(
               }
             : {}),
         },
+      };
+      diagnostics.push(diagnostic);
+      mappedEntries.push({
+        diagnostic,
+        coverageKey: 'resolution',
+        ...(failureMapping?.relatedSource
+          ? { statement: failureMapping.relatedSource.range, targetLabel: target.target.label }
+          : {}),
       });
     }
   }
+  settleCallSiteDiagnostics(mappedEntries, sourceUri);
   return deduplicateDiagnostics(diagnostics);
+}
+
+type MappedDiagnosticEntry = {
+  diagnostic: Diagnostic;
+  /** Diagnostics with the same key on the same statement report one finding. */
+  coverageKey: string;
+  /** The authored statement in another symbol, when the diagnostic sits on its call site. */
+  statement?: Range;
+  targetLabel?: string;
+};
+
+/**
+ * A diagnostic parked on a call site moves onto the helper's statement when
+ * nothing else reports that statement: a helper that passes standalone (a
+ * uniformity error only exists in the caller's context, a slot only binds
+ * there) would otherwise never get a squiggle on the offending line.
+ */
+function settleCallSiteDiagnostics(
+  entries: MappedDiagnosticEntry[],
+  sourceUri: string,
+): void {
+  for (const entry of entries) {
+    const statement = entry.statement;
+    if (!statement) continue;
+    const covered = entries.some((other) =>
+      other !== entry &&
+      other.statement === undefined &&
+      other.coverageKey === entry.coverageKey &&
+      rangeWithin(other.diagnostic.range, statement)
+    );
+    if (covered) continue;
+    const callSite = entry.diagnostic.range;
+    entry.diagnostic.range = statement;
+    entry.diagnostic.relatedInformation = (entry.diagnostic.relatedInformation ?? []).map(
+      (info) =>
+        info.location.uri === sourceUri && rangeEquals(info.location.range, statement)
+          ? {
+              location: { uri: sourceUri, range: callSite },
+              message: `called from ${entry.targetLabel ?? 'here'}`,
+            }
+          : info,
+    );
+  }
+}
+
+function rangeWithin(inner: Range, outer: Range): boolean {
+  return comparePosition(outer.start, inner.start) <= 0 &&
+    comparePosition(inner.end, outer.end) <= 0;
+}
+
+function rangeEquals(left: Range, right: Range): boolean {
+  return comparePosition(left.start, right.start) === 0 &&
+    comparePosition(left.end, right.end) === 0;
 }
 
 function mergeInspectorOutputs(
