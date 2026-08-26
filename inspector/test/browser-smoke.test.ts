@@ -579,7 +579,7 @@ describe('browser harness', () => {
     expect(report.targets[0]?.diagnostics?.[0]?.code).toBe(
       'pipeline-validated-without-recorded-creation',
     );
-    expect(report.targets[0]?.diagnostics?.[0]?.message).toContain('validated only');
+    expect(report.targets[0]?.diagnostics?.[0]?.message).toContain('Validated without a recorded createPipeline call');
     expect(report.targets[0]?.bindGroupLayouts).toEqual([
       expect.objectContaining({
         group: 0,
