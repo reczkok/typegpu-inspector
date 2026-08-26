@@ -10,7 +10,10 @@ import {
   createAbortError,
   SessionInfrastructureError,
 } from '../shared.ts';
-import { getSharedBrowser } from './browser.ts';
+import {
+  getSharedBrowser,
+  INSPECTOR_BROWSER_CONTEXT_OPTIONS,
+} from './browser.ts';
 import type { PreparedInput } from './input.ts';
 import { startInspectorViteServer } from './vite.ts';
 
@@ -365,7 +368,7 @@ async function createInspectorSession(
   const browserStartedAt = performance.now();
   try {
     const browser = await getSharedBrowser();
-    const context = await browser.newContext();
+    const context = await browser.newContext(INSPECTOR_BROWSER_CONTEXT_OPTIONS);
     return {
       session: new InspectorSession(
         key,

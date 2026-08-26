@@ -179,14 +179,15 @@ async function inspectTypegpuModuleInBrowser(
         code: lostDiagnostic.code,
         message: lostDiagnostic.message,
         diagnostics: [lostDiagnostic],
-        ledger: [lostLedger],
+        ledger: [{ ...lostLedger }],
       };
       for (const target of inspected.reports) {
         const hasIndependentFailure = target.diagnostics?.some(
           (diagnostic) => diagnostic.severity !== 'note',
         );
-        if (!target.ok && !hasIndependentFailure) {
-          target.diagnostics = [lostDiagnostic, ...(target.diagnostics ?? [])];
+        if (!hasIndependentFailure) {
+          target.ok = false;
+          target.diagnostics = [{ ...lostDiagnostic }, ...(target.diagnostics ?? [])];
           target.causeId = lostCause.id;
           target.outcome = 'blocked';
         }

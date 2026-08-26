@@ -365,7 +365,9 @@ function sanitizeValue(
     return `[MaxDepth ${value.constructor?.name ?? 'Object'}]`;
   }
   if (state.seen.has(value)) {
-    return '[Circular]';
+    return {
+      __repeatedReference: value.constructor?.name ?? 'Object',
+    };
   }
   state.seen.add(value);
 

@@ -2,7 +2,7 @@
   "name": "typegpu-inspector",
   "displayName": "TypeGPU Inspector",
   "publisher": "reczkok",
-  "version": "0.4.3",
+  "version": "0.4.7",
   "private": true,
   "description": "Deep TypeGPU inspection: exact pipelines, resources, memory layouts, generated WGSL, bindings, and synthesized probes.",
   "license": "MIT",
@@ -86,7 +86,11 @@
         },
         "typegpuInspector.inlayDetailLevel": {
           "type": "string",
-          "enum": ["compact", "summary", "detailed"],
+          "enum": [
+            "compact",
+            "summary",
+            "detailed"
+          ],
           "enumDescriptions": [
             "Status only.",
             "Status plus one role-specific fact.",
@@ -102,7 +106,11 @@
               "type": "object",
               "additionalProperties": {
                 "type": "string",
-                "enum": ["auto", "show", "hide"]
+                "enum": [
+                  "auto",
+                  "show",
+                  "hide"
+                ]
               }
             },
             "sectionOrder": {
@@ -110,30 +118,67 @@
               "items": {
                 "type": "string",
                 "enum": [
-                  "wgslPreview", "shaderFacts", "bindings", "resource",
-                  "schema", "pipelineState", "pipelineContext", "declarations",
-                  "compilerMessages", "inspectionNotes", "assumptions", "runtime"
+                  "wgslPreview",
+                  "shaderFacts",
+                  "bindings",
+                  "resource",
+                  "schema",
+                  "pipelineState",
+                  "pipelineContext",
+                  "declarations",
+                  "compilerMessages",
+                  "inspectionNotes",
+                  "assumptions",
+                  "runtime"
                 ]
               }
             },
-            "wgslPreviewLines": { "type": "number", "minimum": 0, "maximum": 20 },
-            "collectionItems": { "type": "number", "minimum": 1, "maximum": 100 },
-            "declarations": { "type": "number", "minimum": 1, "maximum": 100 },
-            "compilerMessages": { "type": "number", "minimum": 1, "maximum": 100 },
-            "inspectionNotes": { "type": "number", "minimum": 1, "maximum": 50 },
-            "assumptions": { "type": "number", "minimum": 1, "maximum": 50 }
+            "wgslPreviewLines": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 20
+            },
+            "collectionItems": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "declarations": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "compilerMessages": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "inspectionNotes": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 50
+            },
+            "assumptions": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 50
+            }
           }
         },
         "typegpuInspector.detailLevel": {
           "type": "string",
-          "enum": ["minimal", "default", "verbose"],
+          "enum": [
+            "minimal",
+            "default",
+            "verbose"
+          ],
           "markdownDeprecationMessage": "Use `hoverDetailLevel` and `inlayDetailLevel` instead.",
           "description": "Deprecated combined detail preset retained for existing configurations."
         },
         "typegpuInspector.warmUpOnOpen": {
           "type": "boolean",
           "default": true,
-          "description": "Inspect TypeGPU files once when they open, so the expensive first session (headless browser + bundler) is warmed before your first save."
+          "description": "Warm the runtime from the first TypeGPU file opened in a cold session, without inspecting every restored tab."
         },
         "typegpuInspector.timeoutMs": {
           "type": "number",
@@ -158,7 +203,7 @@
         "typegpuInspector.inlayHints": {
           "type": "boolean",
           "default": true,
-          "description": "Show compact \u2713/\u2717 inlay hints in the buffer."
+          "description": "Show compact ✓/✗ inlay hints in the buffer."
         },
         "typegpuInspector.diagnostics": {
           "type": "boolean",

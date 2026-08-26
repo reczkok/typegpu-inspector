@@ -4,14 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import {
-  inspectTypegpuTool,
-  listTypegpuExportsTool,
-  resolveTypegpuContextTool,
-} from './agentTools.ts';
 import type { ClientRoot } from './context.ts';
-import { closeSharedBrowser } from './inspect/browser.ts';
-import { closeAllInspectorSessions } from './inspect/session.ts';
 import {
   agentInspectionInputSchema,
   agentInspectionOutputSchema,
@@ -22,9 +15,33 @@ import {
 } from './mcpSchemas.ts';
 import { isRecord } from './shared.ts';
 
+type AgentTools = typeof import('./agentTools.ts');
+let agentToolsPromise: Promise<AgentTools> | undefined;
+
+function loadAgentTools(): Promise<AgentTools> {
+  agentToolsPromise ??= import('./agentTools.ts');
+  return agentToolsPromise;
+}
+
 const packageJson = JSON.parse(
-  readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'),
+  readFileSync(packageJsonPath(import.meta.url), 'utf8'),
 ) as { version?: string };
+
+function packageJsonPath(moduleUrl: string): string {
+  const moduleDir = dirname(fileURLToPath(moduleUrl));
+  for (const candidate of [
+    resolve(moduleDir, '..', 'package.json'),
+    resolve(moduleDir, '..', '..', 'package.json'),
+  ]) {
+    try {
+      readFileSync(candidate, 'utf8');
+      return candidate;
+    } catch {
+      // Source modules live under src/; compiled chunks live under dist/chunks/.
+    }
+  }
+  return resolve(moduleDir, '..', 'package.json');
+}
 
 export const INSPECTION_TOOL_ANNOTATIONS = {
   readOnlyHint: false,
@@ -80,6 +97,7 @@ export function createTypegpuInspectorServer(): McpServer {
   );
 
   server.registerTool('inspect_typegpu', INSPECT_TYPEGPU_TOOL_CONFIG, async (input, extra) => {
+    const { inspectTypegpuTool } = await loadAgentTools();
     const result = await inspectTypegpuTool(input, {
       clientRoots: await readClientRoots(server, input.project?.root),
       signal: extra?.signal,
@@ -91,6 +109,7 @@ export function createTypegpuInspectorServer(): McpServer {
     'resolve_typegpu_context',
     RESOLVE_TYPEGPU_CONTEXT_TOOL_CONFIG,
     async (input) => {
+      const { resolveTypegpuContextTool } = await loadAgentTools();
       const result = await resolveTypegpuContextTool(input, {
         clientRoots: await readClientRoots(server, input.project?.root),
       });
@@ -99,6 +118,7 @@ export function createTypegpuInspectorServer(): McpServer {
   );
 
   server.registerTool('list_typegpu_exports', LIST_TYPEGPU_EXPORTS_TOOL_CONFIG, async (input) => {
+    const { listTypegpuExportsTool } = await loadAgentTools();
     const result = await listTypegpuExportsTool(input, {
       clientRoots: await readClientRoots(server, input.project?.root),
     });
@@ -290,10 +310,19 @@ export async function shutdownInspector(exitCode?: number): Promise<void> {
 }
 
 async function closeInspectorResources(): Promise<void> {
+  // If no tool was called, none of the Vite/Chromium session code was loaded
+  // and there cannot be resources to close. Avoid loading the entire runtime
+  // inspection engine just to shut down an idle MCP process.
+  if (!agentToolsPromise) return;
+
   let graceTimeout: NodeJS.Timeout | undefined;
   try {
     await Promise.race([
       (async () => {
+        const [{ closeAllInspectorSessions }, { closeSharedBrowser }] = await Promise.all([
+          import('./inspect/session.ts'),
+          import('./inspect/browser.ts'),
+        ]);
         await closeAllInspectorSessions();
         await closeSharedBrowser();
       })(),

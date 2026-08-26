@@ -145,9 +145,16 @@ async function notifyInspectionFailure(status: InspectionStatus): Promise<void> 
 
 export async function activate(context: ExtensionContext): Promise<void> {
   const module = serverModule(context);
+  const serverEnv = {
+    ...process.env,
+    TYPEGPU_INSPECTOR_RUNTIME_DIR: path.join(
+      context.globalStorageUri.fsPath,
+      'runtime',
+    ),
+  };
   const serverOptions: ServerOptions = {
-    run: { module, transport: TransportKind.stdio },
-    debug: { module, transport: TransportKind.stdio },
+    run: { module, transport: TransportKind.stdio, options: { env: serverEnv } },
+    debug: { module, transport: TransportKind.stdio, options: { env: serverEnv } },
   };
   const clientOptions: LanguageClientOptions = {
     documentSelector: [
@@ -194,7 +201,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
       // Keep this spec identical to the server's FALLBACK_INSPECTOR_SPEC:
       // npx caches per spec string, so probing @latest would exercise a
       // different install than the one inspections actually run.
-      terminal.sendText('npx -y typegpu-runtime-inspector-mcp@0.4.3 doctor');
+      terminal.sendText('npx -y typegpu-runtime-inspector-mcp@0.4.7 doctor');
     }),
     commands.registerCommand('typegpuInspector.selectVerbosity', async () => {
       const config = workspace.getConfiguration('typegpuInspector');

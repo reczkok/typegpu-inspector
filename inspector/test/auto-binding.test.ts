@@ -71,17 +71,30 @@ describe('slot-value provider chain', () => {
     expect(provision?.provider).toBe('synthesis');
     // Ones, not zeros: zero placeholders walk comptime math into NaN traps.
     expect(provision?.value).toEqual(d.vec2f(1, 1));
-    expect(provision?.provenance).toBe('placeholder value derived from its accessor schema');
+    expect(provision?.provenance).toBe(
+      'non-degenerate placeholder value recursively derived from its accessor schema',
+    );
   });
 
-  it('keeps zero values for struct schemas', () => {
-    const Params = d.struct({ tint: d.vec4f });
+  it('recursively synthesizes non-degenerate composite values without field-name heuristics', () => {
+    const Nested = d.struct({ scale: d.align(16, d.f32) });
+    const Params = d.struct({
+      tint: d.vec4f,
+      transform: d.mat4x4f,
+      samples: d.arrayOf(d.vec2f, 2),
+      nested: Nested,
+    });
     const access = tgpu.accessor(Params).$name('structParams');
     const provision = satisfy(
       slotRequirement(access.slot, 'structParams'),
       moduleScope([access]),
     );
-    expect(provision?.value).toEqual(Params());
+    expect(provision?.value).toEqual(Params({
+      tint: d.vec4f(1),
+      transform: d.mat4x4f.identity(),
+      samples: [d.vec2f(1), d.vec2f(1)],
+      nested: Nested({ scale: 1 }),
+    }));
   });
 
   it('prefers a borrowed real value over an accessor zero value', () => {

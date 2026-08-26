@@ -18,6 +18,64 @@ import {
 } from '../src/surface.js';
 
 describe('inspection surface', () => {
+  it('drops materialization-only runtime evidence after preserving editor surfaces', async () => {
+    const discovered = discoverTypeGpuModule(
+      '/workspace/pipeline.ts',
+      `const pipeline = root.createRenderPipeline({ vertex, fragment });`,
+    );
+    const inspection = await materializeInspection(
+      '/workspace',
+      '/workspace/pipeline.ts',
+      1,
+      discovered,
+      {
+        ok: true,
+        summary: { totalMs: 12, browserVersion: '123.0' },
+        environment: {
+          gpuType: 'software',
+          browserVersion: '123.0',
+          limits: { maxComputeInvocationsPerWorkgroup: 256 },
+          verboseDeviceEvidence: { large: 'discard me' },
+        },
+        stats: { timings: { totalMs: 12 }, verboseTrace: ['discard me'] },
+        console: [{ type: 'log', text: 'discard me' }],
+        causes: [{
+          id: 'module',
+          tier: 'module',
+          code: 'context',
+          message: 'discard me',
+        }],
+        targets: [{
+          label: 'pipeline',
+          kind: 'render-pipeline',
+          ok: true,
+          callIds: [1],
+          wgsl: '@vertex fn main() -> @builtin(position) vec4f { return vec4f(); }',
+        }],
+        calls: [{
+          id: 1,
+          name: 'device.createRenderPipeline',
+          descriptor: { primitive: { topology: 'triangle-list' } },
+        }],
+      },
+    );
+
+    expect(inspection.targets.get(discovered.targets[0]!.id)?.pipelineState)
+      .toMatchObject({ kind: 'render', primitive: { topology: 'triangle-list' } });
+    expect(inspection.output).toMatchObject({
+      summary: { totalMs: 12 },
+      stats: { timings: { totalMs: 12 } },
+      environment: {
+        gpuType: 'software',
+        limits: { maxComputeInvocationsPerWorkgroup: 256 },
+      },
+    });
+    expect(inspection.output.calls).toBeUndefined();
+    expect(inspection.output.console).toBeUndefined();
+    expect(inspection.output.causes).toBeUndefined();
+    expect(inspection.output.environment?.verboseDeviceEvidence).toBeUndefined();
+  });
+
   it('presents bounded synthesized specializations as distinct contexts', async () => {
     const discovered = discoverTypeGpuModule(
       '/workspace/evolve.ts',

@@ -27,7 +27,14 @@ const reportOptionsSchema = {
     .boolean()
     .optional()
     .describe(
-      'Include WGSL source in target reports and shader-module call descriptors. Defaults to true only when verbosity is full.',
+      'Include WGSL source in target reports. Defaults to true only when verbosity is full.',
+    ),
+  includeCallWgsl: z
+    .boolean()
+    .optional()
+    .default(false)
+    .describe(
+      'Repeat WGSL inside device.createShaderModule call descriptors when calls and target WGSL are both included. Defaults to false because target.wgsl is the canonical copy.',
     ),
   includeCalls: z
     .boolean()
@@ -116,7 +123,7 @@ const runtimeOptionsSchema = {
     .optional()
     .default(true)
     .describe(
-      'Automatically bind missing default-less slots/accessors during shader resolution: zero values derived from accessor schemas first, then bindings borrowed from module-exported render pipelines and bound functions. Auto-applied bindings are reported through a slot-bindings-auto-applied note. Set false to surface missing bindings as failures.',
+      'Automatically bind missing default-less slots/accessors during shader resolution: prefer recorded or borrowable application bindings, otherwise derive deterministic non-degenerate placeholders recursively from accessor schemas. Auto-applied bindings are reported through a slot-bindings-auto-applied note. Set false to surface missing bindings as failures.',
     ),
 };
 
@@ -171,9 +178,17 @@ const agentOutputOptionsSchema = z
     timeoutMs: runtimeOptionsSchema.timeoutMs,
     verbosity: reportOptionsSchema.verbosity,
     includeWgsl: reportOptionsSchema.includeWgsl,
+    includeCallWgsl: reportOptionsSchema.includeCallWgsl,
     includeCalls: reportOptionsSchema.includeCalls,
     maxWgslBytes: reportOptionsSchema.maxWgslBytes,
     diagnosticsOnly: reportOptionsSchema.diagnosticsOnly,
+    includeLegacyInspection: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe(
+        'Also return the deprecated nested inspection report. Defaults to false because its fields duplicate the canonical top-level report.',
+      ),
   })
   .optional()
   .default({})
@@ -256,6 +271,16 @@ const targetReportOutputSchema = z
       .enum(['passed', 'passed-with-assumptions', 'failed', 'unsupported', 'blocked'])
       .optional(),
     causeId: z.string().optional(),
+    failureCategory: z
+      .enum([
+        'source',
+        'shader-compiler',
+        'webgpu-validation',
+        'environment',
+        'timeout',
+        'harness',
+      ])
+      .optional(),
     error: z.unknown().optional(),
     diagnostics: z.array(targetDiagnosticOutputSchema).optional(),
     wgslSize: z.number().optional(),
@@ -355,19 +380,25 @@ export const probeBindingSchema = z.object({
     .describe('Selector for an accessor to receive an inspection-only zero value.'),
   schema: z
     .string()
-    .describe('Schema selector used to construct the inspection-only zero value.'),
+    .describe(
+      'Schema selector used to construct the inspection-only zero value. Common TypeGPU schemas may use d.f32/d.vec2f shorthand; ctx.d.f32/ctx.d.vec2f is the explicit form.',
+    ),
 });
 
 export const probeArgumentPlanEntrySchema = z.union([
   z.object({
     refSchema: z
       .string()
-      .describe('Schema selector used to initialize a mutable local passed as a TGSL reference.'),
+      .describe(
+        'Schema selector used to initialize a mutable local passed as a TGSL reference. Common d.* selectors are resolved against ctx.d automatically.',
+      ),
   }),
   z.object({
     schema: z
       .string()
-      .describe('Schema selector used to synthesize a zero-valued argument.'),
+      .describe(
+        'Schema selector used to synthesize a zero-valued argument. Use d.f32/d.vec2f shorthand or the explicit ctx.d.f32/ctx.d.vec2f form.',
+      ),
   }),
   z.object({
     value: z
@@ -398,7 +429,7 @@ export const selectorTargetSchema = z.object({
     .array(z.string())
     .optional()
     .describe(
-      'Schema selectors used to synthesize zero-valued arguments and call a parameterized GPU helper from a zero-argument probe.',
+      'Schema selectors used to synthesize zero-valued arguments and call a parameterized GPU helper from a zero-argument probe. Common d.* selectors are resolved against ctx.d automatically.',
     ),
   probeArgumentPlan: z
     .array(probeArgumentPlanEntrySchema)
@@ -547,6 +578,7 @@ const dependencyOutputSchema = z
 const dependencySummaryOutputSchema = z
   .object({
     coreTypegpu: z.record(z.unknown()).optional(),
+    coreTypegpuFamily: z.record(z.unknown()).optional(),
     bundledFallbacks: z.array(z.string()).optional(),
     packageAliases: z.array(z.string()).optional(),
     hasBundledTypegpuFallback: z.boolean().optional(),
@@ -572,8 +604,7 @@ export const resolvedContextOutputSchema = z
     targetPathSource: z.string().optional(),
     targetPathBase: z.string().optional(),
     rootSource: z.string(),
-    dependencies: z.record(dependencyOutputSchema),
-    dependencySummary: dependencySummaryOutputSchema.optional(),
+    dependencies: z.record(dependencyOutputSchema).optional(),
     warnings: z.array(z.string()),
     pathAliases: z.record(z.string()).optional(),
   })
@@ -661,7 +692,7 @@ export const symbolInputSchema = {
   targets: z
     .array(symbolTargetSchema)
     .min(1)
-    .describe('Symbol selectors to resolve or wrap into inspector-owned pipelines. Selectors target exported module values, setup.* values, or ctx.* values.'),
+    .describe('Symbol selectors to resolve or wrap into inspector-owned pipelines. Selectors target exported module values, setup.* values, or ctx.* values such as ctx.d.f32; schema fields also accept d.f32 shorthand.'),
   setupBody: z
     .string()
     .optional()

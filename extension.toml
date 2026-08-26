@@ -1,6 +1,6 @@
 id = "typegpu-inspector"
 name = "TypeGPU Inspector"
-version = "0.4.3"
+version = "0.4.7"
 schema_version = 1
 authors = ["Konrad Reczko"]
 description = "Deep TypeGPU inspection: exact pipelines, resources, memory layouts, generated WGSL, bindings, and synthesized probes."

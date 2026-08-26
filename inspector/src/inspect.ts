@@ -5,7 +5,10 @@ import {
   diagnoseInspectionFailure,
   getErrorMessage,
 } from './browser/diagnostics.ts';
-import { launchInspectorBrowser } from './inspect/browser.ts';
+import {
+  INSPECTOR_BROWSER_CONTEXT_OPTIONS,
+  launchInspectorBrowser,
+} from './inspect/browser.ts';
 import {
   prepareInspectionInput,
   normalizeInput,
@@ -190,7 +193,7 @@ async function runInspection(
       () => {
         const opening = sessionLease
           ? sessionLease.context.newPage()
-          : browser!.newPage();
+          : browser!.newPage(INSPECTOR_BROWSER_CONTEXT_OPTIONS);
         return keepOrDispose(
           opening,
           withDeadline(opening, run, 'opening a browser page', { establishment: coldStart }),

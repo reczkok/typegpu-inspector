@@ -18,6 +18,7 @@ type PathAlias = {
 
 export function createPublicResolvedContext(
   context: ResolvedTypegpuContext,
+  options: { includeDependencies?: boolean } = {},
 ): Record<string, unknown> {
   return sanitizeForAgent(
     omitUndefined({
@@ -37,8 +38,9 @@ export function createPublicResolvedContext(
       targetPathSource: context.targetPathSource,
       targetPathBase: formatKnownPath(context.targetPathBase, context),
       rootSource: context.rootSource,
-      dependencies: context.dependencies,
-      dependencySummary: createDependencySummary(context),
+      dependencies: options.includeDependencies === false
+        ? undefined
+        : context.dependencies,
       warnings: context.warnings,
       pathAliases: createPathAliasLegend(context),
     }),
@@ -77,23 +79,41 @@ function formatKnownPath(
 
 export function createDependencySummary(
   context: ResolvedTypegpuContext,
+  options: { compact?: boolean } = {},
 ): Record<string, unknown> {
+  const resolvedCoreDependencies = CORE_TYPEGPU_SPECIFIERS.flatMap((specifier) => {
+    const dependency = context.dependencies[specifier];
+    return dependency ? [{ specifier, dependency }] : [];
+  });
   const coreDependencies = Object.fromEntries(
-    CORE_TYPEGPU_SPECIFIERS.map((specifier) => {
-      const dependency = context.dependencies[specifier];
+    resolvedCoreDependencies.map(({ specifier, dependency }) => {
       return [
         specifier,
-        dependency
-          ? omitUndefined({
-              source: dependency.source,
-              version: dependency.version,
-              path: dependency.path,
-              warning: dependency.warning,
-            })
-          : undefined,
+        omitUndefined({
+          source: dependency.source,
+          version: dependency.version,
+          path: dependency.path,
+          warning: dependency.warning,
+        }),
       ];
-    }).filter(([, dependency]) => dependency !== undefined),
+    }),
   );
+  const coreSources = uniqueValues(
+    resolvedCoreDependencies.map(({ dependency }) => dependency.source),
+  );
+  const coreVersions = uniqueValues(
+    resolvedCoreDependencies.map(({ dependency }) => dependency.version),
+  );
+  const coreTypegpuFamily = options.compact
+    ? omitUndefined({
+        family: 'typegpu/*',
+        specifiers: resolvedCoreDependencies.map(({ specifier }) => specifier),
+        source: coreSources.length === 1 ? coreSources[0] : undefined,
+        version: coreVersions.length === 1 ? coreVersions[0] : undefined,
+        sources: coreSources.length > 1 ? coreSources : undefined,
+        versions: coreVersions.length > 1 ? coreVersions : undefined,
+      })
+    : undefined;
   const bundledFallbacks = Object.values(context.dependencies)
     .filter((dependency) => dependency.source === 'bundled')
     .map((dependency) => dependency.specifier);
@@ -103,7 +123,8 @@ export function createDependencySummary(
 
   return sanitizeForAgent(
     {
-      coreTypegpu: coreDependencies,
+      coreTypegpu: options.compact ? undefined : coreDependencies,
+      coreTypegpuFamily,
       bundledFallbacks,
       packageAliases,
       hasBundledTypegpuFallback: CORE_TYPEGPU_SPECIFIERS.some(
@@ -115,6 +136,10 @@ export function createDependencySummary(
     },
     context,
   ) as Record<string, unknown>;
+}
+
+function uniqueValues(values: Array<string | undefined>): string[] {
+  return [...new Set(values.filter((value): value is string => value !== undefined))];
 }
 
 export function createInspectionSurface(formattedReport: unknown): Record<string, unknown> {

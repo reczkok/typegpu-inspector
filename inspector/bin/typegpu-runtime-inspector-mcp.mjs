@@ -1,30 +1,23 @@
 #!/usr/bin/env node
-import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const requireFromRoot = createRequire(resolve(root, 'package.json'));
-const tsxLoader = pathToFileURL(requireFromRoot.resolve('tsx')).href;
-
-const child = spawn(process.execPath, ['--import', tsxLoader, resolve(root, 'src/cli.ts'), ...process.argv.slice(2)], {
-  stdio: 'inherit',
-});
-
-function stopChild(signal = 'SIGTERM') {
-  if (!child.killed && child.exitCode === null) {
-    child.kill(signal);
-  }
+const builtCli = resolve(root, 'dist/cli.js');
+let cliUrl;
+if (existsSync(builtCli)) {
+  cliUrl = pathToFileURL(builtCli).href;
+} else {
+  // Source checkouts stay directly runnable without requiring a build. The
+  // published package always contains dist/ and avoids TSX's loader/service.
+  const requireFromRoot = createRequire(resolve(root, 'package.json'));
+  const tsxApi = pathToFileURL(requireFromRoot.resolve('tsx/esm/api')).href;
+  const { register } = await import(tsxApi);
+  register();
+  cliUrl = pathToFileURL(resolve(root, 'src/cli.ts')).href;
 }
 
-process.stdin.on('end', () => stopChild());
-process.stdin.on('close', () => stopChild());
-process.once('SIGINT', () => stopChild('SIGINT'));
-process.once('SIGTERM', () => stopChild('SIGTERM'));
-process.once('SIGHUP', () => stopChild('SIGHUP'));
-process.once('exit', () => stopChild());
-
-child.on('exit', (code) => {
-  process.exit(code ?? 1);
-});
+const { main } = await import(cliUrl);
+process.exitCode = await main();

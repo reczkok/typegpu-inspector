@@ -8,6 +8,7 @@ use zed_extension_api::{
 };
 
 const SERVER_ID: &str = "typegpu-inspector";
+const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const LANGUAGE_SERVER_PACKAGE: &str = "typegpu-inspector-language-server";
 const LANGUAGE_SERVER_ENTRY: &str = "node_modules/typegpu-inspector-language-server/dist/server.cjs";
@@ -41,18 +42,8 @@ fn resolve_entry(dev_entry: &str, package: &str, installed_entry: &str) -> Resul
     }
 
     let installed = zed::npm_package_installed_version(package)?;
-    match zed::npm_package_latest_version(package) {
-        Ok(latest) => {
-            if installed.as_deref() != Some(latest.as_str()) {
-                zed::npm_install_package(package, &latest)?;
-            }
-        }
-        Err(error) => {
-            // Offline is fine when a copy is already installed.
-            if installed.is_none() {
-                return Err(format!("failed to fetch {package} from npm: {error}"));
-            }
-        }
+    if installed.as_deref() != Some(PACKAGE_VERSION) {
+        zed::npm_install_package(package, PACKAGE_VERSION)?;
     }
     Ok(work_dir.join(installed_entry))
 }

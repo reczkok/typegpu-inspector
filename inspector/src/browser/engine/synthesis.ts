@@ -11,21 +11,15 @@ type TypeGpuNamespace = {
   };
 };
 
+const MAX_PLACEHOLDER_DEPTH = 32;
+
 /**
  * Unwraps `d.align(...)` / `d.size(...)` style decorations down to the callable
  * schema constructor. Decorated schemas are plain descriptor objects and are not
  * callable, so probes must never invoke a selected schema directly.
  */
 export function unwrapZeroValueSchema(schema: unknown, label?: string): (...args: never[]) => unknown {
-  let value = schema;
-  while (
-    value &&
-    typeof value === 'object' &&
-    (readString(value, 'type') === 'decorated' ||
-      readString(value, 'type') === 'loose-decorated')
-  ) {
-    value = (value as { inner?: unknown }).inner;
-  }
+  const value = unwrapSchema(schema);
   if (typeof value !== 'function') {
     throw new Error(
       `Cannot synthesize a zero value for schema '${String(schema)}'${
@@ -42,24 +36,122 @@ export function createZeroValue(schema: unknown, label?: string): unknown {
 }
 
 /**
- * Placeholder value for slot auto-binding. Scalars and vectors are filled
- * with ones instead of zeros: the value is synthetic either way (and reported
- * as such), but zeros feed comptime arithmetic straight into division-by-zero
- * and NaN, which WGSL's finite-math assumption rejects at resolution time.
- * Structs, arrays, and matrices keep the plain zero value.
+ * Builds a deterministic, schema-derived placeholder for slot auto-binding.
+ * Real application bindings always outrank this provider. When synthesis is
+ * necessary, floating/integer scalars and vectors use ones, matrices use their
+ * identity, and structs/fixed arrays recursively apply the same policy.
+ *
+ * This is deliberately based on data shape, never field names. A plain zero
+ * composite routinely turns valid shader invariants (dimensions, periods,
+ * scales, normalizers) into division-by-zero or NaN during comptime resolution.
+ * Identity matrices and recursively non-zero leaves are a more neutral,
+ * non-degenerate inspection fixture. The ledger still marks every such value
+ * as synthesized, so success is reported with assumptions rather than as
+ * evidence of application runtime values.
  */
 export function createPlaceholderValue(schema: unknown, label?: string): unknown {
-  const constructor = unwrapZeroValueSchema(schema, label);
-  const zero = constructor();
-  if (typeof zero === 'number' || isVecLike(zero)) {
-    try {
-      const ones = (constructor as (splat: number) => unknown)(1);
-      if (ones !== undefined && ones !== null) return ones;
-    } catch {
-      // A constructor that rejects a scalar splat keeps its zero value.
-    }
+  return createPlaceholder(schema, label, 0, new Set());
+}
+
+function createPlaceholder(
+  schema: unknown,
+  label: string | undefined,
+  depth: number,
+  ancestors: Set<unknown>,
+): unknown {
+  const value = unwrapSchema(schema);
+  const constructor = unwrapZeroValueSchema(value, label);
+  if (depth >= MAX_PLACEHOLDER_DEPTH || ancestors.has(value)) {
+    return constructor();
   }
-  return zero;
+
+  ancestors.add(value);
+  try {
+    const type = readString(value, 'type');
+    if (type === 'struct' || type === 'unstruct') {
+      const propTypes = readRecord(value, 'propTypes');
+      if (propTypes) {
+        const props = Object.fromEntries(
+          Object.entries(propTypes).map(([name, propertySchema]) => [
+            name,
+            createNestedPlaceholder(
+              propertySchema,
+              label ? `${label}.${name}` : name,
+              depth + 1,
+              ancestors,
+            ),
+          ]),
+        );
+        return (constructor as (props: Record<string, unknown>) => unknown)(props);
+      }
+    }
+
+    if (type === 'array' || type === 'disarray') {
+      const elementType = readUnknown(value, 'elementType');
+      const elementCount = readNumber(value, 'elementCount');
+      if (elementType !== undefined && elementCount !== undefined) {
+        const elements = Array.from({ length: elementCount }, (_, index) =>
+          createNestedPlaceholder(
+            elementType,
+            label ? `${label}[${index}]` : `[${index}]`,
+            depth + 1,
+            ancestors,
+          )
+        );
+        return (constructor as (elements: unknown[]) => unknown)(elements);
+      }
+    }
+
+    if (type === 'mat2x2f' || type === 'mat3x3f' || type === 'mat4x4f') {
+      const identity = readUnknown(value, 'identity');
+      if (typeof identity === 'function') {
+        return identity.call(value);
+      }
+    }
+
+    const zero = constructor();
+    if (typeof zero === 'number' || isVecLike(zero)) {
+      try {
+        const ones = (constructor as (splat: number) => unknown)(1);
+        if (ones !== undefined && ones !== null) return ones;
+      } catch {
+        // A constructor that rejects a scalar splat keeps its zero value.
+      }
+    }
+    return zero;
+  } catch {
+    // Unknown future schema shapes retain the previous safe behavior instead
+    // of making auto-binding itself a new source of inspection failures.
+    return constructor();
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+function createNestedPlaceholder(
+  schema: unknown,
+  label: string,
+  depth: number,
+  ancestors: Set<unknown>,
+): unknown {
+  try {
+    return createPlaceholder(schema, label, depth, ancestors);
+  } catch {
+    return createZeroValue(schema, label);
+  }
+}
+
+function unwrapSchema(schema: unknown): unknown {
+  let value = schema;
+  while (
+    value &&
+    (typeof value === 'object' || typeof value === 'function') &&
+    (readString(value, 'type') === 'decorated' ||
+      readString(value, 'type') === 'loose-decorated')
+  ) {
+    value = readUnknown(value, 'inner');
+  }
+  return value;
 }
 
 function isVecLike(value: unknown): boolean {
@@ -162,4 +254,25 @@ function readString(value: unknown, key: string): string | undefined {
   }
   const candidate = (value as Record<string, unknown>)[key];
   return typeof candidate === 'string' ? candidate : undefined;
+}
+
+function readNumber(value: unknown, key: string): number | undefined {
+  const candidate = readUnknown(value, key);
+  return typeof candidate === 'number' && Number.isSafeInteger(candidate) && candidate >= 0
+    ? candidate
+    : undefined;
+}
+
+function readRecord(value: unknown, key: string): Record<string, unknown> | undefined {
+  const candidate = readUnknown(value, key);
+  return candidate && typeof candidate === 'object'
+    ? candidate as Record<string, unknown>
+    : undefined;
+}
+
+function readUnknown(value: unknown, key: string): unknown {
+  if (!value || (typeof value !== 'object' && typeof value !== 'function')) {
+    return undefined;
+  }
+  return (value as Record<string, unknown>)[key];
 }

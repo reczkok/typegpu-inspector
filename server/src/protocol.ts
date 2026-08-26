@@ -29,9 +29,8 @@ export type HoverPresentationSettings = {
 export type InspectorSettings = {
   inspectOn: 'save' | 'hover' | 'save-and-hover' | 'off';
   /**
-   * Inspect a document once when it opens, so the expensive first session
-   * (Chromium launch, Vite boot, dependency optimization) is established
-   * before the user's first save instead of during it.
+   * Inspect the first TypeGPU document opened while the runtime is cold, so
+   * Chromium/Vite are established without inspecting every restored tab.
    */
   warmUpOnOpen: boolean;
   inspectorPackage: string;

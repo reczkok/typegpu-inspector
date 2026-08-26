@@ -1,6 +1,6 @@
 {
   "name": "typegpu-inspector",
-  "version": "0.4.3",
+  "version": "0.4.7",
   "private": true,
   "packageManager": "pnpm@10.34.4",
   "scripts": {
@@ -8,7 +8,7 @@
     "audit:examples": "pnpm --dir inspector exec tsx ../scripts/audit-examples.ts",
     "audit:runtime": "pnpm --dir inspector exec tsx ../scripts/runtime-corpus.mts",
     "audit:runtime:snapshot": "pnpm --dir inspector exec tsx ../scripts/runtime-corpus.mts --snapshot",
-    "build": "pnpm --dir server build && pnpm --dir editors/vscode build",
+    "build": "pnpm --dir inspector build && pnpm --dir server build && pnpm --dir editors/vscode build",
     "check": "pnpm --dir server check && pnpm --dir inspector typecheck && pnpm --dir editors/vscode check",
     "test": "pnpm --dir server test && pnpm --dir inspector test",
     "test:browser": "pnpm --dir inspector test:browser",

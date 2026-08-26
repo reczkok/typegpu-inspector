@@ -127,9 +127,9 @@ export async function materializeInspection(
   );
   const targets = new Map<string, MaterializedTarget>();
 
-  for (const target of discovered.targets) {
+  const materializedTargets = await Promise.all(discovered.targets.map(async (target) => {
     const report = reports.get(target.label);
-    if (!report) continue;
+    if (!report) return undefined;
     const analysis = report.wgsl ? analyzeWgsl(report.wgsl) : undefined;
     const layouts = extractGpuBindGroupLayouts(output, report);
     const pipelineState = extractGpuPipelineState(output, report);
@@ -155,7 +155,10 @@ export async function materializeInspection(
       // Report artifacts are an affordance, never a reason to discard a valid
       // runtime inspection. The hover simply omits the unavailable link.
     }
-    targets.set(target.id, materialized);
+    return [target.id, materialized] as const;
+  }));
+  for (const entry of materializedTargets) {
+    if (entry) targets.set(...entry);
   }
 
   const requested = requestedTargetIds ??
@@ -167,9 +170,47 @@ export async function materializeInspection(
   return {
     sourceVersion,
     completedAt: Date.now(),
-    output,
+    output: compactInspectorOutput(output),
     targets,
     ...(unreported.size > 0 ? { unreported } : {}),
+  };
+}
+
+/**
+ * The raw runtime envelope contains recorded GPU descriptors, console output,
+ * and environment evidence used only while materializing targets and writing
+ * the full report artifact. Keeping those payloads for every open document can
+ * retain large object graphs. Preserve exactly what editor surfaces consume;
+ * target reports remain shared with MaterializedTarget rather than copied.
+ */
+function compactInspectorOutput(output: InspectorOutput): InspectorOutput {
+  const timings = isRecord(output.stats?.timings)
+    ? output.stats.timings
+    : undefined;
+  const environment = output.environment;
+  const compactEnvironment = environment
+    ? {
+        ...(environment.gpuType !== undefined
+          ? { gpuType: environment.gpuType }
+          : {}),
+        ...(environment.browserVersion !== undefined
+          ? { browserVersion: environment.browserVersion }
+          : {}),
+        ...(environment.limits !== undefined
+          ? { limits: environment.limits }
+          : {}),
+      }
+    : undefined;
+  return {
+    ok: output.ok,
+    ...(output.summary ? { summary: output.summary } : {}),
+    ...(output.targets ? { targets: output.targets } : {}),
+    ...(timings ? { stats: { timings } } : {}),
+    ...(compactEnvironment && Object.keys(compactEnvironment).length > 0
+      ? { environment: compactEnvironment }
+      : {}),
+    ...(output.warnings ? { warnings: output.warnings } : {}),
+    ...(output.pageErrors ? { pageErrors: output.pageErrors } : {}),
   };
 }
 
@@ -611,9 +652,6 @@ function mergeInspectorOutputs(
     targets: mergedTargets,
     stats: { ...previous.stats, ...next.stats },
     environment: { ...previous.environment, ...next.environment },
-    // Recorded calls are only consumed while materializing the fresh output;
-    // keep the latest batch instead of accumulating every merge forever.
-    calls: next.calls ?? previous.calls ?? [],
     warnings: uniqueStrings([
       ...(previous.warnings ?? []),
       ...(next.warnings ?? []),

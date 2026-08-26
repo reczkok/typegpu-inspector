@@ -16,10 +16,26 @@ const SAMPLE_WGSL = '@compute @workgroup_size(1) fn main() { let value = 1u; }';
 
 describe('formatInspectionReport', () => {
   it('returns a compact summary by default', () => {
-    const formatted = formatInspectionReport(sampleReport()) as {
+    const report = sampleReport();
+    report.ledger = [{
+      kind: 'dependency-resolution',
+      key: 'dependency:typegpu',
+      status: 'satisfied',
+      discoveredBy: 'shape',
+    }];
+    report.targets[0]!.ledger = [{
+      kind: 'slot-value',
+      key: 'slot:test',
+      status: 'satisfied',
+      discoveredBy: 'shape',
+    }];
+    report.targets[0]!.resource = { resourceType: 'buffer' };
+    report.targets[0]!.bindGroupLayouts = [{ group: 0, source: 'resolution', entries: [] }];
+    const formatted = formatInspectionReport(report) as {
       ok: boolean;
       summary: Record<string, unknown>;
       targets: Array<Record<string, unknown>>;
+      ledger?: unknown;
       calls?: unknown;
     };
 
@@ -28,13 +44,30 @@ describe('formatInspectionReport', () => {
     expect(formatted.summary.totalMs).toBe(123.4);
     expect(formatted.targets[0]?.wgslSize).toBe(SAMPLE_WGSL.length);
     expect(formatted.targets[0]?.wgsl).toBeUndefined();
+    expect(formatted.targets[0]?.ledger).toBeUndefined();
+    expect(formatted.targets[0]?.resource).toBeUndefined();
+    expect(formatted.targets[0]?.bindGroupLayouts).toBeUndefined();
+    expect(formatted.targets[0]?.compilationMessages).toBeUndefined();
+    expect(formatted.ledger).toBeUndefined();
     expect(formatted.calls).toBeUndefined();
+  });
+
+  it('keeps the compact summary available in normal and full reports', () => {
+    const normal = formatInspectionReport(sampleReport(), {
+      verbosity: 'normal',
+    }) as { summary?: { pipelineCount?: number } };
+    const full = formatInspectionReport(sampleReport(), {
+      verbosity: 'full',
+    }) as { summary?: { pipelineCount?: number } };
+
+    expect(normal.summary?.pipelineCount).toBe(1);
+    expect(full.summary?.pipelineCount).toBe(1);
   });
 
   it('includes and truncates WGSL in full reports', () => {
     const formatted = formatInspectionReport(sampleReport(), {
       verbosity: 'full',
-      maxWgslBytes: 20,
+      maxWgslBytes: 40,
     }) as {
       targets: Array<{ wgsl?: string }>;
       calls?: Array<{ descriptor?: { code?: string } }>;
@@ -42,7 +75,50 @@ describe('formatInspectionReport', () => {
 
     expect(formatted.targets[0]?.wgsl).toContain('truncated');
     expect(formatted.targets[0]?.wgsl?.startsWith('@compute')).toBe(true);
+    expect(Buffer.byteLength(formatted.targets[0]?.wgsl ?? '', 'utf8')).toBeLessThanOrEqual(40);
+    expect(formatted.calls?.[0]?.descriptor?.code).toContain('omitted from call descriptor');
+  });
+
+  it('only repeats WGSL in call descriptors when explicitly requested', () => {
+    const formatted = formatInspectionReport(sampleReport(), {
+      verbosity: 'full',
+      includeCallWgsl: true,
+      maxWgslBytes: 40,
+    }) as { calls?: Array<{ descriptor?: { code?: string } }> };
+
     expect(formatted.calls?.[0]?.descriptor?.code).toContain('truncated');
+  });
+
+  it('classifies failures and hides browser stacks outside full output', () => {
+    const report = sampleReport();
+    report.ok = false;
+    report.targets[0] = {
+      ...report.targets[0]!,
+      ok: false,
+      error: {
+        message: 'Pipeline validation failed near setTimeout cleanup.',
+        stack: 'Error: Pipeline validation failed.\n    at http://generated.test/harness.js:1:1',
+      },
+      pipelineCreation: { attempted: true, ok: false, callIds: [1] },
+    };
+    report.pageErrors = [
+      'Error: Pipeline validation failed.\n    at http://generated.test/harness.js:1:1',
+    ];
+
+    const compact = formatInspectionReport(report) as {
+      targets: Array<{ failureCategory?: string; error?: { stack?: string } }>;
+      pageErrors: string[];
+    };
+    const full = formatInspectionReport(report, { verbosity: 'full' }) as {
+      targets: Array<{ error?: { stack?: string } }>;
+      pageErrors: string[];
+    };
+
+    expect(compact.targets[0]?.failureCategory).toBe('webgpu-validation');
+    expect(compact.targets[0]?.error?.stack).toBeUndefined();
+    expect(compact.pageErrors[0]).toBe('Error: Pipeline validation failed.');
+    expect(full.targets[0]?.error?.stack).toContain('generated.test');
+    expect(full.pageErrors[0]).toContain('generated.test');
   });
 
   it('suppresses WGSL and calls for diagnostics-only output', () => {
@@ -95,13 +171,13 @@ describe('formatInspectionReport', () => {
       diagnosticsOnly: true,
     }) as {
       ok: boolean;
-      diagnostics: { moduleImport?: TypeGpuInspectionReport['moduleImport'] };
+      moduleImport?: TypeGpuInspectionReport['moduleImport'];
     };
 
     expect(formatted.ok).toBe(true);
-    expect(formatted.diagnostics.moduleImport?.moduleImported).toBe(true);
-    expect(formatted.diagnostics.moduleImport?.inspectExportFound).toBe(false);
-    expect(formatted.diagnostics.moduleImport?.importOnly).toBe(true);
+    expect(formatted.moduleImport?.moduleImported).toBe(true);
+    expect(formatted.moduleImport?.inspectExportFound).toBe(false);
+    expect(formatted.moduleImport?.importOnly).toBe(true);
   });
 });
 
@@ -169,6 +245,17 @@ describe('sanitizeForJson code-bearing fields', () => {
 });
 
 describe('sanitizeForJson array truncation', () => {
+  it('uses a structural marker for repeated references', () => {
+    const shared = { value: 1 };
+    const sanitized = sanitizeForJson({ first: shared, second: shared }) as {
+      first: { value: number };
+      second: { __repeatedReference: string };
+    };
+
+    expect(sanitized.first).toEqual({ value: 1 });
+    expect(sanitized.second).toEqual({ __repeatedReference: 'Object' });
+  });
+
   it('uses a structural sentinel rather than a bare string', () => {
     const sanitized = sanitizeForJson({
       entries: Array.from({ length: 90 }, (_, index) => ({ index })),
@@ -279,10 +366,9 @@ describe('truncateUtf8', () => {
     }) as { targets: Array<{ wgsl?: string }> };
 
     const truncated = formatted.targets[0]?.wgsl ?? '';
-    const body = truncated.slice(0, truncated.indexOf('\n/* ... truncated'));
-    expect(Buffer.byteLength(body, 'utf8')).toBeLessThanOrEqual(10);
-    expect(body).not.toContain('�');
-    expect(body).toBe('// 😀');
+    expect(Buffer.byteLength(truncated, 'utf8')).toBeLessThanOrEqual(10);
+    expect(truncated).not.toContain('�');
+    expect(truncated).toBe('// /*…*/');
   });
 });
 

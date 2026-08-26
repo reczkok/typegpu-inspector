@@ -1,7 +1,23 @@
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
-import { chromium, type Browser } from 'playwright-chromium';
+import {
+  chromium,
+  type Browser,
+  type BrowserContextOptions,
+} from 'playwright-chromium';
+
+/**
+ * The inspector deliberately loads a loopback Vite server inside an isolated
+ * Playwright context. Project Vite configs commonly enable HTTPS with a
+ * development certificate (for example @vitejs/plugin-basic-ssl), which is
+ * intentionally not trusted by Chromium. Trust it inside this disposable
+ * inspection context so the harness behaves like the project's dev server
+ * without requiring users to modify their machine certificate store.
+ */
+export const INSPECTOR_BROWSER_CONTEXT_OPTIONS = {
+  ignoreHTTPSErrors: true,
+} satisfies BrowserContextOptions;
 
 const BROWSER_LAUNCH_ARGS = [
   '--enable-unsafe-webgpu',

@@ -137,7 +137,8 @@ const accessorPlaceholderProvider: Provider = {
             `auto-binding for slot '${slotName}'`,
           ),
           provider: 'synthesis',
-          provenance: 'placeholder value derived from its accessor schema',
+          provenance:
+            'non-degenerate placeholder value recursively derived from its accessor schema',
         };
       } catch {
         // Non-callable schema; another source may still match.

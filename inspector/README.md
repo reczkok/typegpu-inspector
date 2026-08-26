@@ -236,7 +236,9 @@ and GPU variables. When a resource also resolves as WGSL, the report includes
 both its structure and generated declaration.
 
 Editor-generated symbol targets can include `probeArguments` to call shellless
-helpers with schema-derived zero values. `probeBindings` can additionally bind
+helpers with schema-derived zero values. Common schemas accept either the
+concise `d.f32`/`d.vec2f` form or the explicit
+`ctx.d.f32`/`ctx.d.vec2f` form. `probeBindings` can additionally bind
 constructible accessors to inspection-only zero values. Struct schemas work
 recursively, including selectors such as `module.HitInfo` derived from
 `d.Infer<typeof HitInfo>` or `d.InferGPU<typeof HitInfo>`.
@@ -254,9 +256,11 @@ provider chain:
 3. *module scope* / *import scope* — bindings borrowed from bound functions
    and pipelines, or placeholder values synthesized from matching accessors'
    schemas, found among the module's exports, its runtime imports' exports,
-   setup values, and sibling targets (placeholders are ones-filled for
-   scalars/vectors to avoid comptime NaN traps; structs keep zeros; mutable
-   accessors are borrow-only);
+   setup values, and sibling targets. Synthesized placeholders are recursively
+   non-degenerate without relying on field names: scalars/vectors use ones,
+   matrices use identity, and structs/fixed arrays apply the same policy to
+   their members. This avoids comptime division-by-zero/NaN traps while keeping
+   the assumption explicit in the ledger; mutable accessors remain borrow-only;
 4. *synthesis* — descriptor parts (vertex attribs, fragment targets).
 
 Every decision lands in the target's `ledger` (provenance records with
@@ -388,10 +392,12 @@ Fields:
 
 - `summary`: compact target, pipeline, console, and compilation counts.
 - `targets`: per-target status, diagnostics, pipeline creation, and optional WGSL.
-- `dependencySummary`: core TypeGPU source routing and bundled fallback flags.
+- `dependencySummary`: compact `typegpu/*` source/version routing and bundled
+  fallback flags. Use `resolve_typegpu_context` for per-specifier paths.
 - `warnings`: sanitized context/dependency warnings.
 - `nextActions`: concrete retry hints.
-- `inspection`: the formatted report kept for compatibility.
+- `inspection`: deprecated duplicate of the formatted report, returned only
+  when `output.includeLegacyInspection` is `true`.
 
 Agent-facing outputs sanitize local absolute paths into labels such as
 `<projectRoot>`, `<packageRoot>`, `<workspaceRoot>`, and `<mcpPackage>`.
@@ -399,13 +405,21 @@ Agent-facing outputs sanitize local absolute paths into labels such as
 Default output is compact. Controls:
 
 - `verbosity`: `"summary"` (default), `"normal"`, or `"full"`.
-- `includeWgsl`: include WGSL in targets and shader-module descriptors. Defaults
-  to `true` only for `"full"`.
+- `includeWgsl`: include canonical WGSL in targets. Defaults to `true` only for
+  `"full"`.
+- `includeCallWgsl`: also repeat WGSL in shader-module call descriptors.
+  Defaults to `false`; use target WGSL unless debugging the raw call log.
 - `includeCalls`: include recorded GPU calls. Defaults to `true` only for
   `"full"`.
 - `maxWgslBytes`: truncate each included WGSL string to this many UTF-8 bytes.
 - `diagnosticsOnly`: return diagnostics, target status, console messages, and
   page errors.
+- `includeLegacyInspection`: repeat the formatted report under `inspection` for
+  older MCP consumers. Defaults to `false`.
+
+Failed targets include a machine-readable `failureCategory`: `source`,
+`shader-compiler`, `webgpu-validation`, `environment`, `timeout`, or `harness`.
+Summary and normal output omit browser stack frames; full output retains them.
 
 `inspectBody`, `inlineCode`, `setupBody`, and `browserSetup` are JavaScript or
 TypeScript source snippets. Pass actual newline characters in these fields when
@@ -436,6 +450,7 @@ Common diagnostic codes:
 - `webgpu-validation-timeout`
 - `pipeline-resource-shape`
 - `pipeline-validated-without-recorded-creation`
+- `structural-resource-only` (note: object methods were not pipeline-validated)
 - `raw-webgpu-pipeline-unsupported`
 - `typegpu-fragment-function-not-resolvable`
 - `module-import-failed`

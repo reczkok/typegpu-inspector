@@ -103,8 +103,10 @@ export async function listTypegpuExportsTool(
     return {
       structuredContent: sanitizeForAgent({
         ok: true,
-        resolvedContext: createPublicResolvedContext(resolvedContext),
-        dependencySummary: createDependencySummary(resolvedContext),
+        resolvedContext: createPublicResolvedContext(resolvedContext, {
+          includeDependencies: false,
+        }),
+        dependencySummary: createDependencySummary(resolvedContext, { compact: true }),
         ...scan,
         nextActions: nextActions.length > 0 ? nextActions : undefined,
       }, resolvedContext) as Record<string, unknown>,
@@ -156,16 +158,25 @@ export async function inspectTypegpuTool(
         : createInspectionNextActions(report, input)),
       ...createDependencyResolutionNextActions(resolvedContext),
     ];
+    const diagnosticsOnly = input.output?.diagnosticsOnly === true;
 
     return {
       structuredContent: sanitizeForAgent({
         ok: report.ok,
         ...createInspectionSurface(formatted),
-        resolvedContext: createPublicResolvedContext(resolvedContext),
-        dependencySummary: createDependencySummary(resolvedContext),
-        warnings: resolvedContext.warnings.length > 0 ? resolvedContext.warnings : undefined,
-        inspection: formatted,
-        nextActions: nextActions.length > 0 ? nextActions : undefined,
+        resolvedContext: diagnosticsOnly
+          ? undefined
+          : createPublicResolvedContext(resolvedContext, {
+              includeDependencies: false,
+            }),
+        dependencySummary: diagnosticsOnly
+          ? undefined
+          : createDependencySummary(resolvedContext, { compact: true }),
+        warnings: !diagnosticsOnly && resolvedContext.warnings.length > 0
+          ? resolvedContext.warnings
+          : undefined,
+        inspection: input.output?.includeLegacyInspection ? formatted : undefined,
+        nextActions: !diagnosticsOnly && nextActions.length > 0 ? nextActions : undefined,
       }, resolvedContext) as Record<string, unknown>,
       isError: !report.ok,
     };
@@ -269,6 +280,7 @@ function createCommonInspectionInput(
     dependencyResolution: context.dependencyResolution,
     verbosity: output.verbosity,
     includeWgsl: output.includeWgsl,
+    includeCallWgsl: output.includeCallWgsl,
     includeCalls: output.includeCalls,
     maxWgslBytes: output.maxWgslBytes,
     diagnosticsOnly: output.diagnosticsOnly,
@@ -280,6 +292,7 @@ function createReportOptions(input: AgentInspectionInput): InspectReportOptions 
   return {
     verbosity: output.verbosity,
     includeWgsl: output.includeWgsl,
+    includeCallWgsl: output.includeCallWgsl,
     includeCalls: output.includeCalls,
     maxWgslBytes: output.maxWgslBytes,
     diagnosticsOnly: output.diagnosticsOnly,

@@ -470,17 +470,11 @@ function compilerOffset(wgsl: string, message: CompilerMessage): number | undefi
   if (message.lineNum === undefined) return undefined;
   const line = Math.max(0, message.lineNum - 1);
   const character = Math.max(0, (message.linePos ?? 1) - 1);
-  let lineStart = 0;
-  let currentLine = 0;
-  for (let index = 0; index < wgsl.length && currentLine < line; index += 1) {
-    if (wgsl[index] === '\n') {
-      currentLine += 1;
-      lineStart = index + 1;
-    }
-  }
-  if (currentLine !== line) return undefined;
-  const lineEnd = wgsl.indexOf('\n', lineStart);
-  const end = lineEnd >= 0 ? lineEnd : wgsl.length;
+  const lineStarts = precomputeForWgsl(wgsl).lineStarts;
+  const lineStart = lineStarts[line];
+  if (lineStart === undefined) return undefined;
+  const nextLineStart = lineStarts[line + 1];
+  const end = nextLineStart === undefined ? wgsl.length : nextLineStart - 1;
   return Math.min(Math.max(lineStart, end - 1), lineStart + character);
 }
 

@@ -229,6 +229,17 @@ async function validateResourceTarget(
   const values = flattenInspectableResources(value);
   const resolvable = values.filter(shouldResolveResource);
 
+  if (values.length === 0) {
+    addTargetDiagnostics(report, [{
+      code: 'structural-resource-only',
+      severity: 'note',
+      message:
+        'Structural inspection succeeded, but the returned value exposed no concrete TypeGPU resource or pipeline to validate.',
+      hint:
+        'A passed resource target does not validate work hidden behind object methods. Return the concrete shader or pipeline as its own target for WebGPU validation.',
+    }]);
+  }
+
   if (values.length === 1 && resolvable.length === 1) {
     try {
       await validateResolvableTarget(resolvable[0], report, recorder, strictNames, waitBudget);

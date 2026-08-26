@@ -35,7 +35,7 @@ export type Requirement = {
 export type Provision = {
   value: unknown;
   provider: ProviderId;
-  /** Human-readable origin, e.g. "zero value of its accessor schema". */
+  /** Human-readable origin, e.g. "non-degenerate placeholder derived from its schema". */
   provenance: string;
   /** Bounded summary safe to serialize (summarizeTargetValue shape). */
   valueSummary?: unknown;

@@ -73,3 +73,26 @@ export const accessorFragment = tgpu.fragmentFn({ out: d.vec4f })(() => {
   'use gpu';
   return paramsAccess.$.tint;
 });
+
+export const NondegenerateParams = d.struct({
+  dimensions: d.vec2f,
+  divisor: d.f32,
+  transform: d.mat4x4f,
+  samples: d.arrayOf(d.f32, 2),
+});
+
+export const nondegenerateParamsAccess = tgpu.accessor(NondegenerateParams);
+
+export const nondegenerateVertex = tgpu.vertexFn({
+  out: { position: d.builtin.position },
+})(() => {
+  'use gpu';
+  const params = nondegenerateParamsAccess.$;
+  const aspect = params.dimensions.x / params.dimensions.y;
+  const scalarRatio = params.divisor / params.divisor;
+  const matrixRatio = params.transform.columns[0].x / params.transform.columns[3].w;
+  const arrayRatio = params.samples[0] / params.samples[1];
+  return {
+    position: d.vec4f(aspect + scalarRatio + matrixRatio + arrayRatio, 0, 0, 1),
+  };
+});

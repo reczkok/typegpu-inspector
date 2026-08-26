@@ -1,6 +1,8 @@
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -16,6 +18,9 @@ import { QUIESCENT_EDITOR_BROWSER_SETUP } from '../../server/src/editorBrowserSe
 
 const maybeIt = process.env.TYPEGPU_MCP_RUN_BROWSER_TESTS === '1' ? it : it.skip;
 const cwd = resolve(import.meta.dirname, '..');
+const basicSslModuleUrl = pathToFileURL(
+  createRequire(import.meta.url).resolve('@vitejs/plugin-basic-ssl'),
+).href;
 
 afterAll(async () => {
   await closeAllInspectorSessions();
@@ -23,6 +28,53 @@ afterAll(async () => {
 });
 
 describe('browser harness', () => {
+  maybeIt.each([false, true])(
+    'accepts a self-signed HTTPS Vite harness (reuseBrowser=%s)',
+    async (reuseBrowser) => {
+      const tempDir = await mkdtemp(join(tmpdir(), 'typegpu-https-harness-'));
+      const modulePath = join(tempDir, 'https-probe.ts');
+      const viteConfigPath = join(tempDir, 'vite.config.mjs');
+
+      try {
+        await writeFile(
+          modulePath,
+          `
+            export async function inspect({ tgpu, d }) {
+              const helper = tgpu.fn([], d.f32)(() => {
+                'use gpu';
+                return d.f32(6);
+              });
+              return { label: 'https-probe', kind: 'resolvable', value: helper };
+            }
+          `,
+          'utf8',
+        );
+        await writeFile(
+          viteConfigPath,
+          `
+            import basicSsl from ${JSON.stringify(basicSslModuleUrl)};
+            export default { plugins: [basicSsl()] };
+          `,
+          'utf8',
+        );
+
+        const report = await inspectTypegpuModule({
+          cwd,
+          source: { kind: 'modulePath', modulePath },
+          viteConfigPath,
+          reuseBrowser,
+          timeoutMs: 30_000,
+        });
+
+        expect(report.ok, JSON.stringify(report.causes, null, 2)).toBe(true);
+        expect(report.targets[0]?.label).toBe('https-probe');
+        expect(report.targets[0]?.wgsl).toContain('6');
+      } finally {
+        await rm(tempDir, { force: true, recursive: true });
+      }
+    },
+  );
+
   maybeIt('resolves finite generic helper specializations into branch-pruned WGSL', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'typegpu-polymorphic-helper-'));
     const modulePath = join(tempDir, 'evolve.ts');
@@ -1337,6 +1389,47 @@ describe('browser harness', () => {
       ]),
     );
     expect(report.stats.renderPipelineCount).toBe(1);
+  });
+
+  maybeIt('recursively avoids degenerate synthesized bindings in composite schemas', async () => {
+    const report = await inspectTypegpuSymbols({
+      cwd: resolve(import.meta.dirname, '..'),
+      modulePath: 'test/fixtures/symbol-targets.ts',
+      targets: [
+        {
+          label: 'non-degenerate composite accessor render',
+          kind: 'render-pipeline',
+          vertex: 'nondegenerateVertex',
+          fragment: 'exportedFragment',
+          descriptor: { targets: { format: 'bgra8unorm' } },
+        },
+      ],
+      timeoutMs: 30_000,
+    });
+
+    expect(report.ok, JSON.stringify(report.targets, null, 2)).toBe(true);
+    expect(report.targets[0]?.outcome).toBe('passed-with-assumptions');
+    expect(report.targets[0]?.wgsl).not.toContain('0.0 / 0.0');
+    expect(report.targets[0]?.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: 'slot-bindings-auto-applied',
+          severity: 'note',
+          hint: expect.stringContaining('non-degenerate placeholder value'),
+        }),
+      ]),
+    );
+    expect(report.targets[0]?.ledger).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'slot-value',
+          status: 'satisfied',
+          provider: 'synthesis',
+          provenance: expect.stringContaining('recursively derived'),
+          detail: expect.objectContaining({ slotName: 'nondegenerateParamsAccess' }),
+        }),
+      ]),
+    );
   });
 
   maybeIt('auto-binds an accessor imported from a sibling module', async () => {

@@ -7,14 +7,29 @@ import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { parseJSONC, stringifyJSONC, type JSONCParseError } from 'confbox/jsonc';
 import { applyEdits, modify } from 'jsonc-parser';
-import { launchInspectorBrowser } from './inspect/browser.ts';
 import which from 'which';
 import { isRecord } from './shared.ts';
 
 const MIN_NODE_MAJOR = 20;
 const packageJson = JSON.parse(
-  readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'),
+  readFileSync(packageJsonPath(import.meta.url), 'utf8'),
 ) as { version?: string };
+
+function packageJsonPath(moduleUrl: string): string {
+  const moduleDir = dirname(fileURLToPath(moduleUrl));
+  for (const candidate of [
+    resolve(moduleDir, '..', 'package.json'),
+    resolve(moduleDir, '..', '..', 'package.json'),
+  ]) {
+    try {
+      readFileSync(candidate, 'utf8');
+      return candidate;
+    } catch {
+      // Source modules live under src/; compiled chunks live under dist/chunks/.
+    }
+  }
+  return resolve(moduleDir, '..', 'package.json');
+}
 
 export const PACKAGE_NAME = 'typegpu-runtime-inspector-mcp';
 export const PACKAGE_SPEC = `${PACKAGE_NAME}@${packageJson.version ?? 'latest'}`;
@@ -519,6 +534,7 @@ function runCommand(
 async function launchInspectorChromium(): Promise<string> {
   // Shares the self-healing launcher, so a doctor run on a machine whose npx
   // install skipped the browser download repairs it instead of just failing.
+  const { launchInspectorBrowser } = await import('./inspect/browser.ts');
   const browser = await launchInspectorBrowser();
   try {
     return browser.version();

@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { resolveTypegpuContext } from '../src/context.ts';
 import { listTypegpuExportsFromFile } from '../src/exportScanner.ts';
 import { resolveTypegpuContextTool } from '../src/agentTools.ts';
+import { createDependencySummary } from '../src/agentOutput.ts';
 
 describe('resolveTypegpuContext', () => {
   it('prefers explicit project roots over MCP roots', async () => {
@@ -203,6 +204,16 @@ describe('resolveTypegpuContext', () => {
       path: realpathSync.native(join(typegpuSourceRoot, 'common/index.ts')),
       version: '9.9.9',
     });
+    expect(createDependencySummary(context, { compact: true })).toMatchObject({
+      coreTypegpuFamily: {
+        family: 'typegpu/*',
+        source: 'packageAlias',
+        version: '9.9.9',
+      },
+    });
+    expect(
+      createDependencySummary(context, { compact: true }).coreTypegpu,
+    ).toBeUndefined();
     expect(
       context.warnings.some((warning) => warning.includes('typegpu fell back')),
     ).toBe(false);
@@ -292,6 +303,10 @@ describe('resolveTypegpuContext', () => {
       hasBundledTypegpuFallback: false,
       allCoreTypegpuFromPackageAlias: true,
     });
+    expect(
+      (result.structuredContent.resolvedContext as Record<string, unknown>)
+        .dependencySummary,
+    ).toBeUndefined();
     expect(result.structuredContent.resolvedContext).toMatchObject({
       projectRoot: '<projectRoot>',
       packageRoot: '<packageRoot>',

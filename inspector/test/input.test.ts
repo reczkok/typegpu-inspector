@@ -295,6 +295,31 @@ describe('normalizeSymbolInput', () => {
     expect(result.inlineCode).toContain('true);');
   });
 
+  it('resolves concise d.* probe schemas against the inspection context', () => {
+    const cwd = resolve(import.meta.dirname, '..');
+    const result = buildSymbolInspectionModule(
+      normalizeSymbolInput({
+        cwd,
+        modulePath: 'test/fixtures/symbol-targets.ts',
+        targets: [
+          {
+            selector: 'parameterizedHelper',
+            kind: 'resolvable',
+            probeArgumentPlan: [{ schema: 'd.vec4f' }],
+            probeBindings: [{ slot: 'paramsAccess', schema: 'd.f32' }],
+          },
+        ],
+      }),
+    );
+
+    expect(result.inlineCode).toContain(
+      '__typegpuMcpReadSelector(inspectedModule, "ctx.d.vec4f"',
+    );
+    expect(result.inlineCode).toContain(
+      '__typegpuMcpReadSelector(inspectedModule, "ctx.d.f32"',
+    );
+  });
+
   it('generates mixed zero-value and concrete-value helper arguments', () => {
     const cwd = resolve(import.meta.dirname, '..');
     const result = buildSymbolInspectionModule(

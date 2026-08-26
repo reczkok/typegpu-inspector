@@ -84,6 +84,7 @@ export function normalizeSymbolInput(input: InspectTypegpuSymbolsInput): Normali
     reportOptions: {
       verbosity: input.verbosity,
       includeWgsl: input.includeWgsl,
+      includeCallWgsl: input.includeCallWgsl,
       includeCalls: input.includeCalls,
       maxWgslBytes: input.maxWgslBytes,
       diagnosticsOnly: input.diagnosticsOnly,
@@ -728,7 +729,9 @@ function createSymbolTargetLines(
           return `${local}${path.map((part) => `[${JSON.stringify(part)}]`).join('')}`;
         }
         const ref = 'refSchema' in argument;
-        const schema = ref ? argument.refSchema : argument.schema;
+        const schema = normalizeSchemaSelector(
+          ref ? argument.refSchema : argument.schema,
+        );
         const local = `__typegpuMcpProbeSchema${index}_${argumentIndex}`;
         const schemaLabel = target.probeArgumentPlan
           ? `targets[${index}].probeArgumentPlan[${argumentIndex}].${ref ? 'refSchema' : 'schema'}`
@@ -767,7 +770,7 @@ function createSymbolTargetLines(
             `targets[${index}].probeBindings[${bindingIndex}].slot`,
           )}, roots);`,
           `const ${schemaLocal} = __typegpuMcpReadSelector(inspectedModule, ${JSON.stringify(
-            binding.schema,
+            normalizeSchemaSelector(binding.schema),
           )}, ${JSON.stringify(schemaLabel)}, roots);`,
           `${probe} = ${probe}.with(${slotLocal}, __typegpuMcpCreateZeroValue(${schemaLocal}, ${JSON.stringify(
             schemaLabel,
@@ -832,6 +835,10 @@ function splitSelectorRoot(selector: string): { root: string; path: string[] } {
   const parts = selector.split('.').filter(Boolean);
   const root = parts.shift() ?? selector;
   return { root, path: parts };
+}
+
+function normalizeSchemaSelector(selector: string): string {
+  return selector.startsWith('d.') ? `ctx.${selector}` : selector;
 }
 
 function describeProbeArgumentDefaults(

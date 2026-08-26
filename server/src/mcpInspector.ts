@@ -1,7 +1,8 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { existsSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { mkdir, open, readFile, unlink } from 'node:fs/promises';
 import { dirname, join, relative, resolve, isAbsolute } from 'node:path';
 import type { InspectionTarget } from './discovery.js';
 import { createInspectionDocumentHtml } from './documentFixture.js';
@@ -14,6 +15,7 @@ export class RuntimeInspectorClient {
   private stderrTail = '';
   /** Incremented on every reset so an in-flight connect can detect it. */
   private generation = 0;
+  private idleCloseTimer: NodeJS.Timeout | undefined;
 
   public constructor(
     private readonly workspaceRoot: string,
@@ -25,6 +27,7 @@ export class RuntimeInspectorClient {
     targets: InspectionTarget[],
     signal?: AbortSignal,
   ): Promise<InspectorOutput> {
+    this.cancelIdleClose();
     try {
       signal?.throwIfAborted();
       const first = await this.inspectOnce(modulePath, targets, signal);
@@ -153,7 +156,28 @@ export class RuntimeInspectorClient {
   }
 
   public async close(): Promise<void> {
+    this.cancelIdleClose();
     await this.resetConnection();
+  }
+
+  /**
+   * Release Chromium/Vite only after the editor has had no TypeGPU document
+   * open for a grace period. Reopening during the grace period stays warm.
+   */
+  public scheduleIdleClose(delayMs: number, onClosed?: () => void): void {
+    this.cancelIdleClose();
+    if (!this.client && !this.connecting) return;
+    this.idleCloseTimer = setTimeout(() => {
+      this.idleCloseTimer = undefined;
+      void this.resetConnection().finally(onClosed);
+    }, delayMs);
+    this.idleCloseTimer.unref?.();
+  }
+
+  public cancelIdleClose(): void {
+    if (!this.idleCloseTimer) return;
+    clearTimeout(this.idleCloseTimer);
+    this.idleCloseTimer = undefined;
   }
 
   private async connect(): Promise<Client> {
@@ -163,7 +187,7 @@ export class RuntimeInspectorClient {
     const generation = this.generation;
     this.connecting = (async () => {
       const settings = this.settings();
-      const launch = resolveInspectorLaunch(settings.inspectorPackage);
+      const launch = await resolveInspectorLaunch(settings.inspectorPackage);
       const transport = new StdioClientTransport({
         command: launch.command,
         args: launch.args,
@@ -177,7 +201,7 @@ export class RuntimeInspectorClient {
       });
       const client = new Client({
         name: 'typegpu-zed-language-server',
-        version: '0.4.3',
+        version: '0.4.7',
       });
       await client.connect(transport, { timeout: CONNECT_TIMEOUT_MS });
       if (this.generation !== generation) {
@@ -257,9 +281,9 @@ function isInsideDirectory(parent: string, candidate: string): boolean {
 const PACKAGE_SPEC_PATTERN =
   /^(@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*(@[a-zA-Z0-9-._^~><=+ ]+)?$/;
 
-function resolveInspectorLaunch(
+export async function resolveInspectorLaunch(
   inspectorPackage: string,
-): { command: string; args: string[]; env?: Record<string, string> } {
+): Promise<{ command: string; args: string[]; env?: Record<string, string> }> {
   if (inspectorPackage !== 'bundled') {
     if (!PACKAGE_SPEC_PATTERN.test(inspectorPackage)) {
       throw new Error(
@@ -280,6 +304,15 @@ function resolveInspectorLaunch(
     'typegpu-runtime-inspector-mcp.mjs',
   );
   if (!existsSync(bin)) {
+    const runtimeDir = process.env.TYPEGPU_INSPECTOR_RUNTIME_DIR;
+    if (runtimeDir && isAbsolute(runtimeDir)) {
+      const installedBin = await ensureInspectorRuntime(runtimeDir);
+      return {
+        command: process.execPath,
+        args: [installedBin],
+        env: { ...getDefaultEnvironment(), ELECTRON_RUN_AS_NODE: '1' },
+      };
+    }
     // Standalone npm-published server builds have no monorepo checkout next
     // to server.cjs; launch the published runtime instead. npx caches the
     // package, and its Playwright Chromium download happens once.
@@ -302,7 +335,146 @@ function resolveInspectorLaunch(
 
 // Keep in lockstep with the runtime inspector version released alongside
 // this server (both live in the typegpu-inspector monorepo).
-const FALLBACK_INSPECTOR_SPEC = 'typegpu-runtime-inspector-mcp@0.4.3';
+const FALLBACK_INSPECTOR_SPEC = 'typegpu-runtime-inspector-mcp@0.4.7';
+const FALLBACK_INSPECTOR_VERSION = '0.4.7';
+
+const runtimeInstallPromises = new Map<string, Promise<string>>();
+
+function ensureInspectorRuntime(runtimeDir: string): Promise<string> {
+  const normalizedDir = resolve(runtimeDir);
+  let installing = runtimeInstallPromises.get(normalizedDir);
+  if (!installing) {
+    installing = installInspectorRuntime(normalizedDir).catch((error) => {
+      runtimeInstallPromises.delete(normalizedDir);
+      throw error;
+    });
+    runtimeInstallPromises.set(normalizedDir, installing);
+  }
+  return installing;
+}
+
+async function installInspectorRuntime(runtimeDir: string): Promise<string> {
+  const packageRoot = join(
+    runtimeDir,
+    'node_modules',
+    'typegpu-runtime-inspector-mcp',
+  );
+  const bin = join(packageRoot, 'bin', 'typegpu-runtime-inspector-mcp.mjs');
+  if (await installedRuntimeMatches(packageRoot, bin)) return bin;
+
+  await mkdir(runtimeDir, { recursive: true });
+  const releaseLock = await acquireRuntimeInstallLock(runtimeDir);
+  try {
+    // A second VS Code window may have completed the install while this one
+    // waited for the cross-process lock.
+    if (await installedRuntimeMatches(packageRoot, bin)) return bin;
+    await runRuntimeInstall(runtimeDir);
+    if (!(await installedRuntimeMatches(packageRoot, bin))) {
+      throw new Error(
+        `npm completed but ${FALLBACK_INSPECTOR_SPEC} was not installed under ${runtimeDir}.`,
+      );
+    }
+    return bin;
+  } finally {
+    await releaseLock();
+  }
+}
+
+async function installedRuntimeMatches(
+  packageRoot: string,
+  bin: string,
+): Promise<boolean> {
+  if (!existsSync(bin)) return false;
+  try {
+    const parsed: unknown = JSON.parse(
+      await readFile(join(packageRoot, 'package.json'), 'utf8'),
+    );
+    return isRecord(parsed) && parsed.version === FALLBACK_INSPECTOR_VERSION;
+  } catch {
+    return false;
+  }
+}
+
+async function runRuntimeInstall(runtimeDir: string): Promise<void> {
+  const command = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  const args = [
+    'install',
+    '--no-save',
+    '--package-lock=false',
+    '--ignore-scripts',
+    '--no-audit',
+    '--no-fund',
+    '--loglevel=error',
+    '--prefix',
+    runtimeDir,
+    FALLBACK_INSPECTOR_SPEC,
+  ];
+  await new Promise<void>((resolveInstall, rejectInstall) => {
+    const child = spawn(command, args, {
+      cwd: runtimeDir,
+      env: getDefaultEnvironment(),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let tail = '';
+    const collect = (chunk: unknown) => {
+      tail = `${tail}${String(chunk)}`.slice(-8_000);
+    };
+    child.stdout?.on('data', collect);
+    child.stderr?.on('data', collect);
+    child.on('error', rejectInstall);
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolveInstall();
+      } else {
+        rejectInstall(
+          new Error(
+            `Could not install ${FALLBACK_INSPECTOR_SPEC} (npm exited ${code}).${tail ? `\n${tail}` : ''}`,
+          ),
+        );
+      }
+    });
+  });
+}
+
+async function acquireRuntimeInstallLock(
+  runtimeDir: string,
+): Promise<() => Promise<void>> {
+  const lockPath = join(runtimeDir, '.install.lock');
+  const deadline = Date.now() + RUNTIME_INSTALL_LOCK_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    try {
+      const handle = await open(lockPath, 'wx');
+      await handle.writeFile(String(process.pid));
+      await handle.close();
+      return async () => {
+        await unlink(lockPath).catch(() => undefined);
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      if (!(await runtimeInstallLockOwnerAlive(lockPath))) {
+        await unlink(lockPath).catch(() => undefined);
+        continue;
+      }
+      await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+    }
+  }
+  throw new Error(
+    `Timed out waiting for another editor window to install ${FALLBACK_INSPECTOR_SPEC}.`,
+  );
+}
+
+async function runtimeInstallLockOwnerAlive(lockPath: string): Promise<boolean> {
+  try {
+    const pid = Number.parseInt(await readFile(lockPath, 'utf8'), 10);
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+const RUNTIME_INSTALL_LOCK_TIMEOUT_MS = 600_000;
 
 
 function isClosedConnectionError(error: unknown): boolean {

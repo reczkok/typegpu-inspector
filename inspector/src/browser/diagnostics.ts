@@ -344,7 +344,7 @@ function getResourceTypeHint(resourceType: string): string {
     return 'Use this value as the `attribs` selector of a render-pipeline target instead of resolving it directly.';
   }
   if (resourceType === 'slot' || resourceType.endsWith('accessor')) {
-    return 'Inspect a function or pipeline that uses this slot/accessor instead — the inspector auto-binds default-less accessors with schema-derived zero values and borrows bindings from exported pipelines/bound functions — or bind it explicitly through a target `with` entry or `root.with(...)` wrapper.';
+    return 'Inspect a function or pipeline that uses this slot/accessor instead — the inspector prefers bindings borrowed from exported pipelines/bound functions, then auto-binds default-less accessors with recursively non-degenerate schema-derived placeholders — or bind it explicitly through a target `with` entry or `root.with(...)` wrapper.';
   }
   return 'Select a shader-resolvable TypeGPU function/expression, or wrap this resource into a pipeline target.';
 }

@@ -36,7 +36,8 @@ export function inferTargetOutcome(input: {
   if (input.ok) {
     return hasInspectionAssumptions(input.ledger) ||
         input.diagnostics?.some((diagnostic) =>
-          diagnostic.code === 'webgpu-validation-unavailable'
+          diagnostic.code === 'webgpu-validation-unavailable' ||
+          diagnostic.code === 'structural-resource-only'
         )
       ? 'passed-with-assumptions'
       : 'passed';

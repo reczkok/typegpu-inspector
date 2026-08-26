@@ -102,7 +102,7 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
     },
     serverInfo: {
       name: 'TypeGPU Inspector',
-      version: '0.4.1',
+      version: '0.4.7',
     },
   };
 });
@@ -132,6 +132,7 @@ connection.onDidChangeConfiguration(async (change) => {
     await inspector.close();
     inspector = new RuntimeInspectorClient(workspaceRoot, () => settings);
     inspectorSessionWarm = false;
+    inspectorWarmupInFlight = false;
   }
   // Surface toggles (diagnostics, sourceMapping, inlayHints, ...) must take
   // effect immediately, not on the next save: recompute diagnostics from the
@@ -161,21 +162,29 @@ function refreshAllSurfaces(): void {
 
 documents.onDidOpen(({ document }) => {
   const state = ensureFreshState(document);
+  if (state && state.discovered.targets.length > 0) {
+    inspector.cancelIdleClose();
+  }
   publishDiagnostics(document, []);
   // Establish the expensive first inspector session (Chromium, Vite,
   // dependency optimization) while the user is still reading the file, so
   // their first save lands on a warm session instead of paying the cold cost.
   if (
     settings.warmUpOnOpen &&
+    !inspectorSessionWarm &&
+    !inspectorWarmupInFlight &&
     (settings.inspectOn === 'save' || settings.inspectOn === 'save-and-hover') &&
     state &&
     state.discovered.targets.length > 0
   ) {
+    inspectorWarmupInFlight = true;
     void requestInspection(
       document,
       state.discovered.targets.map((target) => target.id),
       'background',
-    );
+    ).finally(() => {
+      inspectorWarmupInFlight = false;
+    });
   }
 });
 
@@ -194,6 +203,12 @@ documents.onDidClose(({ document }) => {
   progress.clearDocument(document.uri);
   states.delete(document.uri);
   publishDiagnostics(document, []);
+  if (![...states.values()].some((state) => state.discovered.targets.length > 0)) {
+    inspector.scheduleIdleClose(INSPECTOR_IDLE_CLOSE_GRACE_MS, () => {
+      inspectorSessionWarm = false;
+      inspectorWarmupInFlight = false;
+    });
+  }
 });
 
 documents.onDidSave(({ document }) => {
@@ -384,6 +399,8 @@ type InspectionStatus = {
 };
 
 let inspectorSessionWarm = false;
+let inspectorWarmupInFlight = false;
+const INSPECTOR_IDLE_CLOSE_GRACE_MS = 60_000;
 
 function sendInspectionStatus(status: InspectionStatus): void {
   void connection.sendNotification('typegpu/inspectionStatus', status);
