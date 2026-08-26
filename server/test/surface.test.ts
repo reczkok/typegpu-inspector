@@ -1376,6 +1376,55 @@ fn main() {
       end: { line: asinLine, character: asinCharacter + 'asin'.length },
     });
 
+    const unreachable = await materializeInspection(
+      '/workspace',
+      '/workspace/rotate.ts',
+      1,
+      discovered,
+      {
+        ok: true,
+        targets: [{
+          label: 'rotateXY',
+          kind: 'resolvable',
+          ok: true,
+          wgsl: 'fn rotateXY(v: vec2f) -> vec2f {\n  return v;\n  let x = 1;\n}\n',
+          compilationMessages: [
+            { type: 'warning', message: 'code is unreachable', lineNum: 3, linePos: 3 },
+          ],
+        }],
+      },
+    );
+    const warning = createDiagnostics('file:///workspace/rotate.ts', discovered, unreachable)[0]!;
+    expect(warning.message).toBe('rotateXY: code is unreachable (generated WGSL line 3)');
+    expect(warning.range).toEqual(discovered.symbols[0]!.range);
+
+    const probed = await materializeInspection(
+      '/workspace',
+      '/workspace/rotate.ts',
+      1,
+      discovered,
+      {
+        ok: false,
+        targets: [{
+          label: 'rotateXY',
+          kind: 'resolvable',
+          ok: false,
+          error: {
+            name: 'Error',
+            message: [
+              'Resolution of the following tree failed:',
+              '- <root>',
+              '- fn:__typegpuMcpProbe14',
+              '- fn:rotateXY: Unsupported data types: vec2i.',
+            ].join('\n'),
+          },
+        }],
+      },
+    );
+    expect(
+      createDiagnostics('file:///workspace/rotate.ts', discovered, probed)[0]!.message,
+    ).toBe('rotateXY: rotateXY: Unsupported data types: vec2i.');
+
     const unmapped = createDiagnostics(
       'file:///workspace/rotate.ts',
       discovered,

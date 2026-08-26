@@ -290,7 +290,7 @@ export function serializeError(error: unknown): SerializedError {
   if (error instanceof Error) {
     return {
       name: error.name,
-      message: error.message,
+      message: scrubProbeNames(error.message),
       stack: error.stack,
       cause: sanitizeForJson(error.cause),
     };
@@ -298,11 +298,27 @@ export function serializeError(error: unknown): SerializedError {
   if (error && typeof error === 'object' && 'message' in error) {
     return {
       name: error.constructor?.name,
-      message: String((error as { message: unknown }).message),
+      message: scrubProbeNames(String((error as { message: unknown }).message)),
       cause: sanitizeForJson((error as { cause?: unknown }).cause),
     };
   }
-  return { message: String(error) };
+  return { message: scrubProbeNames(String(error)) };
+}
+
+const PROBE_TREE_LINE = /^\s*- [A-Za-z*]+:__typegpuMcp\w*\s*$/;
+const PROBE_IDENTIFIER = /__typegpuMcp\w*/g;
+
+/**
+ * Probe wrappers are inspector scaffolding around the user's function; their
+ * generated names mean nothing to a reader, so resolution trees drop those
+ * entries and any other mention becomes `<probe>`.
+ */
+export function scrubProbeNames(message: string): string {
+  return message
+    .split('\n')
+    .filter((line) => !PROBE_TREE_LINE.test(line))
+    .join('\n')
+    .replace(PROBE_IDENTIFIER, '<probe>');
 }
 
 export type SanitizeJsonOptions = {

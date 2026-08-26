@@ -584,15 +584,21 @@ export function createDiagnostics(
       // High-confidence mappings pin the exact authored token. Medium
       // confidence (ordinal/inline heuristics that passed the ambiguity
       // refusals in sourceMapping.ts) still points at the guessed token, but
-      // the diagnostic says so; anything weaker falls back to the declaration.
-      const approximate = mapping?.confidence === 'medium' &&
-        mapping.sourceRange !== undefined;
+      // the diagnostic says so. A declaration-level fallback is not a guess,
+      // so it names the generated line instead.
+      const pinned = mapping?.sourceRange !== undefined &&
+        mapping.strategy !== 'declaration-name';
+      const suffix = pinned && mapping.confidence === 'medium'
+        ? ' (approximate source location)'
+        : !pinned && mapping?.confidence !== 'high' && message.lineNum
+        ? ` (generated WGSL line ${message.lineNum})`
+        : '';
       diagnostics.push({
         range: mapping?.sourceRange ?? fallbackSymbol.range,
         severity,
         source: 'TypeGPU Inspector',
         code: 'wgsl-compilation',
-        message: `${target.target.label}: ${message.message}${approximate ? ' (approximate source location)' : ''}`,
+        message: `${target.target.label}: ${message.message}${suffix}`,
         ...(relatedInformation.length > 0 ? { relatedInformation } : {}),
         data: {
           sourceUri,
@@ -2838,7 +2844,8 @@ function parseResolutionTrace(error: unknown, depth = 0): ResolutionTrace | unde
       };
     })
     .filter((entry) =>
-      entry.name !== '' && entry.name !== '<root>' && entry.name !== '<unnamed>'
+      entry.name !== '' && entry.name !== '<root>' && entry.name !== '<unnamed>' &&
+      !isProbeScaffolding(entry.name)
     );
   const deepest = named[named.length - 1];
   if (!deepest) return undefined;
@@ -2849,6 +2856,11 @@ function parseResolutionTrace(error: unknown, depth = 0): ResolutionTrace | unde
       : {}),
     path: named.map((entry) => entry.name),
   };
+}
+
+/** Runtimes before 0.5.2 leak the inspector's probe wrapper names into traces. */
+function isProbeScaffolding(name: string): boolean {
+  return name.startsWith('__typegpuMcp') || name === '<probe>';
 }
 
 function formatResolutionTrace(trace: ResolutionTrace): string {
