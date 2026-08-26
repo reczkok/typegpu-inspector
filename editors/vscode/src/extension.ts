@@ -65,7 +65,7 @@ function renderStatus(item: StatusBarItem, status: InspectionStatus): void {
       const seconds = ((status.elapsedMs ?? 0) / 1000).toFixed(1);
       item.text = `${failed > 0 ? '$(warning)' : '$(check)'} TypeGPU ${passed}/${total} · ${seconds}s`;
       item.tooltip = failed > 0
-        ? `${file}: ${failed} of ${total} targets failed inspection — hover them for details.`
+        ? `${file}: ${failed} of ${total} targets failed inspection. Hover them for details.`
         : `${file}: all ${total} targets inspected in ${seconds}s.`;
       break;
     }
@@ -164,16 +164,16 @@ async function ensureRuntimeConsent(context: ExtensionContext): Promise<boolean>
 
   for (;;) {
     const picked = await window.showInformationMessage(
-      'TypeGPU Inspector runs your shaders for real',
+      'TypeGPU Inspector needs a Chromium process',
       {
         modal: true,
         detail: [
-          'To report exact pipelines, layouts, and generated WGSL, this extension:',
+          'It downloads a headless Chromium and the runtime package (about 170 MB, 550 MB on disk) into:',
+          context.globalStorageUri.fsPath,
           '',
-          `• downloads the typegpu-runtime-inspector-mcp package and a Playwright Chromium (about 170 MB to download, 550 MB on disk) into ${context.globalStorageUri.fsPath};`,
-          '• executes this project\'s top-level TypeGPU module code inside that headless browser whenever you save or hover.',
+          'The browser stays running while you work on TypeGPU files and uses a few hundred MB of memory.',
           '',
-          'Nothing is sent anywhere and no telemetry is collected. You can delete the download at any time.',
+          'Everything runs locally. Nothing is sent anywhere.',
         ].join('\n'),
       },
       'Continue',
@@ -371,7 +371,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
     commands.registerCommand('typegpuInspector.showOutput', () => {
       if (!client) {
         void window.showInformationMessage(
-          'TypeGPU Inspector has not started yet — open a file that imports typegpu.',
+          'TypeGPU Inspector has not started yet. Open a file that imports typegpu.',
         );
         return;
       }
@@ -414,7 +414,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
       }
       if (!client) {
         void window.showInformationMessage(
-          'TypeGPU Inspector has not started yet — open a file that imports typegpu.',
+          'TypeGPU Inspector has not started yet. Open a file that imports typegpu.',
         );
         return;
       }
@@ -427,7 +427,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
       }
       if (!client) {
         void window.showInformationMessage(
-          'TypeGPU Inspector has not started yet — open a file that imports typegpu.',
+          'TypeGPU Inspector has not started yet. Open a file that imports typegpu.',
         );
         return;
       }
