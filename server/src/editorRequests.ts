@@ -1,12 +1,17 @@
 import type { Range } from 'vscode-languageserver/node';
 import type { DiscoveredModule } from './discovery.js';
 import { compilerGeneratedRange } from './sourceMapping.js';
-import type { DocumentInspection } from './surface.js';
+import {
+  createHover,
+  type DocumentInspection,
+  type SurfaceOptions,
+} from './surface.js';
 
 /**
- * Editor-specific requests (`typegpu/targets`, `typegpu/wgsl`) behind the
- * VS Code generated-WGSL views. Additive: clients that do not know them never
- * send them, and the LSP surfaces stay the source of truth for Zed.
+ * Editor-specific requests (`typegpu/targets`, `typegpu/wgsl`,
+ * `typegpu/report`) behind the VS Code generated-WGSL and report views.
+ * Additive: clients that do not know them never send them, and the LSP
+ * surfaces stay the source of truth for Zed.
  */
 
 export type TargetStatus = 'not-inspected' | 'inspecting' | 'ok' | 'failed';
@@ -126,6 +131,48 @@ export function generatedWgsl(
         ...(range ? { range } : {}),
       };
     }),
+  };
+}
+
+export type ReportResponse =
+  | { ok: true; label: string; markdown: string; stale: boolean }
+  | { ok: false; label?: string; reason: string };
+
+/** The hover markdown at full depth, for the Markdown preview. */
+export function targetReport(
+  version: number,
+  discovered: DiscoveredModule,
+  inspection: DocumentInspection | undefined,
+  targetId: string,
+  inspecting: ReadonlySet<string>,
+  options: SurfaceOptions,
+): ReportResponse {
+  const target = discovered.targets.find((candidate) => candidate.id === targetId);
+  if (!target) return { ok: false, reason: 'This target no longer exists in the file.' };
+  const symbol = discovered.symbols.find((candidate) => candidate.targetIds.includes(targetId));
+  if (!symbol) return { ok: false, label: target.label, reason: 'No symbol refers to this target.' };
+  const hover = createHover(symbol, discovered, inspection, version, inspecting, {
+    ...options,
+    // The preview renders real tables and has no width limit.
+    presentation: 'zed',
+    hoverDetailLevel: 'deep',
+    hoverPresentation: {
+      ...(options.hoverPresentation ?? { sections: {}, sectionOrder: [] }),
+      wgslPreviewLines: 400,
+      maxColumns: 200,
+    },
+  });
+  const contents = hover.contents;
+  const markdown = typeof contents === 'string'
+    ? contents
+    : Array.isArray(contents)
+    ? contents.map((entry) => typeof entry === 'string' ? entry : entry.value).join('\n')
+    : contents.value;
+  return {
+    ok: true,
+    label: target.label,
+    markdown,
+    stale: inspection !== undefined && inspection.sourceVersion !== version,
   };
 }
 

@@ -82,6 +82,10 @@
         "icon": "$(open-preview)"
       },
       {
+        "command": "typegpuInspector.openReportPreview",
+        "title": "TypeGPU Inspector: Open Inspection Report to the Side"
+      },
+      {
         "command": "typegpuInspector.openWgsl",
         "title": "TypeGPU Inspector: Open Generated WGSL for Target"
       },

@@ -21,6 +21,8 @@ import {
 import {
   describeTargets,
   generatedWgsl,
+  targetReport,
+  type ReportResponse,
   type WgslResponse,
 } from './editorRequests.js';
 import { RuntimeInspectorClient } from './mcpInspector.js';
@@ -289,6 +291,24 @@ connection.onRequest('typegpu/targets', (params: {
     state.discovered,
     state.inspection,
     progress.targets(document.uri, document.version),
+  );
+});
+
+connection.onRequest<ReportResponse | null, void>('typegpu/report', (params: {
+  textDocument: { uri: string };
+  targetId: string;
+}) => {
+  const document = documents.get(params.textDocument.uri);
+  const state = document ? ensureFreshState(document) : undefined;
+  if (!document || !state) return null;
+  inspectOnDemand(document, state, [params.targetId]);
+  return targetReport(
+    document.version,
+    state.discovered,
+    state.inspection,
+    params.targetId,
+    progress.targets(document.uri, document.version),
+    { ...surfaceOptions(), documentUri: document.uri },
   );
 });
 

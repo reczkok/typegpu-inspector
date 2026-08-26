@@ -380,29 +380,12 @@ export function createHover(
       level === 'deep' ? editorDefaultLedgerEntries(materialized) : [],
     );
   }
-  if (options.presentation === 'vscode' && options.documentUri) {
-    appendDetailSwitcher(lines, level, { uri: options.documentUri, range: symbol.range });
-  }
   return hover(lines, symbol.range, options);
 }
 
 /** Command links need trusted markdown; the VS Code client allow-lists these commands. */
 function commandArguments(...values: unknown[]): string {
   return encodeURIComponent(JSON.stringify(values));
-}
-
-/** The location lets the client re-show the hover once the new level is applied. */
-function appendDetailSwitcher(
-  lines: string[],
-  current: HoverDetailLevel,
-  at: { uri: string; range: Range },
-): void {
-  const items = DETAIL_LEVELS.map((level) =>
-    level === current
-      ? `**${level}**`
-      : `[${level}](command:typegpuInspector.selectVerbosity?${commandArguments(level, at)} "${DETAIL_LEVEL_SUMMARIES[level]}")`
-  );
-  lines.push('', `_Detail: ${items.join(' · ')}_`);
 }
 
 export function createInlayHints(

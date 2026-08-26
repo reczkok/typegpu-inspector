@@ -1,9 +1,6 @@
 import * as path from 'node:path';
 import {
   ConfigurationTarget,
-  Position,
-  Range,
-  Selection,
   StatusBarAlignment,
   Uri,
   commands,
@@ -226,7 +223,6 @@ function createClient(context: ExtensionContext): LanguageClient {
         enabledCommands: [
           'typegpuInspector.openWgsl',
           'typegpuInspector.peekWgsl',
-          'typegpuInspector.selectVerbosity',
         ],
       },
     },
@@ -350,40 +346,6 @@ async function notifyInspectionFailure(status: InspectionStatus): Promise<void> 
   }
 }
 
-type HoverLocation = {
-  uri: string;
-  range: { start: { line: number; character: number }; end: { line: number; character: number } };
-};
-
-function isHoverLocation(value: unknown): value is HoverLocation {
-  const candidate = value as HoverLocation | undefined;
-  return typeof candidate?.uri === 'string' &&
-    typeof candidate.range?.start?.line === 'number' &&
-    typeof candidate.range?.end?.line === 'number';
-}
-
-/**
- * A hover opened from the mouse cannot be refreshed, so after the level
- * changes push the settings to the server and re-open the hover from the
- * keyboard path at the symbol it was showing.
- */
-async function reshowHover(at: HoverLocation): Promise<void> {
-  const editor = window.activeTextEditor;
-  if (!client || !editor || editor.document.uri.toString() !== at.uri) return;
-  await client.sendNotification(DidChangeConfigurationNotification.type, {
-    settings: initializationOptions(),
-  });
-  const range = new Range(
-    new Position(at.range.start.line, at.range.start.character),
-    new Position(at.range.end.line, at.range.end.character),
-  );
-  if (!range.contains(editor.selection.active)) {
-    editor.selection = new Selection(range.start, range.start);
-    editor.revealRange(range);
-  }
-  await commands.executeCommand('editor.action.showHover', { focus: 'noAutoFocus' });
-}
-
 /** Drives the editor-title "Open Generated WGSL" button. */
 function updateFileContext(document: TextDocument | undefined): void {
   void commands.executeCommand(
@@ -423,10 +385,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
         `npx -y typegpu-runtime-inspector-mcp@${__TYPEGPU_INSPECTOR_VERSION__} doctor`,
       );
     }),
-    commands.registerCommand('typegpuInspector.selectVerbosity', async (
-      level?: unknown,
-      at?: unknown,
-    ) => {
+    commands.registerCommand('typegpuInspector.selectVerbosity', async () => {
       const config = workspace.getConfiguration('typegpuInspector');
       const current = config.get<string>('hoverDetailLevel') ?? 'standard';
       const levels = [
@@ -435,19 +394,17 @@ export async function activate(context: ExtensionContext): Promise<void> {
         { label: 'standard', description: 'Role-focused facts and a bounded generated WGSL excerpt' },
         { label: 'deep', description: 'Diagnostics, provenance, runtime metadata, and raw evidence' },
       ];
-      const direct = levels.find((entry) => entry.label === level);
-      const picked = direct ?? await window.showQuickPick(
-        levels.map((entry) => ({
-          ...entry,
-          description: entry.label === current
-            ? `${entry.description} · current`
-            : entry.description,
+      const picked = await window.showQuickPick(
+        levels.map((level) => ({
+          ...level,
+          description: level.label === current
+            ? `${level.description} · current`
+            : level.description,
         })),
         { placeHolder: 'How much detail should hovers show?' },
       );
       if (picked && picked.label !== current) {
         await config.update('hoverDetailLevel', picked.label, ConfigurationTarget.Global);
-        if (isHoverLocation(at)) await reshowHover(at);
       }
     }),
     commands.registerCommand('typegpuInspector.openWgslPreview', async () => {
@@ -462,6 +419,19 @@ export async function activate(context: ExtensionContext): Promise<void> {
         return;
       }
       await preview?.openLive();
+    }),
+    commands.registerCommand('typegpuInspector.openReportPreview', async () => {
+      if (!client) {
+        const active = window.activeTextEditor?.document;
+        if (active) await considerDocument(context, active);
+      }
+      if (!client) {
+        void window.showInformationMessage(
+          'TypeGPU Inspector has not started yet — open a file that imports typegpu.',
+        );
+        return;
+      }
+      await preview?.openReport();
     }),
     commands.registerCommand('typegpuInspector.openWgsl', async (ref: unknown) => {
       if (isTargetRef(ref)) await preview?.openPinned(ref);
@@ -495,6 +465,8 @@ export async function activate(context: ExtensionContext): Promise<void> {
     commands.registerCommand('typegpuInspector.statusMenu', async () => {
       const picked = await window.showQuickPick(
         [
+          { label: '$(open-preview) Open generated WGSL to the side', action: 'typegpuInspector.openWgslPreview' },
+          { label: '$(book) Open inspection report to the side', action: 'typegpuInspector.openReportPreview' },
           { label: '$(output) Show output log', action: 'typegpuInspector.showOutput' },
           { label: '$(list-selection) Select hover detail', action: 'typegpuInspector.selectVerbosity' },
           { label: '$(symbol-key) Select inlay detail', action: 'typegpuInspector.selectInlayDetail' },

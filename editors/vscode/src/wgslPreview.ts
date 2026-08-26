@@ -7,6 +7,7 @@ import {
   Location,
   Position,
   Range,
+  TabInputWebview,
   Uri,
   ViewColumn,
   commands,
@@ -23,6 +24,7 @@ import type { LanguageClient } from 'vscode-languageclient/node';
 
 export const WGSL_SCHEME = 'typegpu-wgsl';
 const LIVE_PATH = '/TypeGPU WGSL.wgsl';
+const REPORT_PATH = '/TypeGPU Report.md';
 const FOLLOW_DEBOUNCE_MS = 120;
 
 export type TargetRef = { uri: string; targetId: string };
@@ -40,12 +42,17 @@ type WgslResponse =
   | { ok: true; label: string; wgsl: string; stale: boolean; messages: Array<{ type: string; message: string; range?: LspRange }> }
   | { ok: false; label?: string; reason: string };
 
+type ReportResponse =
+  | { ok: true; label: string; markdown: string; stale: boolean }
+  | { ok: false; label?: string; reason: string };
+
 type ViewMeta = { ref: TargetRef; label: string; stale: boolean; ok: boolean; reason?: string };
 
 /**
- * Generated WGSL as read-only virtual documents. One live document follows the
- * cursor across targets (the Markdown-preview model); pinned documents show a
- * single target. Both refresh in place after every inspection.
+ * Generated WGSL and inspection reports as read-only virtual documents. The
+ * live WGSL document and the report (rendered by the Markdown preview) follow
+ * the cursor across targets; pinned documents show a single target. All
+ * refresh in place after every inspection.
  */
 export class WgslPreview implements TextDocumentContentProvider, CodeLensProvider, Disposable {
   private readonly contentChanged = new EventEmitter<Uri>();
@@ -87,6 +94,14 @@ export class WgslPreview implements TextDocumentContentProvider, CodeLensProvide
       preserveFocus: true,
       preview: false,
     });
+    if (source) await this.follow(source);
+  }
+
+  /** Opens the cursor-following report in the built-in Markdown preview. */
+  public async openReport(): Promise<void> {
+    const source = window.activeTextEditor;
+    await workspace.openTextDocument(reportUri());
+    await commands.executeCommand('markdown.showPreviewToSide', reportUri());
     if (source) await this.follow(source);
   }
 
@@ -137,6 +152,7 @@ export class WgslPreview implements TextDocumentContentProvider, CodeLensProvide
   }
 
   public async provideTextDocumentContent(uri: Uri): Promise<string> {
+    if (uri.path === REPORT_PATH) return this.provideReport();
     const ref = this.refFor(uri);
     if (!ref) {
       this.setView(uri, undefined);
@@ -161,6 +177,29 @@ export class WgslPreview implements TextDocumentContentProvider, CodeLensProvide
     }
     this.setView(uri, { ref, label: response.label, stale: response.stale, ok: true }, response.messages);
     return response.wgsl;
+  }
+
+  private async provideReport(): Promise<string> {
+    const ref = this.live;
+    const client = this.client();
+    if (!ref || !client) {
+      return '_Move the cursor onto a TypeGPU symbol to show its inspection report here._\n';
+    }
+    const response = await client.sendRequest<ReportResponse | null>('typegpu/report', {
+      textDocument: { uri: ref.uri },
+      targetId: ref.targetId,
+    });
+    if (!response) return '_The source file is not open in this window._\n';
+    const targets = await this.targetsFor(ref.uri);
+    const symbol = targets?.symbols.find((entry) => entry.targetIds.includes(ref.targetId));
+    const sourceUri = Uri.parse(ref.uri);
+    const line = (symbol?.range.start.line ?? 0) + 1;
+    const origin = `[${path.basename(sourceUri.fsPath)}:${line}](${sourceUri.toString()}#L${line})`;
+    if (!response.ok) {
+      return `${origin}\n\n_${response.label ?? ref.targetId}: ${response.reason}_\n`;
+    }
+    const note = response.stale ? ' · _from previous save_' : '';
+    return `${origin}${note}\n\n${response.markdown}\n`;
   }
 
   public provideCodeLenses(document: TextDocument): CodeLens[] {
@@ -218,7 +257,7 @@ export class WgslPreview implements TextDocumentContentProvider, CodeLensProvide
   }
 
   private refFor(uri: Uri): TargetRef | undefined {
-    if (uri.path === LIVE_PATH) return this.live;
+    if (uri.path === LIVE_PATH || uri.path === REPORT_PATH) return this.live;
     const query = new URLSearchParams(uri.query);
     const source = query.get('uri');
     const targetId = query.get('target');
@@ -235,9 +274,18 @@ export class WgslPreview implements TextDocumentContentProvider, CodeLensProvide
   }
 
   private isLiveVisible(): boolean {
-    return window.visibleTextEditors.some(
+    const liveEditor = window.visibleTextEditors.some(
       (editor) => editor.document.uri.scheme === WGSL_SCHEME && editor.document.uri.path === LIVE_PATH,
     );
+    // The report lives in a Markdown preview webview, not a text editor.
+    const reportOpen = workspace.textDocuments.some(
+      (document) => document.uri.scheme === WGSL_SCHEME && document.uri.path === REPORT_PATH,
+    ) && window.tabGroups.all.some((group) =>
+      group.tabs.some((tab) =>
+        tab.input instanceof TabInputWebview && tab.input.viewType.includes('markdown.preview')
+      )
+    );
+    return liveEditor || reportOpen;
   }
 
   private async follow(editor: TextEditor): Promise<void> {
@@ -256,6 +304,7 @@ export class WgslPreview implements TextDocumentContentProvider, CodeLensProvide
     if (this.live?.uri === ref.uri && this.live.targetId === ref.targetId) return;
     this.live = ref;
     this.contentChanged.fire(liveUri());
+    this.contentChanged.fire(reportUri());
   }
 
   private async targetsFor(uri: string): Promise<TargetsResponse | undefined> {
@@ -282,6 +331,10 @@ export class WgslPreview implements TextDocumentContentProvider, CodeLensProvide
 
 function liveUri(): Uri {
   return Uri.from({ scheme: WGSL_SCHEME, path: LIVE_PATH });
+}
+
+function reportUri(): Uri {
+  return Uri.from({ scheme: WGSL_SCHEME, path: REPORT_PATH });
 }
 
 function pinnedUri(ref: TargetRef, label: string): Uri {

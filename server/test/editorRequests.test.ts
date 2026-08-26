@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { discoverTypeGpuModule } from '../src/discovery.js';
-import { describeTargets, generatedWgsl } from '../src/editorRequests.js';
+import { describeTargets, generatedWgsl, targetReport } from '../src/editorRequests.js';
 import {
   createHover,
   defaultSurfaceOptions,
@@ -110,13 +110,21 @@ describe('VS Code hover actions', () => {
     expect(text).toContain(`command:typegpuInspector.openWgsl?${args}`);
     expect(text).toContain(`command:typegpuInspector.peekWgsl?${args}`);
     expect(text).not.toContain('Open generated WGSL](file:');
-    expect(text).toContain('**standard**');
-    const switcher = /\[deep\]\(command:typegpuInspector\.selectVerbosity\?([^ )]+)/.exec(text);
-    expect(switcher).not.toBeNull();
-    expect(JSON.parse(decodeURIComponent(switcher![1]!))).toEqual([
-      'deep',
-      { uri: 'file:///workspace/render.ts', range: discovered.symbols[0]!.range },
-    ]);
+    expect(text).not.toContain('selectVerbosity');
+  });
+
+  it('renders the full report as table markdown for the preview', async () => {
+    const { discovered, inspection } = await inspected();
+    const response = targetReport(1, discovered, inspection, discovered.targets[0]!.id, new Set(), {
+      ...defaultSurfaceOptions,
+      presentation: 'vscode',
+      hoverDetailLevel: 'compact',
+    });
+    expect(response.ok).toBe(true);
+    if (!response.ok) return;
+    expect(response.markdown).toContain('| --- |');
+    expect(response.markdown).toContain('@fragment fn fragment()');
+    expect(response.markdown).not.toContain('```text');
   });
 
   it('keeps file links for other editors', async () => {
