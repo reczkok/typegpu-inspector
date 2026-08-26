@@ -1,10 +1,14 @@
 import * as path from 'node:path';
 import {
   ConfigurationTarget,
+  Position,
+  Range,
+  Selection,
   StatusBarAlignment,
   Uri,
   commands,
   env,
+  languages,
   window,
   workspace,
   type ExtensionContext,
@@ -13,6 +17,7 @@ import {
 } from 'vscode';
 import {
   DidChangeConfigurationNotification,
+  HoverRequest,
   LanguageClient,
   TransportKind,
   type LanguageClientOptions,
@@ -212,6 +217,9 @@ function createClient(context: ExtensionContext): LanguageClient {
       { scheme: 'file', language: 'javascriptreact' },
     ],
     initializationOptions: initializationOptions(),
+    // Hovers are served by registerTypeGpuHover instead, so the TypeScript
+    // quick info renders above ours in the merged hover.
+    middleware: { provideHover: () => null },
     // Hover action links (open/peek WGSL, switch detail) are command URIs.
     markdown: {
       isTrusted: {
@@ -231,6 +239,30 @@ function createClient(context: ExtensionContext): LanguageClient {
   );
 }
 
+/**
+ * VS Code concatenates every hover provider into one widget, ordered by
+ * selector score and then with built-in providers last. A language-specific
+ * selector would always place us above TypeScript's quick info; the wildcard
+ * selector scores lower, so the type shows first and the datasheet follows.
+ */
+function registerTypeGpuHover(context: ExtensionContext, started: LanguageClient): void {
+  context.subscriptions.push(
+    languages.registerHoverProvider({ language: '*' }, {
+      async provideHover(document, position, token) {
+        if (document.uri.scheme !== 'file' || !TYPEGPU_LANGUAGES.has(document.languageId)) {
+          return null;
+        }
+        const result = await started.sendRequest(
+          HoverRequest.type,
+          started.code2ProtocolConverter.asTextDocumentPositionParams(document, position),
+          token,
+        );
+        return started.protocol2CodeConverter.asHover(result);
+      },
+    }),
+  );
+}
+
 async function startClient(context: ExtensionContext): Promise<void> {
   if (client) return;
   if (clientStarting) return clientStarting;
@@ -238,6 +270,7 @@ async function startClient(context: ExtensionContext): Promise<void> {
     const started = createClient(context);
     await started.start();
     client = started;
+    registerTypeGpuHover(context, started);
     started.onNotification(
       'typegpu/inspectionStatus',
       (payload: InspectionStatus) => {
@@ -317,6 +350,40 @@ async function notifyInspectionFailure(status: InspectionStatus): Promise<void> 
   }
 }
 
+type HoverLocation = {
+  uri: string;
+  range: { start: { line: number; character: number }; end: { line: number; character: number } };
+};
+
+function isHoverLocation(value: unknown): value is HoverLocation {
+  const candidate = value as HoverLocation | undefined;
+  return typeof candidate?.uri === 'string' &&
+    typeof candidate.range?.start?.line === 'number' &&
+    typeof candidate.range?.end?.line === 'number';
+}
+
+/**
+ * A hover opened from the mouse cannot be refreshed, so after the level
+ * changes push the settings to the server and re-open the hover from the
+ * keyboard path at the symbol it was showing.
+ */
+async function reshowHover(at: HoverLocation): Promise<void> {
+  const editor = window.activeTextEditor;
+  if (!client || !editor || editor.document.uri.toString() !== at.uri) return;
+  await client.sendNotification(DidChangeConfigurationNotification.type, {
+    settings: initializationOptions(),
+  });
+  const range = new Range(
+    new Position(at.range.start.line, at.range.start.character),
+    new Position(at.range.end.line, at.range.end.character),
+  );
+  if (!range.contains(editor.selection.active)) {
+    editor.selection = new Selection(range.start, range.start);
+    editor.revealRange(range);
+  }
+  await commands.executeCommand('editor.action.showHover', { focus: 'noAutoFocus' });
+}
+
 /** Drives the editor-title "Open Generated WGSL" button. */
 function updateFileContext(document: TextDocument | undefined): void {
   void commands.executeCommand(
@@ -356,7 +423,10 @@ export async function activate(context: ExtensionContext): Promise<void> {
         `npx -y typegpu-runtime-inspector-mcp@${__TYPEGPU_INSPECTOR_VERSION__} doctor`,
       );
     }),
-    commands.registerCommand('typegpuInspector.selectVerbosity', async (level?: unknown) => {
+    commands.registerCommand('typegpuInspector.selectVerbosity', async (
+      level?: unknown,
+      at?: unknown,
+    ) => {
       const config = workspace.getConfiguration('typegpuInspector');
       const current = config.get<string>('hoverDetailLevel') ?? 'standard';
       const levels = [
@@ -377,6 +447,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
       );
       if (picked && picked.label !== current) {
         await config.update('hoverDetailLevel', picked.label, ConfigurationTarget.Global);
+        if (isHoverLocation(at)) await reshowHover(at);
       }
     }),
     commands.registerCommand('typegpuInspector.openWgslPreview', async () => {

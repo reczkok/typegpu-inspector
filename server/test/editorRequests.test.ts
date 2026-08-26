@@ -111,7 +111,12 @@ describe('VS Code hover actions', () => {
     expect(text).toContain(`command:typegpuInspector.peekWgsl?${args}`);
     expect(text).not.toContain('Open generated WGSL](file:');
     expect(text).toContain('**standard**');
-    expect(text).toContain('[deep](command:typegpuInspector.selectVerbosity?%5B%22deep%22%5D');
+    const switcher = /\[deep\]\(command:typegpuInspector\.selectVerbosity\?([^ )]+)/.exec(text);
+    expect(switcher).not.toBeNull();
+    expect(JSON.parse(decodeURIComponent(switcher![1]!))).toEqual([
+      'deep',
+      { uri: 'file:///workspace/render.ts', range: discovered.symbols[0]!.range },
+    ]);
   });
 
   it('keeps file links for other editors', async () => {
