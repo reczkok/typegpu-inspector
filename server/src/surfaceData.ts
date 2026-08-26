@@ -161,7 +161,7 @@ function formatVisibility(value: unknown): string {
     ) {
       return 'all stages';
     }
-    return stages.join(' + ') || '—';
+    return stages.join(' · ') || '—';
   }
   if (typeof value !== 'number') return '—';
   const stages = [
@@ -170,7 +170,7 @@ function formatVisibility(value: unknown): string {
     value & 4 ? 'compute' : undefined,
   ].filter((stage): stage is string => Boolean(stage));
   if (stages.length === 3) return 'all stages';
-  return stages.join(' + ') || String(value);
+  return stages.join(' · ') || String(value);
 }
 
 function formatLayoutResource(entry: Record<string, unknown>): string {

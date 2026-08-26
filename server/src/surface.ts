@@ -36,13 +36,16 @@ import type {
   InspectorLedgerEntry,
   InspectorTargetReport,
 } from './protocol.js';
+import { settingsBounds } from './protocol.js';
 import {
   code,
+  escapeCell,
   escapeInline,
   escapeMarkdown,
   formatInspectableValue,
   section,
   tableCode,
+  tableRowWidth,
   tableText,
   valueText,
 } from './markdown.js';
@@ -102,6 +105,8 @@ export type SurfaceOptions = {
   hoverDetailLevel?: HoverDetailLevel;
   inlayDetailLevel?: InlayDetailLevel;
   hoverPresentation?: HoverPresentationSettings;
+  /** Width budget used when `hoverPresentation.maxColumns` is unset. */
+  defaultMaxColumns?: number;
 };
 
 export const defaultSurfaceOptions: SurfaceOptions = {
@@ -114,6 +119,14 @@ export const defaultSurfaceOptions: SurfaceOptions = {
   inlayDetailLevel: 'compact',
   hoverPresentation: { sections: {}, sectionOrder: [] },
 };
+
+export const WIDE_MAX_COLUMNS = 96;
+export const ZED_MAX_COLUMNS = 72;
+
+/** Zed's hover popup clips instead of scrolling, so it gets the narrower budget. */
+export function defaultMaxColumnsForClient(clientName: string | undefined): number {
+  return /zed/i.test(clientName ?? '') ? ZED_MAX_COLUMNS : WIDE_MAX_COLUMNS;
+}
 
 export async function materializeInspection(
   workspaceRoot: string,
@@ -276,9 +289,7 @@ export function createHover(
   ];
   if (symbol.specializationSynthesis) {
     const synthesis = symbol.specializationSynthesis;
-    // The specializations themselves are the fact; how they were derived is
-    // provenance. Only a truncated list still needs a preamble below deep,
-    // because then the hover is not showing every specialization that exists.
+    // Preamble only when the list is truncated.
     if (synthesis.truncated) {
       lines.push(
         '',
@@ -307,7 +318,7 @@ export function createHover(
           : 'Save the file to resolve this target in Chromium and inspect its generated shader.'
         : staticRoleDescription(symbol.role),
     );
-    return hover(lines, symbol.range, options.presentation);
+    return hover(lines, symbol.range, options);
   }
 
   const stale = inspection.sourceVersion !== currentVersion;
@@ -320,7 +331,7 @@ export function createHover(
   const failure = targetFailure ?? inspection.failure;
   if (failure) {
     lines.push('', `> **Inspection failed:** ${valueText(failure)}`);
-    return hover(lines, symbol.range, options.presentation);
+    return hover(lines, symbol.range, options);
   }
 
   const materialized = symbol.targetIds
@@ -339,7 +350,7 @@ export function createHover(
         : staticRoleDescription(symbol.role),
     );
     appendRuntimeSummary(lines, inspection.output);
-    return hover(lines, symbol.range, options.presentation);
+    return hover(lines, symbol.range, options);
   }
 
   for (const [index, target] of materialized.entries()) {
@@ -349,12 +360,11 @@ export function createHover(
         `#### Context ${index + 1} of ${materialized.length} · ${escapeMarkdown(target.target.label)}`,
       );
     } else if (target.target.label !== symbol.name) {
-      lines.push(
-        '',
-        target.target.id.startsWith('factory-result:')
-          ? `_Using concrete factory result \`${escapeInline(target.target.label)}\`._`
-          : `_Using authored pipeline context \`${escapeInline(target.target.label)}\`._`,
-      );
+      if (target.target.id.startsWith('factory-result:')) {
+        lines.push('', `_Using concrete factory result \`${escapeInline(target.target.label)}\`._`);
+      } else if (isPipelineKind(target.report.kind)) {
+        lines.push('', `_Using authored pipeline context \`${escapeInline(target.target.label)}\`._`);
+      }
     }
     appendTarget(lines, target, inspection.output, options);
   }
@@ -368,7 +378,7 @@ export function createHover(
       level === 'deep' ? editorDefaultLedgerEntries(materialized) : [],
     );
   }
-  return hover(lines, symbol.range, options.presentation);
+  return hover(lines, symbol.range, options);
 }
 
 export function createInlayHints(
@@ -675,10 +685,11 @@ function mergeInspectorOutputs(
   };
 }
 
-export const DETAIL_LEVELS = ['compact', 'standard', 'deep'] as const;
+export const DETAIL_LEVELS = ['wgsl', 'compact', 'standard', 'deep'] as const;
 export const INLAY_DETAIL_LEVELS = ['compact', 'summary', 'detailed'] as const;
 
 const DETAIL_LEVEL_SUMMARIES: Record<HoverDetailLevel, string> = {
+  wgsl: 'generated WGSL only',
   compact: 'core shape',
   standard: 'role-focused detail',
   deep: 'complete evidence',
@@ -735,11 +746,31 @@ function presentationSettings(options: SurfaceOptions): HoverPresentationSetting
   return options.hoverPresentation ?? { sections: {}, sectionOrder: [] };
 }
 
+// Old section ids map onto the datasheet block.
+const HOVER_SECTION_ALIASES: Partial<Record<HoverSectionId, HoverSectionId>> = {
+  resource: 'datasheet',
+  schema: 'datasheet',
+  pipelineState: 'datasheet',
+  pipelineContext: 'datasheet',
+};
+
+function canonicalSectionId(id: HoverSectionId): HoverSectionId {
+  return HOVER_SECTION_ALIASES[id] ?? id;
+}
+
 function hoverSectionMode(
   options: SurfaceOptions,
   id: HoverSectionId,
 ): 'auto' | 'show' | 'hide' {
-  return presentationSettings(options).sections[id] ?? 'auto';
+  const sections = presentationSettings(options).sections;
+  const direct = sections[id];
+  if (direct !== undefined) return direct;
+  for (const [alias, canonical] of Object.entries(HOVER_SECTION_ALIASES)) {
+    if (canonical !== id) continue;
+    const mode = sections[alias as HoverSectionId];
+    if (mode !== undefined) return mode;
+  }
+  return 'auto';
 }
 
 function hoverSectionEnabled(
@@ -751,9 +782,14 @@ function hoverSectionEnabled(
   return mode === 'show' || (mode === 'auto' && auto);
 }
 
+function columnBudget(options: SurfaceOptions): number {
+  return presentationSettings(options).maxColumns ??
+    options.defaultMaxColumns ?? WIDE_MAX_COLUMNS;
+}
+
 function previewLineBudget(options: SurfaceOptions, level: HoverDetailLevel): number {
   return presentationSettings(options).wgslPreviewLines ??
-    (level === 'compact' ? 0 : level === 'standard' ? 6 : 12);
+    (level === 'wgsl' ? WGSL_ONLY_PREVIEW_LINES : level === 'compact' ? 0 : level === 'standard' ? 6 : 12);
 }
 
 function collectionBudget(options: SurfaceOptions, level: HoverDetailLevel): number {
@@ -781,32 +817,16 @@ function assumptionBudget(options: SurfaceOptions, level: HoverDetailLevel): num
     (level === 'deep' ? 16 : 6);
 }
 
+const WGSL_ONLY_PREVIEW_LINES = 120;
+
 const ALL_HOVER_SECTIONS: HoverSectionId[] = [
-  'wgslPreview', 'shaderFacts', 'bindings', 'resource', 'schema',
-  'pipelineState', 'pipelineContext', 'declarations', 'compilerMessages',
-  'inspectionNotes', 'assumptions', 'runtime',
+  'wgslPreview', 'datasheet', 'bindings', 'shaderFacts', 'declarations',
+  'compilerMessages', 'inspectionNotes', 'assumptions', 'runtime',
 ];
 
-function orderedHoverSections(
-  target: MaterializedTarget,
-  options: SurfaceOptions,
-): HoverSectionId[] {
-  const role = target.target.selector.kind;
-  const resourceType = target.report.resource?.resourceType;
-  const adaptive: HoverSectionId[] = resourceType === 'schema'
-    ? ['schema', 'resource', 'bindings', 'wgslPreview', 'shaderFacts', 'pipelineState', 'pipelineContext']
-    : role === 'render-pipeline'
-    ? ['wgslPreview', 'pipelineState', 'bindings', 'pipelineContext', 'shaderFacts', 'resource', 'schema']
-    : role === 'compute-pipeline' || target.analysis
-    ? ['wgslPreview', 'shaderFacts', 'bindings', 'pipelineState', 'pipelineContext', 'resource', 'schema']
-    : ['resource', 'schema', 'bindings', 'wgslPreview', 'pipelineState', 'pipelineContext', 'shaderFacts'];
-  const tail: HoverSectionId[] = [
-    'declarations', 'compilerMessages', 'inspectionNotes', 'assumptions', 'runtime',
-  ];
+function orderedHoverSections(options: SurfaceOptions): HoverSectionId[] {
   return uniqueSectionIds([
-    ...presentationSettings(options).sectionOrder,
-    ...adaptive,
-    ...tail,
+    ...presentationSettings(options).sectionOrder.map(canonicalSectionId),
     ...ALL_HOVER_SECTIONS,
   ]);
 }
@@ -931,9 +951,6 @@ function appendTarget(
     ? undefined
     : appendFailure(lines, report);
 
-  // Provenance is disclosed, not broadcast. Standard gets one line saying
-  // that inputs were synthesized and where the detail lives; deep (and an
-  // explicit `assumptions: "show"`) get the per-entry ledger.
   const assumptionsMode = hoverSectionMode(options, 'assumptions');
   const assumptions = hoverAssumptions(report);
   const listAssumptions = assumptionsMode !== 'hide' &&
@@ -946,7 +963,16 @@ function appendTarget(
   ) {
     lines.push('', assumptionSummaryLine(assumptions));
   }
-  appendArtifactLinks(lines, target);
+  const enabled = (id: HoverSectionId, auto: boolean) =>
+    hoverSectionEnabled(options, id, auto);
+  const maxColumns = columnBudget(options);
+  const listDeclarations = Boolean(analysis?.declarations.length) &&
+    enabled('declarations', level === 'deep');
+  appendArtifactLinks(
+    lines,
+    target,
+    listDeclarations ? undefined : analysis?.declarations.length,
+  );
 
   const blocks = new Map<HoverSectionId, string[]>();
   const addBlock = (id: HoverSectionId, render: (block: string[]) => void) => {
@@ -954,46 +980,43 @@ function appendTarget(
     render(block);
     if (block.length > 0) blocks.set(id, block);
   };
-  const enabled = (id: HoverSectionId, auto: boolean) =>
-    hoverSectionEnabled(options, id, auto);
 
-  if (analysis && enabled('wgslPreview', level !== 'compact')) {
-    addBlock('wgslPreview', (block) =>
-      appendWgslPreview(block, report, previewLineBudget(options, level)));
-  }
-  if (report.resource) {
-    const id: HoverSectionId = report.resource.resourceType === 'schema'
-      ? 'schema'
-      : 'resource';
-    if (enabled(id, true)) {
-      addBlock(id, (block) =>
-        appendResourceReport(
+  const wgslOnly = level === 'wgsl' && Boolean(report.wgsl);
+  const datasheet = buildDatasheet(target, output, level, options);
+  if (!wgslOnly && enabled('datasheet', true)) {
+    addBlock('datasheet', (block) => {
+      appendDatasheet(block, datasheet.rows, maxColumns);
+      if (report.resource) {
+        appendResourceTables(
           block,
-          report.resource!,
+          report.resource,
           options,
           level === 'deep',
           collectionBudget(options, level),
-        ));
-    }
+          maxColumns,
+        );
+      }
+    });
   }
-  if (target.pipelineState && enabled('pipelineState', true)) {
-    addBlock('pipelineState', (block) => appendPipelineState(block, target.pipelineState!));
+  if (analysis && enabled('wgslPreview', level !== 'compact')) {
+    addBlock('wgslPreview', (block) =>
+      appendWgslPreview(block, report, previewLineBudget(options, level), wgslOnly));
   }
-  if (target.target.pipelineSource && enabled('pipelineContext', level !== 'compact')) {
-    addBlock('pipelineContext', (block) =>
-      appendPipelineContext(block, target.target.pipelineSource!));
-  }
-  if (analysis && enabled('shaderFacts', true)) {
+  if (analysis && enabled('shaderFacts', level !== 'compact')) {
     addBlock('shaderFacts', (block) =>
-      appendShaderFacts(block, analysis, output, level !== 'compact'));
+      appendShaderFacts(
+        block,
+        analysis,
+        output,
+        level !== 'compact',
+        datasheet.statedEntryPoints,
+      ));
   }
   if (enabled('bindings', hasAnyBindings(target))) {
-    addBlock('bindings', (block) => appendCorrelatedBindings(block, target, level === 'deep'));
+    addBlock('bindings', (block) =>
+      appendCorrelatedBindings(block, target, level === 'deep', maxColumns));
   }
-  if (
-    analysis?.declarations.length &&
-    enabled('declarations', level === 'deep')
-  ) {
+  if (analysis && listDeclarations) {
     addBlock('declarations', (block) =>
       appendDeclarations(block, analysis, declarationBudget(options, level)));
   }
@@ -1001,8 +1024,6 @@ function appendTarget(
     addBlock('compilerMessages', (block) =>
       appendCompilerMessages(block, report, compilerMessageBudget(options, level)));
   }
-  // Setup notes describe how inspection was arranged, which is the same
-  // provenance the assumption line covers — they follow the same policy.
   const listNotes = hoverSectionMode(options, 'inspectionNotes') === 'show' ||
     level === 'deep';
   const remainingDiagnostics = (report.diagnostics ?? []).filter((diagnostic) =>
@@ -1024,29 +1045,315 @@ function appendTarget(
         level === 'deep',
       ));
   }
-  for (const id of orderedHoverSections(target, options)) {
+  for (const id of orderedHoverSections(options)) {
+    if (wgslOnly && id !== 'wgslPreview' && id !== 'compilerMessages') continue;
     const block = blocks.get(id);
     if (block) lines.push(...block);
   }
+}
+
+type TableFallback = (cells: readonly string[]) => string;
+
+/** Renders rows as a table, or as key/value lines when a row exceeds maxColumns. */
+function appendTable(
+  lines: string[],
+  header: readonly string[],
+  alignment: readonly string[],
+  rows: ReadonlyArray<readonly string[]>,
+  maxColumns: number,
+  fallback: TableFallback,
+): void {
+  if (rows.length === 0) return;
+  if ([header, ...rows].every((row) => tableRowWidth(row) <= maxColumns)) {
+    lines.push(`| ${header.map(escapeCell).join(' | ')} |`, `| ${alignment.join(' | ')} |`);
+    for (const row of rows) lines.push(`| ${row.map(escapeCell).join(' | ')} |`);
+    return;
+  }
+  const rendered = rows.map(fallback);
+  for (const [index, line] of rendered.entries()) {
+    // Trailing two spaces are a hard break; without one the lines reflow into a paragraph.
+    lines.push(index < rendered.length - 1 ? `${line}  ` : line);
+  }
+}
+
+type DatasheetRow = {
+  key: string;
+  value: string;
+  indent?: boolean;
+};
+
+// GFM trims leading ASCII spaces in cells; NBSP survives.
+const ROW_INDENT = '\u00a0\u00a0';
+
+function datasheetKeyCell(row: DatasheetRow): string {
+  return `${row.indent ? ROW_INDENT : ''}**${escapeMarkdown(row.key)}**`;
+}
+
+function appendDatasheet(
+  lines: string[],
+  rows: readonly DatasheetRow[],
+  maxColumns: number,
+): void {
+  if (rows.length === 0) return;
+  lines.push('');
+  appendTable(
+    lines,
+    ['', ''],
+    ['---', '---'],
+    rows.map((row) => [datasheetKeyCell(row), row.value]),
+    maxColumns,
+    (cells) => `${cells[0]!.replace(/\*\*$/, ':**')} ${cells[1]}`,
+  );
+}
+
+/** Repeats the key across further rows so a long list stays inside maxColumns. */
+function splitRow(
+  key: string,
+  parts: readonly string[],
+  maxColumns: number,
+): DatasheetRow[] {
+  const budget = Math.max(8, maxColumns - key.length - ROW_INDENT.length - 3);
+  const rows: DatasheetRow[] = [];
+  let current: string[] = [];
+  const flush = () => {
+    if (current.length === 0) return;
+    rows.push({ key, value: current.join(' · '), ...(rows.length > 0 ? { indent: true } : {}) });
+    current = [];
+  };
+  for (const part of parts) {
+    const candidate = [...current, part].join(' · ');
+    if (current.length > 0 && tableRowWidth([candidate]) > budget) flush();
+    current.push(part);
+  }
+  flush();
+  return rows;
+}
+
+type Datasheet = {
+  rows: DatasheetRow[];
+  statedEntryPoints: ReadonlySet<string>;
+};
+
+function buildDatasheet(
+  target: MaterializedTarget,
+  output: InspectorOutput,
+  level: HoverDetailLevel,
+  options: SurfaceOptions,
+): Datasheet {
+  const rows: DatasheetRow[] = [];
+  const stated = new Set<string>();
+  const { analysis, pipelineState, report } = target;
+  const source = target.target.pipelineSource;
+  const maxColumns = columnBudget(options);
+
+  const entryStages = (analysis?.entryPoints ?? []).map((entry) =>
+    `${entry.stage} ${code(entry.name)}`);
+  const contextStages = [
+    source?.compute ? `compute ${code(source.compute)}` : undefined,
+    source?.vertex ? `vertex ${code(source.vertex)}` : undefined,
+    source?.fragment ? `fragment ${code(source.fragment)}` : undefined,
+  ].filter((stage): stage is string => Boolean(stage));
+  const stages = entryStages.length > 0 ? entryStages : contextStages;
+  if (stages.length > 0) {
+    rows.push({
+      key: stages.length > 1 ? 'Stages' : 'Entry',
+      value: stages.join(' → '),
+    });
+    if (entryStages.length > 0) {
+      for (const entry of analysis!.entryPoints) stated.add(entry.name);
+    }
+  }
+
+  const limits = isRecord(output.environment?.limits)
+    ? output.environment.limits
+    : undefined;
+  for (const entry of analysis?.entryPoints ?? []) {
+    if (!entry.workgroupSize) continue;
+    const dimensions = entry.workgroupSize.map(String).join(' × ');
+    const limitSummary = workgroupLimitSummary(entry, limits);
+    rows.push({
+      key: (analysis?.entryPoints.length ?? 0) > 1
+        ? `Workgroup ${entry.name}`
+        : 'Workgroup',
+      value: [
+        `${dimensions}${
+          entry.workgroupInvocations !== undefined
+            ? ` = ${plural(entry.workgroupInvocations, 'invocation')}`
+            : ''
+        }`,
+        ...limitSummary,
+      ].join(' · '),
+    });
+  }
+
+  if (pipelineState?.kind === 'render') {
+    rows.push(...renderStateRows(pipelineState));
+  }
+
+  for (const binding of source?.bindings ?? []) {
+    rows.push({
+      key: 'Slot',
+      value: binding.value
+        ? `${code(binding.source)} ← ${code(binding.value)}`
+        : code(binding.source),
+    });
+  }
+  if (
+    level === 'deep' && entryStages.length > 0 && contextStages.length > 0 &&
+    contextStages.join(' → ') !== entryStages.join(' → ')
+  ) {
+    rows.push({ key: 'Context', value: contextStages.join(' → ') });
+  }
+
+  if (report.resource) {
+    rows.push(
+      ...resourceRows(report.resource, level === 'deep', maxColumns),
+    );
+    if (report.resource.schema) {
+      rows.push(...schemaRows(report.resource.schema, options, maxColumns));
+    }
+  }
+  return { rows, statedEntryPoints: stated };
+}
+
+function renderStateRows(state: GpuPipelineState): DatasheetRow[] {
+  const rows: DatasheetRow[] = [];
+  const primitive = state.primitive ?? {};
+  const multisample = state.multisample ?? {};
+  rows.push({
+    key: 'Primitive',
+    value: [
+      term(primitive.topology ?? 'triangle-list'),
+      term(primitive.frontFace ?? 'ccw'),
+      `cull ${term(primitive.cullMode ?? 'none')}`,
+      plural(
+        typeof multisample.count === 'number' ? multisample.count : 1,
+        'sample',
+      ),
+    ].join(' · '),
+  });
+
+  for (const [index, target] of (state.targets ?? []).entries()) {
+    const blend = isRecord(target.blend) ? target.blend : undefined;
+    rows.push({
+      key: `Target ${index}`,
+      value: [
+        term(target.format ?? '—'),
+        `write ${term(target.writeMask ?? 'all')}`,
+        blend ? 'blend on' : 'blend off',
+      ].join(' · '),
+    });
+    for (const [label, component] of [
+      ['color blend', blend?.color],
+      ['alpha blend', blend?.alpha],
+    ] as const) {
+      if (!isRecord(component)) continue;
+      rows.push({
+        key: label,
+        indent: true,
+        value: [
+          `src ${term(component.srcFactor ?? 'one')}`,
+          `dst ${term(component.dstFactor ?? 'zero')}`,
+          term(component.operation ?? 'add'),
+        ].join(' · '),
+      });
+    }
+  }
+
+  const depth = state.depthStencil;
+  if (depth) {
+    rows.push({
+      key: 'Depth',
+      value: [
+        term(depth.format ?? '—'),
+        depth.depthWriteEnabled === true ? 'write enabled' : 'write disabled',
+        `compare ${term(depth.depthCompare ?? 'always')}`,
+      ].join(' · '),
+    });
+    for (const [label, face] of [
+      ['stencil front', depth.stencilFront],
+      ['stencil back', depth.stencilBack ?? depth.stencilFront],
+    ] as const) {
+      if (!isRecord(face)) continue;
+      rows.push({
+        key: label,
+        indent: true,
+        value: [
+          `compare ${term(face.compare ?? 'always')}`,
+          `fail ${term(face.failOp ?? 'keep')}`,
+          `depth fail ${term(face.depthFailOp ?? 'keep')}`,
+          `pass ${term(face.passOp ?? 'keep')}`,
+        ].join(' · '),
+      });
+    }
+  }
+
+  for (const [index, buffer] of (state.vertexBuffers ?? []).entries()) {
+    rows.push({
+      key: `Vertex slot ${index}`,
+      value: [
+        typeof buffer.arrayStride === 'number'
+          ? `stride ${formatByteSize(buffer.arrayStride)}`
+          : 'unknown stride',
+        buffer.stepMode === 'instance' ? 'per-instance' : 'per-vertex',
+      ].join(' · '),
+    });
+    const attributes = Array.isArray(buffer.attributes) ? buffer.attributes : [];
+    if (attributes.length === 0) {
+      rows.push({ key: 'no attributes', indent: true, value: '—' });
+      continue;
+    }
+    for (const attribute of attributes) {
+      if (!isRecord(attribute)) {
+        rows.push({ key: 'attribute', indent: true, value: valueText(attribute) });
+        continue;
+      }
+      rows.push({
+        key: `@location(${String(attribute.shaderLocation ?? '?')})`,
+        indent: true,
+        value: [
+          term(attribute.format ?? '?'),
+          typeof attribute.offset === 'number'
+            ? `offset ${formatByteSize(attribute.offset)}`
+            : 'offset —',
+        ].join(' · '),
+      });
+    }
+  }
+  return rows;
+}
+
+/** A vocabulary value: plain text, never a code span. */
+function term(value: unknown): string {
+  return valueText(value);
 }
 
 function appendWgslPreview(
   lines: string[],
   report: InspectorTargetReport,
   maxLines: number,
+  fromTop = false,
 ): void {
   if (!report.wgsl || maxLines <= 0) return;
-  const excerpt = smartWgslExcerpt(report, maxLines);
+  const excerpt = fromTop ? leadingWgslExcerpt(report.wgsl, maxLines) : smartWgslExcerpt(report, maxLines);
   section(lines, 'Generated WGSL');
   lines.push('```wgsl', ...excerpt.lines, '```');
   if (excerpt.omitted > 0) lines.push(`_${plural(excerpt.omitted, 'WGSL line')} omitted._`);
 }
 
-function appendArtifactLinks(lines: string[], target: MaterializedTarget): void {
+function appendArtifactLinks(
+  lines: string[],
+  target: MaterializedTarget,
+  declarationCount?: number,
+): void {
   const links: string[] = [];
   if (target.generatedUri) {
     const facts = target.analysis
-      ? ` · ${plural(target.analysis.lines, 'line')} · ${formatByteSize(target.analysis.utf8Bytes)}`
+      ? [
+          plural(target.analysis.lines, 'line'),
+          formatByteSize(target.analysis.utf8Bytes),
+          declarationCount ? plural(declarationCount, 'declaration') : undefined,
+        ].filter(Boolean).map((fact) => ` · ${fact}`).join('')
       : '';
     links.push(`[Open generated WGSL](${target.generatedUri})${facts}`);
   }
@@ -1113,6 +1420,7 @@ function appendCorrelatedBindings(
   lines: string[],
   target: MaterializedTarget,
   includeRawSources: boolean,
+  maxColumns: number,
 ): void {
   const rows = new Map<string, CorrelatedBinding>();
   const row = (group: number, binding: number) => {
@@ -1126,7 +1434,9 @@ function appendCorrelatedBindings(
   for (const binding of target.analysis?.bindings ?? []) {
     const current = row(binding.group, binding.binding);
     current.name = binding.name;
-    current.wgsl = [binding.addressSpace, binding.type].filter(Boolean).join(' · ');
+    // `var<storage, read_write>` is one address space.
+    current.wgsl = [binding.addressSpace?.replaceAll(/,\s*/g, ' '), binding.type]
+      .filter(Boolean).join(' ');
   }
   for (const binding of target.report.resource?.bindings ?? []) {
     if (typeof binding.binding !== 'number') continue;
@@ -1151,29 +1461,43 @@ function appendCorrelatedBindings(
     left.group - right.group || left.binding - right.binding);
   if (sorted.length === 0) return;
   section(lines, 'Bindings');
-  lines.push(
-    '| Binding | Name | Visibility | WGSL | WebGPU |',
-    '| --- | --- | --- | --- | --- |',
+  const header = includeRawSources
+    ? ['Binding', 'Type', 'Stages', 'WebGPU']
+    : ['Binding', 'Type', 'Stages'];
+  appendTable(
+    lines,
+    header,
+    header.map(() => '---'),
+    sorted.map((binding) => {
+      const cells = [
+        [
+          tableCode(`@${binding.group}:${binding.binding}`),
+          binding.name ? tableCode(binding.name) : undefined,
+        ].filter(Boolean).join(' '),
+        // A layout inspected without WGSL only knows its WebGPU description.
+        tableText(binding.wgsl ?? binding.webgpu ?? '—'),
+        tableText(binding.visibility ?? '—'),
+      ];
+      return includeRawSources
+        ? [...cells, tableText(binding.webgpu ?? '—')]
+        : cells;
+    }),
+    maxColumns,
+    (cells) => `**${cells[0]}:** ${cells.slice(1).join(' · ')}`,
   );
-  for (const binding of sorted) {
-    lines.push(
-      `| ${tableCode(`@${binding.group}:${binding.binding}`)} | ${tableCode(binding.name ?? '—')} | ${tableText(binding.visibility ?? '—')} | ${tableText(binding.wgsl ?? '—')} | ${tableText(binding.webgpu ?? '—')} |`,
-    );
-  }
   if (!includeRawSources) return;
 
   if ((target.analysis?.bindings.length ?? 0) > 0) {
     section(lines, 'Generated WGSL binding source');
     for (const binding of target.analysis!.bindings) {
-      lines.push(`- ${code(`@${binding.group}:${binding.binding}`)} ${code(binding.name)} · ${code(binding.addressSpace ?? 'handle')} · ${code(binding.type)}`);
+      lines.push(`- ${code(`@${binding.group}:${binding.binding}`)} ${code(binding.name)} · ${term(binding.addressSpace ?? 'handle')} · ${term(binding.type)}`);
     }
   }
   if ((target.layouts?.length ?? 0) > 0) {
     section(lines, 'Recorded WebGPU layout source');
     for (const layout of target.layouts!) {
-      lines.push(`- **Group ${layout.group} · ${code(layout.label)}**`);
       for (const entry of layout.entries) {
-        lines.push(`  - ${entry.binding} · ${valueText(entry.visibility)} · ${valueText(entry.resource)}`);
+        lines.push(`- ${code(`@${layout.group}:${entry.binding}`)} ${code(layout.label)} · ${valueText(entry.visibility)} · ${valueText(entry.resource)}`);
       }
     }
   }
@@ -1219,18 +1543,14 @@ function appendInspectionNotes(
 ): void {
   section(lines, 'Inspection notes');
   for (const diagnostic of diagnostics.slice(0, limit)) {
-    lines.push(`- ${valueText(diagnostic.message)}${diagnostic.hint ? `  \n  ${valueText(diagnostic.hint)}` : ''}  \n  ${code(diagnostic.code)}`);
+    lines.push(`- ${valueText(diagnostic.message)} ${code(diagnostic.code)}`);
   }
   if (diagnostics.length > limit) {
     lines.push(`_…and ${diagnostics.length - limit} more notes. Open the full inspection report for all._`);
   }
 }
 
-/**
- * A quiescent run is the editor's own default rather than something the
- * inspected code implied, so it never counts as an assumption in a hover. It
- * is disclosed once, under runtime, in deep hovers and the full report.
- */
+/** Environment-tier entries are runtime facts, not assumptions. */
 const EDITOR_DEFAULT_LEDGER_KEYS = new Set(['device-session:quiescent-run']);
 
 function hoverAssumptions(
@@ -1264,10 +1584,7 @@ const LEDGER_KIND_LABELS: Record<string, string> = {
 
 const MAX_SUMMARIZED_LEDGER_KINDS = 3;
 
-/**
- * One line, categories only: the reader needs to know that inputs were filled
- * in for them and where the detail lives, not which values were chosen.
- */
+/** One line naming the synthesized input categories. */
 function assumptionSummaryLine(
   ledger: NonNullable<InspectorTargetReport['ledger']>,
 ): string {
@@ -1329,6 +1646,7 @@ function appendShaderFacts(
   analysis: WgslAnalysis,
   output: InspectorOutput,
   includeOperations = true,
+  statedEntryPoints: ReadonlySet<string> = new Set(),
 ): void {
   const operationEntries = [
     [analysis.operations.textureSamples, 'texture sample'],
@@ -1344,15 +1662,13 @@ function appendShaderFacts(
   const operations = operationEntries
     .filter(([count]) => count > 0)
     .map(([count, label]) => plural(count, label));
-  if (analysis.entryPoints.length === 0 && (!includeOperations || operations.length === 0)) return;
-
-  section(lines, 'Shader facts');
-  if (analysis.entryPoints.length > 0) {
-    lines.push(
-      `- **Entrypoints:** ${
-        analysis.entryPoints
-          .map((entry) => `${entry.stage} ${code(entry.name)}`)
-          .join(' · ')
+  const remaining = analysis.entryPoints.filter((entry) =>
+    !statedEntryPoints.has(entry.name));
+  const facts: string[] = [];
+  if (remaining.length > 0) {
+    facts.push(
+      `**Entrypoints:** ${
+        remaining.map((entry) => `${entry.stage} ${code(entry.name)}`).join(' · ')
       }`,
     );
   }
@@ -1360,20 +1676,28 @@ function appendShaderFacts(
   const limits = isRecord(output.environment?.limits)
     ? output.environment.limits
     : undefined;
-  for (const entry of analysis.entryPoints) {
+  for (const entry of remaining) {
     if (!entry.workgroupSize) continue;
-    const dimensions = entry.workgroupSize.map((value) => code(value)).join(' × ');
+    const dimensions = entry.workgroupSize.map(String).join(' × ');
     const total = entry.workgroupInvocations;
     const limitSummary = workgroupLimitSummary(entry, limits);
-    lines.push(
-      `- **Workgroup ${code(entry.name)}:** ${dimensions}${
+    facts.push(
+      `**Workgroup ${code(entry.name)}:** ${dimensions}${
         total !== undefined ? ` = ${plural(total, 'invocation')}` : ''
       }${limitSummary.length > 0 ? ` · ${limitSummary.join(' · ')}` : ''}`,
     );
   }
   if (includeOperations && operations.length > 0) {
-    lines.push(`- **Static occurrences:** ${operations.join(' · ')}`);
+    facts.push(`**Static occurrences:** ${operations.join(' · ')}`);
   }
+  if (facts.length === 0) return;
+
+  if (facts.length > 1) {
+    section(lines, 'Shader facts');
+    for (const fact of facts) lines.push(`- ${fact}`);
+    return;
+  }
+  lines.push('', facts[0]!);
 }
 
 function workgroupLimitSummary(
@@ -1416,30 +1740,6 @@ function workgroupLimitSummary(
   ].filter((value): value is string => Boolean(value));
 }
 
-function appendPipelineContext(
-  lines: string[],
-  source: NonNullable<InspectionTarget['pipelineSource']>,
-): void {
-  const stages = [
-    source.compute ? `compute ${code(source.compute)}` : undefined,
-    source.vertex ? `vertex ${code(source.vertex)}` : undefined,
-    source.fragment ? `fragment ${code(source.fragment)}` : undefined,
-  ].filter((stage): stage is string => Boolean(stage));
-  if (stages.length === 0 && !source.bindings?.length) return;
-
-  section(lines, 'Pipeline context');
-  if (stages.length > 0) {
-    lines.push(`- **Stages:** ${stages.join(' · ')}`);
-  }
-  for (const binding of source.bindings ?? []) {
-    lines.push(
-      binding.value
-        ? `- ${code(binding.source)} ← ${code(binding.value)}`
-        : `- ${code(binding.source)}`,
-    );
-  }
-}
-
 /**
  * Renders the failure banner and returns the diagnostic it consumed, if any,
  * so the caller can keep the remaining diagnostics in the notes section.
@@ -1478,209 +1778,151 @@ function appendFailure(
   return undefined;
 }
 
-function appendPipelineState(
-  lines: string[],
-  state: GpuPipelineState,
-): void {
-  if (state.kind === 'compute') {
-    return;
-  }
+const RESOURCE_PROPERTY_KEYS: Record<string, string> = {
+  size: 'Size',
+  format: 'Format',
+  dimension: 'Dimension',
+  viewDimension: 'View dimension',
+  mipLevelCount: 'Mips',
+  sampleCount: 'Samples',
+  access: 'Access',
+  label: 'Label',
+  flags: 'Usage flags',
+};
 
-  const primitive = state.primitive ?? {};
-  const multisample = state.multisample ?? {};
-  const summary = [
-    code(primitive.topology ?? 'triangle-list'),
-    `front ${code(primitive.frontFace ?? 'ccw')}`,
-    `cull ${code(primitive.cullMode ?? 'none')}`,
-    plural(
-      typeof multisample.count === 'number' ? multisample.count : 1,
-      'sample',
-    ),
-  ];
-  section(lines, 'Render pipeline state');
-  lines.push(summary.join(' · '));
-
-  if (state.targets && state.targets.length > 0) {
-    section(lines, 'Color targets');
-    for (const [index, target] of state.targets.entries()) {
-      const heading = [
-        `**${index} · ${code(target.format ?? '—')}**`,
-        `write ${code(target.writeMask ?? 'all')}`,
-        target.blend ? undefined : 'blend disabled',
-      ].filter(Boolean).join(' · ');
-      lines.push(`- ${heading}`);
-      if (isRecord(target.blend)) {
-        appendBlendComponent(lines, 'Color', target.blend.color);
-        appendBlendComponent(lines, 'Alpha', target.blend.alpha);
-      }
-    }
-  }
-
-  if (state.depthStencil) {
-    const depth = state.depthStencil;
-    lines.push(
-      '',
-      '**Depth / stencil**',
-      '',
-      `- **Format:** \`${escapeInline(String(depth.format ?? '—'))}\``,
-      `- **Depth:** ${depth.depthWriteEnabled === true ? 'write enabled' : 'write disabled'} · compare \`${escapeInline(String(depth.depthCompare ?? 'always'))}\``,
-    );
-    if (depth.stencilFront || depth.stencilBack) {
-      appendStencilFace(lines, 'Stencil front', depth.stencilFront);
-      appendStencilFace(
-        lines,
-        'Stencil back',
-        depth.stencilBack ?? depth.stencilFront,
-      );
-    }
-  }
-
-  if (state.vertexBuffers && state.vertexBuffers.length > 0) {
-    section(lines, 'Vertex buffers');
-    for (const [index, buffer] of state.vertexBuffers.entries()) {
-      lines.push(
-        `- **Slot ${index}** · ${typeof buffer.arrayStride === 'number' ? `${buffer.arrayStride} B stride` : 'unknown stride'} · ${code(buffer.stepMode ?? 'vertex')}`,
-      );
-      if (!Array.isArray(buffer.attributes) || buffer.attributes.length === 0) {
-        lines.push('  No vertex attributes.');
-        continue;
-      }
-      for (const attribute of buffer.attributes) {
-        if (!isRecord(attribute)) {
-          lines.push(`  - ${valueText(attribute)}`);
-          continue;
-        }
-        lines.push(
-          `  - ${code(`@location(${String(attribute.shaderLocation ?? '?')})`)} ${code(attribute.format ?? '?')} · offset ${typeof attribute.offset === 'number' ? `${attribute.offset} B` : '—'}`,
-        );
-      }
-    }
-  }
-}
-
-function appendBlendComponent(
-  lines: string[],
-  label: string,
-  value: unknown,
-): void {
-  if (!isRecord(value)) return;
-  const parts = [
-    `src ${code(value.srcFactor ?? 'one')}`,
-    `dst ${code(value.dstFactor ?? 'zero')}`,
-    code(value.operation ?? 'add'),
-  ];
-  lines.push(`  - **${label}:** ${parts.join(' · ')}`);
-}
-
-function appendStencilFace(
-  lines: string[],
-  label: string,
-  value: unknown,
-): void {
-  if (!isRecord(value)) {
-    lines.push(`- **${label}:** ${valueText(value)}`);
-    return;
-  }
-  const parts = [
-    `compare ${code(value.compare ?? 'always')}`,
-    `fail ${code(value.failOp ?? 'keep')}`,
-    `depth fail ${code(value.depthFailOp ?? 'keep')}`,
-    `pass ${code(value.passOp ?? 'keep')}`,
-  ];
-  lines.push(`- **${label}:** ${parts.join(' · ')}`);
-}
-
-function appendResourceReport(
-  lines: string[],
+function resourcePropertyKey(
+  name: string,
   resource: InspectorResourceReport,
-  options: SurfaceOptions = defaultSurfaceOptions,
-  includeRawBindings = false,
-  collectionLimit = 12,
-): void {
-  const isStandaloneSchema =
-    resource.resourceType === 'schema' && resource.schema !== undefined;
-  const isCollection =
-    resource.resourceType === 'collection' &&
+): string {
+  // `size` is a byte count on a buffer and an extent on a texture.
+  if (name === 'size' && resource.sizeBytes !== undefined) return 'Extent';
+  return RESOURCE_PROPERTY_KEYS[name] ?? name;
+}
+
+function formatPropertyValue(value: unknown): string {
+  return Array.isArray(value) && value.every((entry) => typeof entry === 'number')
+    ? value.join(' × ')
+    : valueText(value);
+}
+
+function resourceRows(
+  resource: InspectorResourceReport,
+  deep: boolean,
+  maxColumns: number,
+): DatasheetRow[] {
+  const rows: DatasheetRow[] = [];
+  const isCollection = resource.resourceType === 'collection' &&
     resource.items !== undefined;
-  const summary = [
-    `\`${escapeInline(resource.resourceType)}\``,
-    resource.count !== undefined ? plural(resource.count, 'item') : undefined,
-    resource.sizeBytes !== undefined
-      ? `${formatByteSize(resource.sizeBytes)} size`
-      : undefined,
-    resource.alignmentBytes !== undefined
-      ? `${resource.alignmentBytes}-byte alignment`
-      : undefined,
-    ...resourceUsageNames(resource).map((usage) => `\`${escapeInline(usage)}\``),
-  ].filter(Boolean);
-  if (!isStandaloneSchema) {
-    section(lines, isCollection ? 'Resource bundle' : 'Resource');
-    if (isCollection) {
-      const topLevelKind = resource.itemNames?.length ? 'field' : 'item';
-      lines.push([
+  if (isCollection) {
+    const topLevelKind = resource.itemNames?.length ? 'field' : 'item';
+    rows.push({
+      key: 'Bundle',
+      value: [
         resource.count !== undefined
           ? plural(resource.count, topLevelKind)
           : undefined,
-        plural(flattenResourceCollection(resource).length, 'resource leaf', 'resource leaves'),
-      ].filter(Boolean).join(' · '));
-    } else {
-      lines.push(summary.join(' · '));
-    }
+        plural(
+          flattenResourceCollection(resource).length,
+          'resource leaf',
+          'resource leaves',
+        ),
+      ].filter(Boolean).join(' · '),
+    });
+    return rows;
   }
+  // A standalone schema states its type in the Layout row instead.
+  if (!(resource.resourceType === 'schema' && resource.schema !== undefined)) {
+    rows.push({ key: 'Kind', value: term(resource.resourceType) });
+  }
+  if (resource.count !== undefined) {
+    rows.push({ key: 'Items', value: plural(resource.count, 'item') });
+  }
+  const usages = resourceUsageNames(resource);
+  if (usages.length > 0) {
+    rows.push(...splitRow('Usage', usages.map(term), maxColumns));
+  }
+  // Size and alignment come from the schema's Layout row when there is one.
+  if (
+    resource.sizeBytes !== undefined &&
+    resource.schema?.sizeBytes !== resource.sizeBytes
+  ) {
+    rows.push({ key: 'Size', value: formatByteSize(resource.sizeBytes) });
+  }
+  if (
+    resource.alignmentBytes !== undefined &&
+    resource.schema?.alignmentBytes !== resource.alignmentBytes
+  ) {
+    rows.push({
+      key: 'Alignment',
+      value: formatByteSize(resource.alignmentBytes),
+    });
+  }
+  for (const [name, value] of visibleResourceProperties(resource, deep)) {
+    rows.push({
+      key: resourcePropertyKey(name, resource),
+      value: name === 'flags'
+        ? formatUsageFlags(resource, value)
+        : formatPropertyValue(value),
+    });
+  }
+  return rows;
+}
 
+function appendResourceTables(
+  lines: string[],
+  resource: InspectorResourceReport,
+  options: SurfaceOptions,
+  includeRawBindings: boolean,
+  collectionLimit: number,
+  maxColumns: number,
+): void {
   if (resource.schema) {
-    appendSchemaReport(lines, resource.schema, options);
+    appendSchemaFieldTable(lines, resource.schema, options, maxColumns);
   }
 
   if (includeRawBindings && resource.bindings && resource.bindings.length > 0) {
     section(lines, 'Declared bindings');
-    lines.push(
-      '| Binding | Kind | Visibility | Details |',
-      '| --- | --- | --- | --- |',
+    appendTable(
+      lines,
+      ['Binding', 'Kind', 'Stages', 'Details'],
+      ['---', '---', '---', '---'],
+      resource.bindings.map((binding) => [
+        typeof binding.name === 'string'
+          ? `${formatCell(binding.binding)} ${tableCode(binding.name)}`
+          : formatCell(binding.binding),
+        tableText(binding.kind ?? '—'),
+        tableText(formatShaderStages(binding.visibility)),
+        tableText(formatBindingDetails(binding)),
+      ]),
+      maxColumns,
+      (cells) => `**${cells[0]}:** ${cells.slice(1).join(' · ')}`,
     );
-    for (const binding of resource.bindings) {
-      const identity = typeof binding.name === 'string'
-        ? `${formatCell(binding.binding)} · ${tableCode(binding.name)}`
-        : formatCell(binding.binding);
-      lines.push(
-        `| ${identity} | ${tableText(binding.kind ?? '—')} | ${tableText(formatShaderStages(binding.visibility))} | ${tableText(formatBindingDetails(binding))} |`,
-      );
-    }
   }
 
   if (resource.attributes && resource.attributes.length > 0) {
     section(lines, 'Vertex attributes');
-    lines.push(
-      '| Name | Format | Offset |',
-      '| --- | --- | ---: |',
+    appendTable(
+      lines,
+      ['Name', 'Format', 'Offset'],
+      ['---', '---', '---:'],
+      resource.attributes.map((attribute) => [
+        tableCode(attribute.name ?? 'value'),
+        tableText(attribute.format ?? '—'),
+        formatCell(attribute.offsetBytes),
+      ]),
+      maxColumns,
+      (cells) => `**${cells[0]}:** ${cells[1]} · offset ${cells[2]}`,
     );
-    for (const attribute of resource.attributes) {
-      lines.push(
-        `| ${tableCode(attribute.name ?? 'value')} | ${tableCode(attribute.format ?? '—')} | ${formatCell(attribute.offsetBytes)} |`,
-      );
-    }
   }
 
   if (resource.items && resource.items.length > 0) {
-    appendResourceBundle(lines, resource, collectionLimit);
-  }
-
-  const properties = visibleResourceProperties(resource, includeRawBindings);
-  if (properties.length > 0) {
-    section(lines, 'Properties');
-    for (const [name, value] of properties) {
-      lines.push(name === 'flags'
-        ? `- **usage flags:** ${formatUsageFlags(resource, value)}`
-        : `- **${escapeMarkdown(name)}:** ${valueText(value)}`);
-    }
+    appendResourceBundle(lines, resource, collectionLimit, maxColumns);
   }
 }
 
 type UsageFlagTable = ReadonlyArray<readonly [number, string]>;
 
-// WebGPU usage bitmasks, ordered so the binding roles read before the
-// transfer and mapping bits: what a resource *is* comes before how it can be
-// copied. 76 therefore decodes as uniform | copy-src | copy-dst.
+// Binding roles first, then transfer and mapping bits.
 const GPU_BUFFER_USAGE_FLAGS: UsageFlagTable = [
   [64, 'uniform'],
   [128, 'storage'],
@@ -1702,7 +1944,6 @@ const GPU_TEXTURE_USAGE_FLAGS: UsageFlagTable = [
   [2, 'copy-dst'],
 ];
 
-/** TypeGPU's texture usage vocabulary names the same WebGPU bits. */
 const TYPEGPU_TEXTURE_USAGE_BITS: Record<string, string> = {
   sampled: 'texture-binding',
   storage: 'storage-binding',
@@ -1723,11 +1964,7 @@ function decodeUsageFlags(resourceType: string, flags: unknown): string[] {
     .map(([, name]) => name);
 }
 
-/**
- * What the resource can be used for, stated once. TypeGPU's own usage names
- * come first; the raw WebGPU mask only contributes what they do not already
- * say, so a sampled texture never also lists `texture-binding`.
- */
+/** TypeGPU usage names plus whatever the raw mask adds. */
 function resourceUsageNames(resource: InspectorResourceReport): string[] {
   const declared = resource.usages ?? [];
   const covered = new Set(declared.flatMap((usage) =>
@@ -1747,22 +1984,16 @@ function formatUsageFlags(
 ): string {
   const decoded = decodeUsageFlags(resource.resourceType, flags);
   if (typeof flags !== 'number' || decoded.length === 0) return valueText(flags);
-  return `0x${flags.toString(16)} (${decoded.join(' | ')})`;
+  return `0x${flags.toString(16)} · ${decoded.join(' · ')}`;
 }
 
-/**
- * Properties are the runtime facts a shader author reads, not a dump of the
- * inspector's record. Below deep, drop what is already stated elsewhere (the
- * decoded usage mask, a repeated resource type, a binding count the bindings
- * table shows) and what states nothing at all (empty values, bare negatives).
- * Deep keeps everything: there it is raw evidence.
- */
+/** Below deep, drops rows restated elsewhere or stating nothing. */
 function visibleResourceProperties(
   resource: InspectorResourceReport,
   deep: boolean,
 ): Array<[string, unknown]> {
   const entries = Object.entries(resource.properties ?? {});
-  if (deep) return entries;
+  if (deep) return entries.filter(([name, value]) => name !== 'destroyed' || value !== false);
   const bindingCount = resource.bindings?.length;
   return entries.filter(([name, value]) => {
     if (name === 'flags') return false;
@@ -1785,19 +2016,24 @@ function appendResourceBundle(
   lines: string[],
   resource: InspectorResourceReport,
   collectionLimit: number,
+  maxColumns: number,
 ): void {
   const entries = (resource.items ?? []).map((item, index) => ({
     name: resource.itemNames?.[index] ?? `[${index}]`,
     item,
   }));
   section(lines, resource.itemNames?.length ? 'Bundle fields' : 'Collection items');
-  lines.push(
-    `| ${resource.itemNames?.length ? 'Field' : 'Item'} | Runtime shape |`,
-    '| --- | --- |',
+  appendTable(
+    lines,
+    [resource.itemNames?.length ? 'Field' : 'Item', 'Runtime shape'],
+    ['---', '---'],
+    entries.slice(0, collectionLimit).map(({ name, item }) => [
+      tableCode(name),
+      tableText(summarizeResourceShape(item)),
+    ]),
+    maxColumns,
+    (cells) => `**${cells[0]}:** ${cells[1]}`,
   );
-  for (const { name, item } of entries.slice(0, collectionLimit)) {
-    lines.push(`| ${tableCode(name)} | ${tableText(summarizeResourceShape(item))} |`);
-  }
   if (entries.length > collectionLimit) {
     lines.push('', `_…and ${entries.length - collectionLimit} more fields. Open the full inspection report for all items._`);
   }
@@ -1805,15 +2041,17 @@ function appendResourceBundle(
   const bindGroupShapes = collectBindGroupShapes(resource);
   if (bindGroupShapes.length === 0) return;
   section(lines, 'Bind-group shapes');
-  lines.push(
-    '| Resource | Declared bindings |',
-    '| --- | --- |',
+  appendTable(
+    lines,
+    ['Resource', 'Declared bindings'],
+    ['---', '---'],
+    bindGroupShapes.slice(0, collectionLimit).map((shape) => [
+      tableCode(collapseIndexedPaths(shape.paths)),
+      tableText(formatBundleBindings(shape.bindings)),
+    ]),
+    maxColumns,
+    (cells) => `**${cells[0]}:** ${cells[1]}`,
   );
-  for (const shape of bindGroupShapes.slice(0, collectionLimit)) {
-    lines.push(
-      `| ${tableCode(collapseIndexedPaths(shape.paths))} | ${tableText(formatBundleBindings(shape.bindings))} |`,
-    );
-  }
   if (bindGroupShapes.length > collectionLimit) {
     lines.push('', `_…and ${bindGroupShapes.length - collectionLimit} more bind-group shapes. Open the full inspection report for all items._`);
   }
@@ -1937,37 +2175,45 @@ function flattenResourceCollection(
   return rows;
 }
 
-function appendSchemaReport(
-  lines: string[],
+function schemaRows(
   schema: InspectorSchemaReport,
-  options: SurfaceOptions = defaultSurfaceOptions,
-): void {
+  options: SurfaceOptions,
+  maxColumns: number,
+): DatasheetRow[] {
   const analysis = analyzeSchemaLayout(schema, {
     packingSuggestions: options.schemaPackingSuggestions,
   });
-  const details = [
-    `\`${escapeInline(schema.type)}\``,
-    schema.sizeBytes !== undefined ? `${formatByteSize(schema.sizeBytes)} size` : undefined,
-    schema.alignmentBytes !== undefined
-      ? `${schema.alignmentBytes}-byte alignment`
-      : undefined,
-    schema.elementCount !== undefined
-      ? plural(schema.elementCount, 'element')
-      : undefined,
-    schema.elementStrideBytes !== undefined
-      ? `${schema.elementStrideBytes}-byte stride`
-      : undefined,
-  ].filter(Boolean);
-  section(lines, 'Schema');
-  lines.push(details.join(' · '));
+  const rows: DatasheetRow[] = [{
+    key: 'Layout',
+    value: [
+      term(schema.type),
+      schema.sizeBytes !== undefined
+        ? `${formatByteSize(schema.sizeBytes)} size`
+        : undefined,
+      schema.alignmentBytes !== undefined
+        ? `${schema.alignmentBytes}-byte alignment`
+        : undefined,
+      schema.elementCount !== undefined
+        ? plural(schema.elementCount, 'element')
+        : undefined,
+      schema.elementStrideBytes !== undefined
+        ? `${schema.elementStrideBytes}-byte stride`
+        : undefined,
+    ].filter(Boolean).join(' · '),
+  }];
 
   const hostShareability = analysis.hostShareability;
   if (hostShareability.status !== 'not-applicable') {
-    lines.push(
-      `- **Host-shareable:** ${hostShareability.status === 'yes' ? 'Yes' : hostShareability.status === 'no' ? 'No' : 'Unknown'}${
-        hostShareability.reason ? ` — ${valueText(hostShareability.reason)}` : ''
-      }`,
-    );
+    rows.push({
+      key: 'Host-shareable',
+      value: `${
+        hostShareability.status === 'yes'
+          ? 'Yes'
+          : hostShareability.status === 'no'
+          ? 'No'
+          : 'Unknown'
+      }${hostShareability.reason ? ` — ${valueText(hostShareability.reason)}` : ''}`,
+    });
   }
 
   const showLayoutHealth = options.schemaLayoutHealth &&
@@ -1983,37 +2229,56 @@ function appendSchemaReport(
     analysis.dataBytes !== undefined &&
     analysis.paddingBytes !== undefined
   ) {
-    const health = analysis.paddingBytes > 0
-      ? [
-          `${formatByteSize(analysis.allocatedBytes)} allocated`,
-          `${formatByteSize(analysis.dataBytes)} data`,
-          `${formatByteSize(analysis.paddingBytes)} padding (${
-            Math.round((analysis.paddingRatio ?? 0) * 100)
-          }%)`,
-        ]
-      : [
-          `${formatByteSize(analysis.allocatedBytes)} allocated`,
-          'no padding',
-        ];
-    lines.push('', `- **Memory layout:** ${health.join(' · ')}`);
+    rows.push({
+      key: 'Memory',
+      value: (analysis.paddingBytes > 0
+        ? [
+            `${formatByteSize(analysis.allocatedBytes)} allocated`,
+            `${formatByteSize(analysis.dataBytes)} data`,
+            `${formatByteSize(analysis.paddingBytes)} padding (${
+              Math.round((analysis.paddingRatio ?? 0) * 100)
+            }%)`,
+          ]
+        : [
+            `${formatByteSize(analysis.allocatedBytes)} allocated`,
+            'no padding',
+          ]).join(' · '),
+    });
     if (analysis.paddingRegions.length > 0) {
       const preview = analysis.paddingRegions.slice(0, 6);
       const omitted = analysis.paddingRegions.length - preview.length;
-      lines.push(
-        `- **Padding map:** ${
-          preview.map((region) =>
-            `${formatByteSize(region.bytes)} ${code(region.label)}`
-          ).join(' · ')
-        }${omitted > 0 ? ` · …${omitted} more ${omitted === 1 ? 'region' : 'regions'}` : ''}`,
-      );
+      rows.push(...splitRow(
+        'Padding map',
+        [
+          ...preview.map((region) =>
+            `${formatByteSize(region.bytes)} ${code(region.label)}`),
+          ...(omitted > 0
+            ? [`…${omitted} more ${omitted === 1 ? 'region' : 'regions'}`]
+            : []),
+        ],
+        maxColumns,
+      ));
     }
     if (analysis.reorder) {
-      lines.push(
-        `- **Possible tighter order:** ${analysis.reorder.suggestedOrder.map((field) => code(field)).join(' → ')} · ${formatByteSize(analysis.reorder.currentBytes)} → ${formatByteSize(analysis.reorder.optimizedBytes)} · save ${formatByteSize(analysis.reorder.savingsBytes)}`,
-      );
+      rows.push(...splitRow('Tighter order', [
+        analysis.reorder.suggestedOrder.map((field) => code(field)).join(' → '),
+        `${formatByteSize(analysis.reorder.currentBytes)} → ${formatByteSize(analysis.reorder.optimizedBytes)}`,
+        `save ${formatByteSize(analysis.reorder.savingsBytes)}`,
+      ], maxColumns));
     }
   }
+  return rows;
+}
 
+function appendSchemaFieldTable(
+  lines: string[],
+  schema: InspectorSchemaReport,
+  options: SurfaceOptions,
+  maxColumns: number,
+): void {
+  const analysis = analyzeSchemaLayout(schema, {
+    packingSuggestions: options.schemaPackingSuggestions,
+  });
   if (!analysis.completeness.complete) {
     const omittedFields = analysis.completeness.omittedFields !== undefined
       ? ` · ${plural(analysis.completeness.omittedFields, 'field')} beyond the WGSL-required limit omitted`
@@ -2026,27 +2291,41 @@ function appendSchemaReport(
       `_Schema report is incomplete${location}${omittedFields}. See the full report for its truncation reason._`,
     );
   }
+  if (analysis.fields.length === 0) return;
 
-  if (analysis.fields.length > 0) {
-    lines.push(
-      '',
-      '| Field | Offset | Type | Layout |',
-      '| --- | ---: | --- | --- |',
-    );
-    for (const field of analysis.fields) {
-      const layout = [
-        field.schema.sizeBytes !== undefined
-          ? formatByteSize(field.schema.sizeBytes)
-          : undefined,
-        field.schema.alignmentBytes !== undefined
-          ? `align ${formatByteSize(field.schema.alignmentBytes)}`
-          : undefined,
-      ].filter(Boolean).join(' · ');
-      lines.push(
-        `| ${tableCode(field.path)} | ${formatCell(field.offsetBytes)} | ${tableCode(field.schema.type)} | ${tableText(layout || '—')} |`,
-      );
-    }
-  }
+  const rows = analysis.fields.map((field) => {
+    const layout = [
+      field.schema.sizeBytes !== undefined
+        ? formatByteSize(field.schema.sizeBytes)
+        : undefined,
+      field.schema.alignmentBytes !== undefined
+        ? `align ${formatByteSize(field.schema.alignmentBytes)}`
+        : undefined,
+    ].filter(Boolean).join(' · ');
+    return [
+      tableCode(field.path),
+      formatCell(field.offsetBytes),
+      // WGSL type names stay in code spans.
+      tableCode(field.schema.type),
+      tableText(layout || '—'),
+    ];
+  });
+  lines.push('');
+  // Drop the Layout column before giving up the table.
+  const narrowed = rows.every((row) =>
+      tableRowWidth(row) <= maxColumns
+    )
+    ? rows
+    : rows.map((row) => row.slice(0, 3));
+  appendTable(
+    lines,
+    ['Field', 'Offset', 'Type', 'Layout'].slice(0, narrowed[0]!.length),
+    ['---', '---:', '---', '---'].slice(0, narrowed[0]!.length),
+    narrowed,
+    maxColumns,
+    (cells) =>
+      `**${cells[0]}:** offset ${cells[1]} · ${cells.slice(2).join(' · ')}`,
+  );
 }
 
 function formatShaderStages(value: unknown): string {
@@ -2061,7 +2340,7 @@ function formatShaderStages(value: unknown): string {
   ) {
     return 'all stages';
   }
-  return stages.join(' + ') || '—';
+  return stages.join(' · ') || '—';
 }
 
 function formatBindingDetails(binding: Record<string, unknown>): string {
@@ -2105,8 +2384,6 @@ function appendRuntimeSummary(
     ...(output.warnings ?? []),
     ...(output.pageErrors ?? []),
   ]).slice(0, MAX_RUNTIME_NOTES);
-  // Editor-imposed defaults (the quiescent run) are runtime facts about how
-  // the pass was executed, not assumptions the inspected code implied.
   const defaultNotes = uniqueStrings(
     editorDefaults.map((entry) => entry.provenance),
   );
@@ -2172,9 +2449,11 @@ function nestedNumberProperty(
 function hover(
   lines: string[],
   range: Range,
-  presentation: SurfaceOptions['presentation'] = 'zed',
+  options: SurfaceOptions = defaultSurfaceOptions,
 ): Hover {
-  const presented = presentation === 'vscode' ? presentForVsCode(lines) : lines;
+  const presented = options.presentation === 'vscode'
+    ? presentForVsCode(lines, columnBudget(options))
+    : lines;
   const contents: MarkupContent = {
     kind: MarkupKind.Markdown,
     value: presented.join('\n'),
@@ -2182,15 +2461,16 @@ function hover(
   return { contents, range };
 }
 
-const MAX_GRID_CELL_WIDTH = 30;
-
 /**
  * VS Code renders markdown tables in hovers nearly unstyled, so convert them
  * to aligned mono grids inside fenced blocks, and separate sections with
  * horizontal rules. Operates on our own regular output: a table is always a
  * header row, a `| --- |` separator, then data rows.
  */
-function presentForVsCode(lines: string[]): string[] {
+function presentForVsCode(
+  lines: string[],
+  maxColumns = WIDE_MAX_COLUMNS,
+): string[] {
   const result: string[] = [];
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index]!;
@@ -2200,10 +2480,10 @@ function presentForVsCode(lines: string[]): string[] {
       next !== undefined &&
       /^\|(\s*:?---+:?\s*\|)+$/.test(next.replaceAll(' ', ''))
     ) {
-      const rows: string[][] = [parseTableRow(line)];
+      const rows: string[][] = [parseTableRow(line, maxColumns)];
       let cursor = index + 2;
       while (cursor < lines.length && lines[cursor]!.startsWith('|')) {
-        rows.push(parseTableRow(lines[cursor]!));
+        rows.push(parseTableRow(lines[cursor]!, maxColumns));
         cursor++;
       }
       result.push(...renderMonoGrid(rows));
@@ -2219,24 +2499,27 @@ function presentForVsCode(lines: string[]): string[] {
   return result;
 }
 
-function parseTableRow(line: string): string[] {
+function parseTableRow(line: string, limit: number): string[] {
   const inner = line.replace(/^\|\s*/, '').replace(/\s*\|$/, '');
-  return inner.split(/(?<!\\)\|/).map((cell) => plainCellText(cell));
+  return inner.split(/(?<!\\)\|/).map((cell) => plainCellText(cell, limit));
 }
 
-/** Strips the markdown-table formatting our own emitters apply to cells. */
-function plainCellText(cell: string): string {
+function plainCellText(cell: string, limit: number): string {
   const text = cell
     .trim()
     .replaceAll('\u200b', '')
+    .replaceAll('\u00a0', ' ')
+    .replaceAll('**', '')
     .replaceAll('`', '')
     .replaceAll(/\\([\\`*_[\]<>|])/g, '$1');
-  return text.length > MAX_GRID_CELL_WIDTH
-    ? `${text.slice(0, MAX_GRID_CELL_WIDTH - 1)}…`
-    : text;
+  return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
 }
 
-function renderMonoGrid(rows: string[][]): string[] {
+function renderMonoGrid(input: string[][]): string[] {
+  // The datasheet's header row is empty.
+  const rows = input.length > 1 && input[0]!.every((cell) => cell === '')
+    ? input.slice(1)
+    : input;
   const columnCount = Math.max(...rows.map((row) => row.length));
   const widths = Array.from({ length: columnCount }, (_, column) =>
     Math.max(...rows.map((row) => (row[column] ?? '').length)));
@@ -2294,6 +2577,8 @@ async function writeGeneratedReport(
     hoverPresentation: {
       sections: {},
       sectionOrder: [],
+      // Files scroll: no width fallback.
+      maxColumns: settingsBounds.maxColumns.max,
       wgslPreviewLines: 20,
       collectionItems: 1_000,
       declarations: Math.max(1, target.analysis?.declarations.length ?? 1),
@@ -2664,4 +2949,13 @@ function isRange(value: unknown): value is Range {
     typeof value.start.character === 'number' &&
     typeof value.end.line === 'number' &&
     typeof value.end.character === 'number';
+}
+
+function isPipelineKind(kind: string | undefined): boolean {
+  return kind === 'render-pipeline' || kind === 'compute-pipeline';
+}
+
+function leadingWgslExcerpt(wgsl: string, maxLines: number): { lines: string[]; omitted: number } {
+  const all = wgsl.replace(/\s+$/, '').split('\n');
+  return { lines: all.slice(0, maxLines), omitted: Math.max(0, all.length - maxLines) };
 }

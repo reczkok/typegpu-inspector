@@ -1,17 +1,6 @@
 #!/usr/bin/env node
-// Generates editors/vscode/icon.png — the Marketplace / extension-list icon.
-//
-// Committed as a generator rather than a checked-in binary blob so the mark
-// stays editable and reviewable in a diff. Uses only node:zlib: a PNG is a
-// signature plus CRC'd chunks around a zlib stream, which is little enough
-// code to not be worth a dependency (and the extension must stay free of
-// runtime deps it does not ship).
-//
-//   node editors/vscode/scripts/make-icon.mjs
-//
-// The mark: a stylized ⟨GPU⟩ — two chevrons around a die with a cut-out core
-// — in TypeGPU teal on a near-black ground. Pure geometry, no text rendering,
-// so it survives being scaled down to 32px in the extensions sidebar.
+// Usage: node editors/vscode/scripts/make-icon.mjs
+// Writes editors/vscode/icon.png (256×256, node:zlib only): two chevrons around a die.
 
 import { deflateSync } from 'node:zlib';
 import { writeFileSync } from 'node:fs';
@@ -19,12 +8,11 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const SIZE = 256;
-/** Supersampling factor; averaging the samples is our whole anti-aliaser. */
+/** Supersampling factor for anti-aliasing. */
 const SAMPLES = 3;
 
 const GROUND = [0x17, 0x1a, 0x21];
 const TEAL = [0x0e, 0x7c, 0x7b];
-/** A lift on the teal so the die reads as lit rather than flat. */
 const TEAL_LIGHT = [0x19, 0xa8, 0xa4];
 
 /** Signed distance to a rounded rectangle centred at (cx, cy). */
@@ -48,31 +36,24 @@ function capsule(x, y, ax, ay, bx, by, radius) {
   return Math.hypot(apx - abx * t, apy - aby * t) - radius;
 }
 
-/**
- * Shapes are painted in order; the last one covering a sample wins. Kept as
- * plain predicates so the composite is just "which shape is on top here".
- */
+/** Painted in order; the last shape covering a sample wins. */
 const LAYERS = [
-  // ⟨ : two strokes meeting at a point on the left.
   {
     color: TEAL,
     hit: (x, y) =>
       capsule(x, y, 46, 128, 88, 78, 11) < 0 ||
       capsule(x, y, 46, 128, 88, 178, 11) < 0,
   },
-  // ⟩ : mirrored on the right.
   {
     color: TEAL,
     hit: (x, y) =>
       capsule(x, y, 210, 128, 168, 78, 11) < 0 ||
       capsule(x, y, 210, 128, 168, 178, 11) < 0,
   },
-  // The die between the brackets.
   {
     color: TEAL_LIGHT,
     hit: (x, y) => roundedRect(x, y, 128, 128, 38, 38, 11) < 0,
   },
-  // Its cut-out core, punched back to the ground colour.
   {
     color: GROUND,
     hit: (x, y) => roundedRect(x, y, 128, 128, 15, 15, 5) < 0,

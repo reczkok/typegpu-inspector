@@ -63,12 +63,7 @@ ${browserInstallHint()}`,
   }
 }
 
-/**
- * Downloads Chromium ahead of the first launch when this Playwright copy has
- * no browser yet. Callers run this before starting their inspection budget:
- * a ~550 MB download must not count against a timeout sized for Vite and
- * Chromium start-up, and it must be visible on stderr rather than silent.
- */
+/** Downloads Chromium if this Playwright copy has none; call before starting an inspection budget. */
 export async function ensureChromiumInstalled(): Promise<boolean> {
   if (existsSync(chromium.executablePath())) return false;
   await installChromiumOnce();

@@ -47,7 +47,7 @@ its settings UI.
 | --- | --- | --- | --- |
 | `inspectOn` | `typegpuInspector.inspectOn` | `"save"` | `save`, `hover`, `save-and-hover`, `off` |
 | `warmUpOnOpen` | `typegpuInspector.warmUpOnOpen` | `true` | Prepare the session when a TypeGPU file opens |
-| `hoverDetailLevel` | `typegpuInspector.hoverDetailLevel` | `"standard"` | `compact`, `standard`, `deep` |
+| `hoverDetailLevel` | `typegpuInspector.hoverDetailLevel` | `"standard"` | `wgsl`, `compact`, `standard`, `deep` |
 | `inlayDetailLevel` | `typegpuInspector.inlayDetailLevel` | `"compact"` | `compact`, `summary`, `detailed` |
 | `hoverPresentation` | `typegpuInspector.hoverPresentation` | `{}` | Section visibility, order, budgets |
 | `timeoutMs` | `typegpuInspector.timeoutMs` | `45000` | Per inspection; clamped to 1000–600000 |
@@ -62,6 +62,8 @@ The deprecated `detailLevel` maps onto the two detail levels above.
 `typegpuInspector.serverPath` is VS Code only and points at a local language
 server build.
 
+`wgsl` shows only the generated WGSL for shaders and pipelines (up to 120 lines, or `hoverPresentation.wgslPreviewLines`) and the compact facts for anything else. At every level the generated WGSL comes before the tables.
+
 Hover and inlay detail are independent. `sourceMapping` is heuristic, and a
 diagnostic always keeps its link to the generated WGSL location.
 `hoverPresentation` sets each hover section to `auto`, `show`, or `hide`,
@@ -69,6 +71,19 @@ reorders them with `sectionOrder`, and bounds the ones that can grow; VS Code's
 settings schema lists the section names and ranges. A lower detail level never
 abbreviates schemas, bindings, render targets, vertex attributes, or short
 resource descriptors.
+
+A hover states each role's facts as a two-column table: stages, primitive
+state, colour targets, vertex slots and their attributes for a pipeline; kind,
+usage, size, format and layout for a resource. Inline code marks identifiers
+from your code and from the generated WGSL; WebGPU vocabulary — topologies,
+formats, cull modes, usage names — is plain text.
+
+`hoverPresentation.maxColumns` is the widest table a hover renders, in visible
+characters. It defaults to 72 in Zed and 96 elsewhere, and is clamped to
+40–200. A table that would exceed it is emitted as wrapping key/value lines
+instead, so narrow hovers change shape rather than losing content. The section
+names `resource`, `schema`, `pipelineState`, and `pipelineContext` all address
+the `datasheet` section.
 
 Invalid values are dropped and logged. Changes apply without a restart, except
 `serverPath`.

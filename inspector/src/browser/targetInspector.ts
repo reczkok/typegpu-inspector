@@ -119,7 +119,7 @@ export async function inspectPipelineTargets(
         {
           code: 'inspection-defaults-applied',
           severity: 'note',
-          message: 'The editor inspector synthesized missing runtime inputs.',
+          message: 'Missing runtime inputs were synthesized.',
           hint: synthesisNotes.join(' '),
         },
       ];
@@ -234,9 +234,9 @@ async function validateResourceTarget(
       code: 'structural-resource-only',
       severity: 'note',
       message:
-        'Structural inspection succeeded, but the returned value exposed no concrete TypeGPU resource or pipeline to validate.',
+        'No TypeGPU resource or pipeline to validate; structure only.',
       hint:
-        'A passed resource target does not validate work hidden behind object methods. Return the concrete shader or pipeline as its own target for WebGPU validation.',
+        'Select the shader or pipeline itself to validate work behind object methods.',
     }]);
   }
 
@@ -269,9 +269,9 @@ async function validateResourceTarget(
     addTargetDiagnostics(report, [{
       code: 'module-device-resource',
       message:
-        'Structural inspection succeeded; materialization was not repeated for a resource owned by the imported module’s GPU device.',
+        'Not re-created on the inspector device: the resource belongs to the module’s own root.',
       hint:
-        'Dimensions, formats, usage flags, schemas, layouts, and bindings remain available. WebGPU materialization belongs to the application root that created this resource.',
+        'Size, format, usage, schema, layout, and bindings are reported from the existing object.',
     }]);
   }
   if (materializable.length === 0) return;
@@ -378,9 +378,9 @@ async function validatePipelineTarget(
             code: 'pipeline-wrapper-unwrapped',
             severity: 'note',
             message:
-              'The selected value was a guarded/wrapper pipeline, so the inspector resolved and validated its inner TypeGPU pipeline.',
+              'Validated the pipeline inside this wrapper.',
             hint:
-              'The wrapper was handled automatically through its public field or TypeGPU soul metadata.',
+              'The wrapper was unwrapped through its public field or soul metadata.',
             valueSummary: summarizeTargetValue(value),
           },
         ]);
@@ -615,8 +615,8 @@ function createValidationUnavailableDiagnostic(): TargetDiagnostic {
   return {
     code: 'webgpu-validation-unavailable',
     severity: 'note',
-    message: 'Inspection data was produced, but this browser device session became unavailable before validation completed.',
-    hint: 'The structural metadata or generated WGSL is included; rerun on a stable WebGPU adapter for validation.',
+    message: 'The WebGPU device was lost before validation completed.',
+    hint: 'Structure and WGSL are included; rerun on a stable adapter to validate.',
   };
 }
 
@@ -691,9 +691,9 @@ function hydrateReportFromCalls(report: TypeGpuTargetReport, calls: RecordedGpuC
           code: 'pipeline-validated-without-recorded-creation',
           severity: 'note',
           message:
-            'The pipeline target validated only; no target-owned createPipeline GPU call was recorded.',
+            'Validated without a recorded createPipeline call.',
           hint:
-            'WGSL, bindings, declarations, size, and compilation diagnostics remain available. Exact createPipeline descriptors and per-call pipeline stats require construction inside the target, usually from a selected shader entrypoint.',
+            'Descriptors and per-call stats require the pipeline to be created inside the target.',
         },
       ]);
     }

@@ -3,8 +3,10 @@ import {
   code,
   formatInspectableValue,
   tableCode,
+  tableRowWidth,
   tableText,
   valueText,
+  visibleWidth,
 } from '../src/markdown.js';
 
 describe('hover markdown formatting', () => {
@@ -42,5 +44,12 @@ describe('hover markdown formatting', () => {
   it('keeps pipes from breaking Markdown table cells', () => {
     expect(tableText('vertex | fragment')).toContain('\\|');
     expect(tableCode('texture_2d<f32> | sampler')).toContain('\\|');
+  });
+
+  it('measures rendered width without markdown syntax', () => {
+    expect(visibleWidth('**Primitive**')).toBe(9);
+    expect(visibleWidth(code('vec4f'))).toBe(5);
+    expect(visibleWidth(tableText('texture_2d<f32>'))).toBe(15);
+    expect(tableRowWidth(['**Primitive**', 'triangle-list'])).toBe(25);
   });
 });

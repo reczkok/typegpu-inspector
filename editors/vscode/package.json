@@ -94,11 +94,13 @@
         "typegpuInspector.hoverDetailLevel": {
           "type": "string",
           "enum": [
+            "wgsl",
             "compact",
             "standard",
             "deep"
           ],
           "enumDescriptions": [
+            "Generated WGSL only for shaders and pipelines; compact facts for everything else.",
             "Complete core resource shape without secondary evidence.",
             "Role-focused facts and a bounded generated WGSL excerpt.",
             "Diagnostics, provenance, runtime metadata, and raw evidence."
@@ -142,6 +144,7 @@
                   "wgslPreview",
                   "shaderFacts",
                   "bindings",
+                  "datasheet",
                   "resource",
                   "schema",
                   "pipelineState",
@@ -154,10 +157,16 @@
                 ]
               }
             },
+            "maxColumns": {
+              "type": "number",
+              "minimum": 40,
+              "maximum": 200,
+              "description": "Widest table a hover may render, in visible characters. Wider content becomes wrapping key/value lines. Defaults to 72 in Zed and 96 elsewhere."
+            },
             "wgslPreviewLines": {
               "type": "number",
               "minimum": 0,
-              "maximum": 20
+              "maximum": 400
             },
             "collectionItems": {
               "type": "number",

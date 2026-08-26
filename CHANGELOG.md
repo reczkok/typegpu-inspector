@@ -9,11 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.5.1] - 2026-08-26
 
+### Added
+
+- `hoverDetailLevel: "wgsl"`: generated WGSL only for shaders and pipelines,
+  compact facts for everything else. The generated WGSL now precedes the
+  tables at every level, and `hoverPresentation.wgslPreviewLines` accepts up
+  to 400.
+- `hoverPresentation.maxColumns` bounds the width of hover tables in visible
+  characters (72 in Zed, 96 elsewhere, clamped to 40–200). A table that would
+  exceed it renders as wrapping key/value lines instead of being clipped.
+- `datasheet` is a hover section id. `resource`, `schema`, `pipelineState`, and
+  `pipelineContext` address the same section.
+
 ### Changed
 
-- Hovers decode WebGPU usage bitmasks into names on the resource line
-  (`buffer · uniform · copy-src · copy-dst`); the raw mask appears only at the
-  `deep` level and in the full report.
+- A hover states each role's facts in one two-column table — stages, primitive
+  state, colour targets, and one row per vertex slot and attribute for a
+  pipeline; kind, usage, size, format, and layout for a resource — in place of
+  a bold heading per fact.
+- Inline code marks identifiers from the inspected code and the generated WGSL.
+  WebGPU vocabulary is plain text.
+- The bindings table is group:binding with the name, type, and stages;
+  the WebGPU layout column appears at `deep`.
+- Hovers have no nested lists, and state the pipeline stages once.
+- `standard` and `compact` carry the generated shader's declaration count on
+  the WGSL link; `deep` keeps the full declaration list.
+- Hovers decode WebGPU usage bitmasks into names in the resource's `Usage` row
+  (`uniform · copy-src · copy-dst`); the raw mask appears only at the `deep`
+  level and in the full report.
 - The `standard` hover replaces the per-entry assumption list with one line
   naming the synthesized input categories; `compact` shows none; `deep` keeps
   the full ledger. `hoverPresentation.sections.assumptions: "show"` forces the

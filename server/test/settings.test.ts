@@ -45,14 +45,16 @@ describe('mergeSettings', () => {
     const merged = mergeSettings({
       hoverPresentation: {
         sections: { runtime: 'hide', nope: 'show' },
-        sectionOrder: ['bindings', 'bindings', 'schema', 'nope'],
+        sectionOrder: ['bindings', 'bindings', 'datasheet', 'schema', 'nope'],
         wgslPreviewLines: 99,
+        maxColumns: 12,
       },
     }, defaultSettings, warnings);
     expect(merged.hoverPresentation).toMatchObject({
       sections: { runtime: 'hide' },
-      sectionOrder: ['bindings', 'schema'],
-      wgslPreviewLines: 20,
+      sectionOrder: ['bindings', 'datasheet', 'schema'],
+      wgslPreviewLines: 99,
+      maxColumns: 40,
     });
     expect(warnings.length).toBeGreaterThanOrEqual(2);
   });

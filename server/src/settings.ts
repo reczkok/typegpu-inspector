@@ -51,7 +51,7 @@ export function mergeSettings(
     ? raw.hoverDetailLevel as HoverDetailLevel | undefined
     : (warn(
         'hoverDetailLevel',
-        `expected "compact", "standard", or "deep", got ${JSON.stringify(raw.hoverDetailLevel)}`,
+        `expected "wgsl", "compact", "standard", or "deep", got ${JSON.stringify(raw.hoverDetailLevel)}`,
       ), undefined);
   const inlayDetailLevel = raw.inlayDetailLevel === undefined || isInlayDetailLevel(raw.inlayDetailLevel)
     ? raw.inlayDetailLevel as InlayDetailLevel | undefined
@@ -159,7 +159,7 @@ function isLegacyDetailLevel(value: unknown): value is NonNullable<InspectorSett
 }
 
 function isHoverDetailLevel(value: unknown): value is HoverDetailLevel {
-  return value === 'compact' || value === 'standard' || value === 'deep';
+  return value === 'wgsl' || value === 'compact' || value === 'standard' || value === 'deep';
 }
 
 function isInlayDetailLevel(value: unknown): value is InlayDetailLevel {
@@ -181,7 +181,7 @@ function mapLegacyInlay(value: unknown): InlayDetailLevel | undefined {
 }
 
 const HOVER_SECTION_IDS: readonly HoverSectionId[] = [
-  'wgslPreview', 'shaderFacts', 'bindings', 'resource', 'schema',
+  'wgslPreview', 'shaderFacts', 'bindings', 'datasheet', 'resource', 'schema',
   'pipelineState', 'pipelineContext', 'declarations', 'compilerMessages',
   'inspectionNotes', 'assumptions', 'runtime',
 ];
@@ -230,7 +230,7 @@ function parseHoverPresentation(
     sectionOrder.push(...fallback.sectionOrder);
   }
   const budget = (
-    key: 'wgslPreviewLines' | 'collectionItems' | 'declarations' |
+    key: 'maxColumns' | 'wgslPreviewLines' | 'collectionItems' | 'declarations' |
       'compilerMessages' | 'inspectionNotes' | 'assumptions',
   ): number | undefined => {
     const candidate = value[key];
@@ -243,6 +243,7 @@ function parseHoverPresentation(
       warn,
     );
   };
+  const maxColumns = budget('maxColumns');
   const wgslPreviewLines = budget('wgslPreviewLines');
   const collectionItems = budget('collectionItems');
   const declarations = budget('declarations');
@@ -252,6 +253,7 @@ function parseHoverPresentation(
   return {
     sections,
     sectionOrder,
+    ...(maxColumns !== undefined ? { maxColumns } : {}),
     ...(wgslPreviewLines !== undefined ? { wgslPreviewLines } : {}),
     ...(collectionItems !== undefined ? { collectionItems } : {}),
     ...(declarations !== undefined ? { declarations } : {}),

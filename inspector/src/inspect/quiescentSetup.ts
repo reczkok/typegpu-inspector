@@ -1,22 +1,9 @@
 /**
- * Browser setup that neutralizes an application's import-time frame loop.
- *
- * Browser-oriented TypeGPU modules (docs examples, React entrypoints) commonly
- * start a requestAnimationFrame loop the moment they are imported. Under raw
- * inspection that loop draws to a canvas and submits work while the inspector's
- * per-target validation scopes are open, which takes the WebGPU device down
- * ('webgpu-device-lost') and blocks *every* target of the module. Stubbing the
- * scheduler plus the pipeline dispatch/draw entrypoints keeps synchronous
- * resource construction intact while making the module quiescent.
- *
- * The language server relies on this default (it passes `quiescent: true`
- * and no `browserSetup`), so this string is the single source of the editor
- * prologue.
+ * Stubs frame scheduling, queue submits, and pipeline draw/dispatch before the
+ * module is imported; an import-time render loop would otherwise lose the
+ * WebGPU device during validation.
  */
 export const QUIESCENT_BROWSER_SETUP = [
-  // Browser-oriented examples commonly start their render loop at import
-  // time. Preserve synchronous resource construction, but prevent application
-  // work from racing the inspector's per-target WebGPU validation scopes.
   'window.requestAnimationFrame = () => 0;',
   'window.cancelAnimationFrame = () => {};',
   'window.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };',
@@ -38,11 +25,7 @@ export const QUIESCENT_BROWSER_SETUP = [
 /** Default for the `quiescent` runtime option across every entrypoint. */
 export const DEFAULT_QUIESCENT = true;
 
-/**
- * Resolves the browser setup actually handed to the page. A caller's own setup
- * is appended after the quiescent prologue so it can override any stub it
- * deliberately wants back.
- */
+/** Caller setup runs after the prologue, so it can restore individual stubs. */
 export function composeBrowserSetup(
   browserSetup: string | undefined,
   quiescent: boolean,

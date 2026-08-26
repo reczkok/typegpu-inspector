@@ -207,8 +207,6 @@ function inspectResourceValueAtDepth(
       destroyed: readBoolean(value, 'destroyed'),
     });
   } else if (resourceType === 'root') {
-    // TypeGPU 0.12 exposes the root itself as an inspectable resource. Its
-    // device is a raw GPUDevice, so only its label and feature set are read.
     const device = readProperty(value, 'device');
     report.properties = compactRecord({
       label: readString(soul, 'label'),
@@ -220,9 +218,6 @@ function inspectResourceValueAtDepth(
       logOptions: sanitize(readProperty(soul, 'logOptions')),
     });
   } else if (resourceType === 'guarded-compute-pipeline') {
-    // A guarded pipeline is a thin wrapper: the interesting parts are the
-    // compute pipeline it dispatches and the vec3u uniform carrying the
-    // thread count the generated bounds check compares against.
     const pipeline = readProperty(value, 'pipeline') ?? readProperty(soul, 'pipeline');
     const sizeUniform = readProperty(value, 'sizeUniform') ??
       readProperty(soul, 'sizeUniform');
@@ -242,8 +237,7 @@ function inspectResourceValueAtDepth(
       );
     }
   } else if (resourceType === 'command-encoder') {
-    // Encoders keep everything behind $internal; `adopted` distinguishes an
-    // encoder TypeGPU created from one wrapped around a caller's raw encoder.
+    // `adopted`: wraps a caller-provided raw encoder.
     const internal = readPrivateRecord(value, '$internal');
     report.properties = compactRecord({
       label: readString(readProperty(internal, 'rawEncoder'), 'label'),
@@ -256,16 +250,13 @@ function inspectResourceValueAtDepth(
     resourceType === 'compute-pass' ||
     resourceType === 'render-bundle-encoder'
   ) {
-    // Passes and bundle encoders share one draw-state shape; the render-only
-    // fields are simply absent on a compute pass and compact away.
     const internal = readPrivateRecord(value, '$internal');
     const state = readRecord(internal, 'state');
     const indexBuffer = readRecord(state, 'indexBuffer');
     report.properties = compactRecord({
       label: readString(readProperty(internal, 'rawPass'), 'label'),
       hasOwningEncoder: readProperty(internal, 'owner') !== undefined,
-      // Raw access through root.unwrap(pass) lets state change invisibly, so
-      // the recorded draw state below is only trustworthy while this is false.
+      // Draw state is unreliable once the raw pass was handed out.
       rawAccessed: readBoolean(state, 'rawAccessed'),
       stateVersion: readNumber(state, 'version'),
       boundGroupCount: readCollectionSize(readProperty(state, 'bindGroups')),
@@ -712,12 +703,10 @@ function readString(value: unknown, key: string): string | undefined {
   return typeof property === 'string' ? property : undefined;
 }
 
-/** Size of a Map/Set held in TypeGPU private state, without exposing its contents. */
 function readCollectionSize(value: unknown): number | undefined {
   return readNumber(value, 'size');
 }
 
-/** Bounded, sorted projection of a set-like such as `GPUDevice.features`. */
 function readIterableStrings(value: unknown, limit = 64): string[] | undefined {
   if (!value || typeof value !== 'object') return undefined;
   try {

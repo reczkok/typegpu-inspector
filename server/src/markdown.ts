@@ -21,6 +21,22 @@ export function tableCode(value: unknown): string {
   return code(value).replaceAll('|', '\\|').replaceAll('\n', ' ');
 }
 
+/** Rendered width of a cell, ignoring markdown syntax and soft-wrap hints. */
+export function visibleWidth(value: string): number {
+  return value
+    .replaceAll(SOFT_BREAK, '')
+    .replaceAll('**', '')
+    .replaceAll('`', '')
+    .replaceAll(/\\([\\`*_[\]<>|])/g, '$1')
+    .length;
+}
+
+/** Rendered width of a table row: its cells plus the ` | ` between them. */
+export function tableRowWidth(cells: readonly string[]): number {
+  return cells.reduce((total, cell) => total + visibleWidth(cell), 0) +
+    Math.max(0, cells.length - 1) * 3;
+}
+
 export function formatInspectableValue(
   value: unknown,
   limit = DEFAULT_VALUE_LIMIT,
@@ -34,6 +50,10 @@ export function escapeMarkdown(value: string): string {
 
 export function escapeInline(value: string): string {
   return value.replaceAll('`', '\\`');
+}
+
+export function escapeCell(value: string): string {
+  return value.replaceAll('|', '\\|');
 }
 
 export function softWrapTechnical(value: string): string {

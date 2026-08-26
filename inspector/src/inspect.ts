@@ -83,8 +83,7 @@ export async function inspectTypegpuModule(
   input: InspectTypegpuModuleInput,
   options: InspectTypegpuModuleOptions = {},
 ): Promise<TypeGpuInspectionReport> {
-  // A first-run Chromium download happens before the deadline exists, so a
-  // slow connection cannot turn it into an inspection timeout.
+  // Outside the deadline: the first-run download is not inspection time.
   await ensureChromiumInstalled();
   return runInspection(input, {
     deadline: createInspectionDeadline(input.timeoutMs ?? DEFAULT_INSPECTION_TIMEOUT_MS),

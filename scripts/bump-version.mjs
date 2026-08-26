@@ -1,10 +1,6 @@
 #!/usr/bin/env node
-// Sets one version across every manifest in the monorepo. The packages are
-// released in lockstep — the language server injects its own version as the
-// `typegpu-runtime-inspector-mcp` spec it launches — so a partial bump ships
-// an editor extension that installs a runtime it was never tested against.
-//
-//   node scripts/bump-version.mjs 0.5.1
+// Usage: node scripts/bump-version.mjs 0.5.1
+// All manifests share one version; the server launches the inspector at its own version.
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
@@ -12,11 +8,10 @@ import { fileURLToPath } from 'node:url';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-// Semantic Versioning 2.0.0, official recommended regex (anchored).
+// semver.org recommended pattern.
 const SEMVER =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/;
 
-/** Every manifest carrying the monorepo version, in release order. */
 const TARGETS = [
   { file: 'Cargo.toml', kind: 'toml' },
   { file: 'extension.toml', kind: 'toml' },
@@ -32,8 +27,7 @@ function fail(message) {
 }
 
 function bumpJson(text, version) {
-  // Rewrite only the top-level "version" key: a dependency pin further down
-  // the file must keep whatever it points at.
+  // Top-level key only; dependency pins keep their values.
   const match = /^(\s*"version"\s*:\s*)"[^"]*"/m.exec(text);
   if (!match) return undefined;
   return `${text.slice(0, match.index)}${match[1]}"${version}"${
@@ -42,8 +36,7 @@ function bumpJson(text, version) {
 }
 
 function bumpToml(text, version) {
-  // Only the first bare `version = "…"` — in Cargo.toml the ones below it
-  // belong to [dependencies].
+  // First match only; later `version =` lines belong to [dependencies].
   const match = /^version\s*=\s*"[^"]*"/m.exec(text);
   if (!match) return undefined;
   return `${text.slice(0, match.index)}version = "${version}"${

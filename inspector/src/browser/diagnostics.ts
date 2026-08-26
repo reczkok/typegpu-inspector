@@ -288,7 +288,7 @@ export function createAutoBindingsNote(applied: SatisfiedRequirement[]): TargetD
   return {
     code: 'slot-bindings-auto-applied',
     severity: 'note',
-    message: `The inspector auto-bound ${applied.length} slot value(s) so this target could resolve; the reported WGSL reflects these inspection-only values.`,
+    message: `${applied.length} slot value(s) were auto-bound for inspection; the WGSL reflects them.`,
     hint: applied
       .map((entry) => `slot:${slotName(entry)} <- ${entry.provision.provenance}.`)
       .join(' '),

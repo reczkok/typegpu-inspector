@@ -20,15 +20,10 @@ import {
 } from 'vscode-languageclient/node';
 
 let client: LanguageClient | undefined;
-/** Set while `startClient` is in flight so concurrent triggers do not race. */
 let clientStarting: Promise<void> | undefined;
 let statusItem: StatusBarItem | undefined;
 
-/**
- * Set when the user answers "Not now" to the runtime notice. It forces
- * `inspectOn: off` for the window's lifetime without writing user settings —
- * declining once must not silently reconfigure the editor.
- */
+/** "Not now" on the runtime notice: forces `inspectOn: off` for this window without touching settings. */
 let runtimeDeclinedForSession = false;
 
 const RUNTIME_CONSENT_KEY = 'typegpuInspector.runtimeConsent';
@@ -136,8 +131,6 @@ function initializationOptions(): Record<string, unknown> {
     }
   }
   if (runtimeDeclinedForSession) {
-    // `off` also suppresses warm-up on the server side, so nothing is
-    // downloaded and no project code is executed this session.
     options.inspectOn = 'off';
   }
   return options;
@@ -150,11 +143,7 @@ const TYPEGPU_LANGUAGES = new Set([
   'javascriptreact',
 ]);
 
-/**
- * Cheap textual probe for a TypeGPU import. The language server does the real
- * discovery; this only decides whether it is worth spawning at all, so that
- * unrelated TypeScript projects never load the ~10 MB server bundle.
- */
+/** Textual probe deciding whether the server is worth spawning; discovery proper happens server-side. */
 const TYPEGPU_IMPORT_PATTERN =
   /(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*)['"](?:typegpu|@typegpu\/[^'"]+)(?:\/[^'"]*)?['"]/;
 
@@ -164,11 +153,7 @@ function importsTypeGpu(document: TextDocument): boolean {
   return TYPEGPU_IMPORT_PATTERN.test(document.getText());
 }
 
-/**
- * The runtime notice, shown once per installation before anything is
- * downloaded or executed. Modal on purpose: the extension is about to fetch
- * ~550 MB and run the user's own module code, which is not a toast-sized fact.
- */
+/** Shown once per installation, before anything is downloaded or executed. */
 async function ensureRuntimeConsent(context: ExtensionContext): Promise<boolean> {
   if (runtimeDeclinedForSession) return false;
   if (context.globalState.get<boolean>(RUNTIME_CONSENT_KEY) === true) return true;
@@ -199,7 +184,6 @@ async function ensureRuntimeConsent(context: ExtensionContext): Promise<boolean>
       await context.globalState.update(RUNTIME_CONSENT_KEY, true);
       return true;
     }
-    // "Not now" and dialog dismissal are the same answer.
     runtimeDeclinedForSession = true;
     return false;
   }
@@ -263,10 +247,6 @@ async function startClient(context: ExtensionContext): Promise<void> {
   }
 }
 
-/**
- * Start the server the first time a TypeGPU document shows up, and only after
- * the runtime notice has been answered.
- */
 async function considerDocument(
   context: ExtensionContext,
   document: TextDocument,
@@ -344,10 +324,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
     commands.registerCommand('typegpuInspector.doctor', () => {
       const terminal = window.createTerminal('TypeGPU Inspector doctor');
       terminal.show();
-      // Keep this spec identical to the server's FALLBACK_INSPECTOR_SPEC:
-      // npx caches per spec string, so probing @latest would exercise a
-      // different install than the one inspections actually run. Both are
-      // injected from their package versions, which move in lockstep.
+      // Same spec as the server's FALLBACK_INSPECTOR_SPEC; npx caches per spec string.
       terminal.sendText(
         `npx -y typegpu-runtime-inspector-mcp@${__TYPEGPU_INSPECTOR_VERSION__} doctor`,
       );
@@ -356,6 +333,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
       const config = workspace.getConfiguration('typegpuInspector');
       const current = config.get<string>('hoverDetailLevel') ?? 'standard';
       const levels = [
+        { label: 'wgsl', description: 'Generated WGSL only for shaders and pipelines' },
         { label: 'compact', description: 'Complete core resource shape without secondary evidence' },
         { label: 'standard', description: 'Role-focused facts and a bounded generated WGSL excerpt' },
         { label: 'deep', description: 'Diagnostics, provenance, runtime metadata, and raw evidence' },
@@ -411,8 +389,6 @@ export async function activate(context: ExtensionContext): Promise<void> {
         await client.restart();
         return;
       }
-      // Restarting before the first TypeGPU document is the user asking for
-      // the server explicitly; honour that and start it.
       if (!workspace.isTrusted) {
         void window.showWarningMessage(
           'TypeGPU Inspector stays off in Restricted Mode because it executes workspace code. Trust this folder to enable it.',
@@ -440,8 +416,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
         await client?.restart();
         return;
       }
-      // Sent by hand rather than via `synchronize.configurationSection` so the
-      // session-level `inspectOn` override survives unrelated setting changes.
+      // Manual sync keeps the session-level `inspectOn` override intact.
       await client?.sendNotification(DidChangeConfigurationNotification.type, {
         settings: initializationOptions(),
       });
@@ -449,7 +424,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
   );
 
   if (!workspace.isTrusted) {
-    // Restricted Mode: the server executes workspace code, so it must not run.
+    // Restricted Mode: the server would execute workspace code.
     renderRestrictedStatus(status);
     return;
   }

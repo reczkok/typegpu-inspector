@@ -1,10 +1,11 @@
-export type HoverDetailLevel = 'compact' | 'standard' | 'deep';
+export type HoverDetailLevel = 'wgsl' | 'compact' | 'standard' | 'deep';
 export type InlayDetailLevel = 'compact' | 'summary' | 'detailed';
 export type LegacyDetailLevel = 'minimal' | 'default' | 'verbose';
 export type HoverSectionId =
   | 'wgslPreview'
   | 'shaderFacts'
   | 'bindings'
+  | 'datasheet'
   | 'resource'
   | 'schema'
   | 'pipelineState'
@@ -18,6 +19,8 @@ export type HoverSectionId =
 export type HoverPresentationSettings = {
   sections: Partial<Record<HoverSectionId, 'auto' | 'show' | 'hide'>>;
   sectionOrder: HoverSectionId[];
+  /** Widest table a hover renders, in visible characters. */
+  maxColumns?: number;
   wgslPreviewLines?: number;
   collectionItems?: number;
   declarations?: number;
@@ -77,7 +80,8 @@ export const defaultSettings: InspectorSettings = {
 export const settingsBounds = {
   timeoutMs: { min: 1_000, max: 600_000 },
   maxWgslBytes: { min: 16_384, max: 64_000_000 },
-  wgslPreviewLines: { min: 0, max: 20 },
+  maxColumns: { min: 40, max: 200 },
+  wgslPreviewLines: { min: 0, max: 400 },
   collectionItems: { min: 1, max: 100 },
   declarations: { min: 1, max: 100 },
   compilerMessages: { min: 1, max: 100 },

@@ -118,12 +118,12 @@ child.stdout.on('data', (chunk) => {
       finish(
         expectedHoverText.length > 0
           ? expectedHoverText.every((expected) => value.includes(expected))
-          // The default standard hover discloses that inputs were synthesized
-          // in one line and keeps the per-entry ledger and the setup note code
-          // for the deep hover and the full report.
           : value.includes('Inspected with 1 synthesized input (arguments)') &&
             value.includes('see deep hover or the full report') &&
-            !value.includes('inspection-defaults-applied'),
+            /Open generated WGSL\]\([^)]+\) · \d+ lines · \d+ B · \d+ declarations/
+              .test(value) &&
+            !value.includes('inspection-defaults-applied') &&
+            !value.includes('**Declarations ('),
         message.result,
       );
     }

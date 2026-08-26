@@ -51,6 +51,8 @@ import {
   materializeInspection,
   mergeDocumentInspections,
   type DocumentInspection,
+  defaultMaxColumnsForClient,
+  WIDE_MAX_COLUMNS,
   type SurfaceOptions,
 } from './surface.js';
 
@@ -72,6 +74,7 @@ const inspectionRequests = new Map<string, Promise<DocumentInspection | undefine
 let workspaceRoot = process.cwd();
 let settings: InspectorSettings = { ...defaultSettings };
 let presentation: 'zed' | 'vscode' = 'zed';
+let defaultHoverColumns = WIDE_MAX_COLUMNS;
 let inspector = new RuntimeInspectorClient(workspaceRoot, () => settings);
 
 connection.onInitialize((params: InitializeParams): InitializeResult => {
@@ -79,6 +82,7 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
   if (/visual studio code|vscode/i.test(params.clientInfo?.name ?? '')) {
     presentation = 'vscode';
   }
+  defaultHoverColumns = defaultMaxColumnsForClient(params.clientInfo?.name);
   settings = applySettings(params.initializationOptions);
   inspector = new RuntimeInspectorClient(workspaceRoot, () => settings);
   return {
@@ -556,6 +560,7 @@ function surfaceOptions(): SurfaceOptions {
     hoverDetailLevel: settings.hoverDetailLevel,
     inlayDetailLevel: settings.inlayDetailLevel,
     hoverPresentation: settings.hoverPresentation,
+    defaultMaxColumns: defaultHoverColumns,
   };
 }
 

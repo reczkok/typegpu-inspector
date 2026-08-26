@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { DiagnosticSeverity } from 'vscode-languageserver/node';
 import { discoverTypeGpuModule } from '../src/discovery.js';
+import { tableRowWidth } from '../src/markdown.js';
 import {
   createCodeActions,
   createDetailLevelActions,
@@ -12,6 +13,7 @@ import {
   createHover,
   createInlayHints,
   createInlayDetailLevelActions,
+  defaultMaxColumnsForClient,
   failedTargetInspection,
   materializeInspection,
   mergeDocumentInspections,
@@ -356,21 +358,22 @@ fn main() {
       ? hover.contents.value
       : '';
     expect(markdown).toContain('**Bindings**');
-    expect(markdown).toContain('**Shader facts**');
-    expect(markdown).toContain('compute `main`');
-    expect(markdown).toContain('`8` × `8` × `1` = 64 invocations');
-    expect(markdown).toContain('**at device maximum** · 64 max');
-    expect(markdown).toContain('1 barrier');
+    expect(markdown).toContain('| **Entry** | compute `main` |');
+    expect(markdown).toContain(
+      '| **Workgroup** | 8 × 8 × 1 = 64 invocations · **at device maximum** · 64 max |',
+    );
+    expect(markdown).toContain('**Static occurrences:** 1 barrier');
+    expect(markdown).not.toContain('**Shader facts**');
     expect(markdown).toContain('`params`');
     expect(markdown).toContain('compute');
-    expect(markdown).toContain('buffer · uniform');
+    expect(markdown).not.toContain('buffer · uniform');
     expect(markdown).toContain('✓ WGSL validated');
     expect(markdown).not.toContain('987 ms');
     expect(markdown).not.toContain('Chromium 149');
     expect(markdown).not.toContain('149.0.7827.55');
     expect(markdown).toContain('**Runtime notes**');
     expect(markdown).toContain('bundled TypeGPU fallback');
-    expect(markdown).toContain('| Binding | Name | Visibility | WGSL | WebGPU |');
+    expect(markdown).toContain('| Binding | Type | Stages |');
     expect(markdown).toContain('Open full inspection report');
 
     const hints = createInlayHints(
@@ -465,11 +468,22 @@ fn main() {
 
     const hover = createHover(discovered.symbols[0]!, discovered, inspection, 1);
     const markdown = (hover.contents as { value: string }).value;
+    expect(markdown).toMatch(/sizeUniform` \| uniform vec3u \| all stages \|/);
     expect(markdown).toMatch(
-      /sizeUniform` \| all stages \| uniform · vec3u \| buffer · uniform/,
+      /fish_data_0` \| storage read\\_write array.* \| compute · fragment \|/,
     );
-    expect(markdown).toMatch(
-      /fish_data_0` \| compute \+.* fragment \| storage.*read\\_write.*buffer · storage/,
+    expect(markdown).not.toContain('buffer · uniform');
+
+    const deep = createHover(
+      discovered.symbols[0]!,
+      discovered,
+      inspection,
+      1,
+      new Set(),
+      { ...defaultSurfaceOptions, hoverDetailLevel: 'deep' },
+    );
+    expect((deep.contents as { value: string }).value).toContain(
+      '| Binding | Type | Stages | WebGPU |',
     );
   });
 
@@ -619,11 +633,13 @@ fn main() {
       ? schemaHover.contents.value
       : '';
     expect(schemaMarkdown).toContain('✓ Resource inspected');
-    expect(schemaMarkdown).toContain('48 B size');
-    expect(schemaMarkdown).toContain('16-byte alignment');
-    expect(schemaMarkdown).toContain('**Host-shareable:** Yes');
+    expect(schemaMarkdown).toContain(
+      '| **Layout** | struct · 48 B size · 16-byte alignment |',
+    );
+    expect(schemaMarkdown).toContain('| **Host-shareable** | Yes |');
     expect(schemaMarkdown).not.toContain('**Resource**');
-    expect(schemaMarkdown.split('**Schema**')).toHaveLength(2);
+    expect(schemaMarkdown).not.toContain('**Schema**');
+    expect(schemaMarkdown).not.toContain('| **Kind** |');
     expect(schemaMarkdown).toContain('`direction`');
     expect(schemaMarkdown).toContain('| `radius` | 8 | `f32` | 4 B · align 4 B |');
     expect(schemaMarkdown).toContain(
@@ -633,10 +649,10 @@ fn main() {
       '| `camera.\u200bexposure` | 32 | `f32` | 4 B · align 4 B |',
     );
     expect(schemaMarkdown).toContain(
-      '**Memory layout:** 48 B allocated · 28 B data · 20 B padding (42%)',
+      '| **Memory** | 48 B allocated · 28 B data · 20 B padding (42%) |',
     );
     expect(schemaMarkdown).toContain(
-      '**Padding map:** 4 B `before camera`',
+      '| **Padding map** | 4 B `before camera`',
     );
     expect(schemaMarkdown).toContain('12 B `camera tail`');
     expect(schemaMarkdown).not.toContain('**Padding character:**');
@@ -665,9 +681,9 @@ fn main() {
       : '';
     expect(layoutMarkdown).toContain('**Bindings**');
     expect(layoutMarkdown).toContain('`params`');
-    expect(layoutMarkdown).toContain('texture');
-    expect(layoutMarkdown).toContain('2d');
-    expect(layoutMarkdown).toContain('| Binding | Name | Visibility | WGSL | WebGPU |');
+    expect(layoutMarkdown).toContain('`image`');
+    expect(layoutMarkdown).toContain('texture · texture\\_2d');
+    expect(layoutMarkdown).toContain('| Binding | Type | Stages |');
     expect(layoutMarkdown).toContain('all stages');
 
     const collectionHover = createHover(
@@ -681,8 +697,9 @@ fn main() {
         'value' in collectionHover.contents
       ? collectionHover.contents.value
       : '';
-    expect(collectionMarkdown).toContain('**Resource bundle**');
-    expect(collectionMarkdown).toContain('2 fields · 2 resource leaves');
+    expect(collectionMarkdown).toContain(
+      '| **Bundle** | 2 fields · 2 resource leaves |',
+    );
     expect(collectionMarkdown).toContain('| `buffers` | uniform ×1 · 48 B · uniform |');
     expect(collectionMarkdown).toContain('| `image` | texture · sampled +\u200b render |');
     expect(collectionMarkdown).not.toContain('| `buffers.\u200bparams` |');
@@ -778,7 +795,7 @@ fn main() {
 
     const packed = createHover(discovered.symbols[0]!, discovered, inspection, 1);
     const packedMarkdown = (packed.contents as { value: string }).value;
-    expect(packedMarkdown).toContain('**Possible tighter order:**');
+    expect(packedMarkdown).toContain('| **Tighter order** |');
     expect(packedMarkdown).toContain('48 B → 32 B · save 16 B');
     expect(packedMarkdown).not.toContain('buffer ABI');
 
@@ -791,8 +808,8 @@ fn main() {
       { ...defaultSurfaceOptions, schemaPackingSuggestions: false },
     );
     const packingDisabledMarkdown = (packingDisabled.contents as { value: string }).value;
-    expect(packingDisabledMarkdown).toContain('**Memory layout:**');
-    expect(packingDisabledMarkdown).not.toContain('**Possible tighter order:**');
+    expect(packingDisabledMarkdown).toContain('| **Memory** |');
+    expect(packingDisabledMarkdown).not.toContain('**Tighter order**');
 
     const wide = createHover(discovered.symbols[1]!, discovered, inspection, 1);
     const wideMarkdown = (wide.contents as { value: string }).value;
@@ -1108,9 +1125,10 @@ fn main() {
     expect(diagnostics[0]?.range.end.line).toBe(5);
   });
 
-  it('offers verbosity switch actions for the other two levels only', () => {
+  it('offers verbosity switch actions for the other levels only', () => {
     const actions = createDetailLevelActions('standard');
     expect(actions.map((action) => action.command?.arguments?.[0])).toEqual([
+      'wgsl',
       'compact',
       'deep',
     ]);
@@ -1206,22 +1224,30 @@ fn main() {
         'value' in hover.contents
       ? hover.contents.value
       : '';
-    expect(markdown).toContain('**Render pipeline state**');
-    expect(markdown).toContain('**Pipeline context**');
-    expect(markdown).toContain('vertex `vertex`');
-    expect(markdown).toContain('fragment `fragment`');
-    expect(markdown).toContain('`sceneDataAccess` ← `sceneDataUniform`');
-    expect(markdown).toContain('triangle-strip');
-    expect(markdown).toContain('4 samples');
-    expect(markdown).toContain('`rgba16float`');
-    expect(markdown).toContain('src `src-alpha`');
-    expect(markdown).toContain('dst `one-minus-src-alpha`');
-    expect(markdown).toContain('**Depth / stencil**');
-    expect(markdown).toContain('`depth24plus`');
-    expect(markdown).toContain('@location');
-    expect(markdown).toContain('float32x3');
-    expect(markdown).not.toContain('| # | Format | Blend | Write mask |');
-    expect(markdown).not.toContain('| Slot | Stride | Step mode | Attributes |');
+    expect(markdown).toContain(
+      '| **Stages** | vertex `vertex` → fragment `fragment` |',
+    );
+    expect(markdown).toContain('| **Slot** | `sceneDataAccess` ← `sceneDataUniform` |');
+    expect(markdown).toContain(
+      '| **Primitive** | triangle-strip · cw · cull back · 4 samples |',
+    );
+    expect(markdown).toContain('| **Target 0** | rgba16float · write all · blend on |');
+    expect(markdown).toContain(
+      '| \u00a0\u00a0**color blend** | src src-alpha · dst one-minus-src-alpha · add |',
+    );
+    expect(markdown).toContain(
+      '| **Depth** | depth24plus · write enabled · compare less |',
+    );
+    expect(markdown).toContain('| **Vertex slot 0** | stride 16 B · per-vertex |');
+    expect(markdown).toContain(
+      '| \u00a0\u00a0**@location(0)** | float32x3 · offset 0 B |',
+    );
+    expect(markdown).not.toContain('`triangle-strip`');
+    expect(markdown).not.toContain('`rgba16float`');
+    expect(markdown).not.toContain('`float32x3`');
+    expect(markdown).not.toContain('**Render pipeline state**');
+    expect(markdown).not.toContain('**Pipeline context**');
+    expect(markdown.split('\n').some((line) => /^\s+- /.test(line))).toBe(false);
   });
 
   it('publishes one precisely mapped diagnostic with generated-WGSL navigation', async () => {
@@ -1360,7 +1386,7 @@ fn main() {
     expect(unmapped[0]!.range).toEqual(discovered.symbols[0]!.range);
   });
 
-  it('renders VS Code hovers with mono grids, separators, and an early WGSL preview', async () => {
+  it('renders VS Code hovers with mono grids and separators', async () => {
     const source =
       'export const main = tgpu.computeFn({ workgroupSize: [1] })(() => {});';
     const discovered = discoverTypeGpuModule('/workspace/main.ts', source);
@@ -1382,7 +1408,7 @@ fn main() {
 
     const zedHover = createHover(symbol, discovered, inspection, 1);
     const zedText = (zedHover.contents as { value: string }).value;
-    expect(zedText).toContain('| Binding | Name | Visibility | WGSL | WebGPU |');
+    expect(zedText).toContain('| Binding | Type | Stages |');
     expect(zedText).not.toContain('```text');
     expect(zedText).not.toContain('\n---\n');
 
@@ -1398,10 +1424,11 @@ fn main() {
     expect(value).not.toContain('| --- |');
     expect(value).toContain('```text');
     const grid = value.slice(value.indexOf('```text'));
-    expect(grid).toMatch(/Binding\s{2,}Name\s{2,}Visibility\s{2,}WGSL\s{2,}WebGPU/);
+    expect(grid).toMatch(/Binding\s{2,}Type\s{2,}Stages/);
     expect(grid).toContain('@0:0');
     expect(value).toContain('---');
-    expect(value.indexOf('```wgsl')).toBeLessThan(value.indexOf('```text'));
+    expect(value).not.toMatch(/```text\n\s*\n/);
+    expect(value.indexOf('```text')).toBeGreaterThan(value.indexOf('```wgsl'));
   });
 
   it('centers the bounded standard WGSL preview on the relevant entrypoint', async () => {
@@ -1658,7 +1685,7 @@ describe('hover datasheet discipline', () => {
   function hoverAt(
     discovered: Parameters<typeof createHover>[0] extends never ? never : any,
     inspection: any,
-    level: 'compact' | 'standard' | 'deep',
+    level: 'wgsl' | 'compact' | 'standard' | 'deep',
     presentation?: Record<string, unknown>,
   ): string {
     const hover = createHover(
@@ -1676,6 +1703,53 @@ describe('hover datasheet discipline', () => {
     return (hover.contents as { value: string }).value;
   }
 
+  it('wgsl level shows only the generated WGSL for a shader target', async () => {
+    const discovered = discoverTypeGpuModule(
+      '/workspace/render.ts',
+      'const pipeline = root.createRenderPipeline({ vertex, fragment });',
+    );
+    const wgsl = [
+      '@vertex fn vertex() -> @builtin(position) vec4f { return vec4f(); }',
+      '@fragment fn fragment() -> @location(0) vec4f { return vec4f(1); }',
+    ].join('\n');
+    const inspection = await materializeInspection(
+      '/workspace',
+      '/workspace/render.ts',
+      1,
+      discovered,
+      {
+        ok: true,
+        targets: [{
+          label: 'pipeline',
+          kind: 'render-pipeline',
+          ok: true,
+          compilationMessages: [],
+          callIds: [1],
+          wgsl,
+        }],
+        calls: [{
+          id: 1,
+          name: 'device.createRenderPipeline',
+          targetLabel: 'pipeline',
+          descriptor: {
+            primitive: { topology: 'triangle-list' },
+            fragment: { targets: [{ format: 'bgra8unorm' }] },
+          },
+        }],
+      },
+    );
+
+    const only = hoverAt(discovered, inspection, 'wgsl');
+    expect(only).toContain('```wgsl');
+    expect(only).toContain('@fragment fn fragment()');
+    expect(only).not.toContain('| --- |');
+    expect(only).not.toContain('**Bindings**');
+    expect(only).not.toContain('**Stages**');
+
+    const standard = hoverAt(discovered, inspection, 'standard');
+    expect(standard.indexOf('```wgsl')).toBeLessThan(standard.indexOf('| **Stages** |'));
+  });
+
   it('decodes buffer usage bits into the resource line and hides the raw mask', async () => {
     const { discovered, inspection } = await inspectResource(
       'buffers.ts',
@@ -1689,9 +1763,10 @@ describe('hover datasheet discipline', () => {
     );
 
     const standard = hoverAt(discovered, inspection, 'standard');
-    expect(standard).toContain(
-      '`buffer` · 48 B size · `uniform` · `copy-src` · `copy-dst`',
-    );
+    expect(standard).toContain('| **Kind** | buffer |');
+    expect(standard).toContain('| **Usage** | uniform · copy-src · copy-dst |');
+    expect(standard).toContain('| **Size** | 48 B |');
+    expect(standard).not.toContain('`uniform`');
     expect(standard).not.toContain('flags');
     expect(standard).not.toContain('76');
     // A bare negative boolean is not a fact a shader author reads.
@@ -1702,8 +1777,14 @@ describe('hover datasheet discipline', () => {
     expect(hoverAt(discovered, inspection, 'compact')).not.toContain('flags');
 
     const deep = hoverAt(discovered, inspection, 'deep');
-    expect(deep).toContain('**usage flags:** 0x4c (uniform | copy-src | copy-dst)');
-    expect(deep).toContain('**destroyed:** false');
+    expect(deep).toContain(
+      '| **Usage flags** | 0x4c · uniform · copy-src · copy-dst |',
+    );
+    expect(deep).not.toContain('destroyed');
+
+    const wgslOnly = hoverAt(discovered, inspection, 'wgsl');
+    expect(wgslOnly).toContain('| **Kind** | buffer |');
+    expect(wgslOnly).not.toContain('```wgsl');
   });
 
   it('decodes texture usage bits without repeating the TypeGPU usage names', async () => {
@@ -1727,21 +1808,21 @@ describe('hover datasheet discipline', () => {
     );
 
     const standard = hoverAt(discovered, inspection, 'standard');
-    // 22 = TEXTURE_BINDING | RENDER_ATTACHMENT | COPY_DST; the first two are
-    // already said by `sampled` and `render`.
-    expect(standard).toContain(
-      '`texture` · `sampled` · `render` · `copy-dst`',
-    );
+    // 22 = TEXTURE_BINDING | RENDER_ATTACHMENT | COPY_DST.
+    expect(standard).toContain('| **Kind** | texture |');
+    expect(standard).toContain('| **Usage** | sampled · render · copy-dst |');
     expect(standard).not.toContain('texture-binding');
     expect(standard).not.toContain('render-attachment');
-    expect(standard).toContain('**mipLevelCount:** 1');
-    expect(standard).toContain('**sampleCount:** 1');
+    expect(standard).toContain('| **Size** | 512 × 512 |');
+    expect(standard).toContain('| **Format** | rgba8unorm |');
+    expect(standard).toContain('| **Mips** | 1 |');
+    expect(standard).toContain('| **Samples** | 1 |');
     // Empty and negative values state nothing.
     expect(standard).not.toContain('viewFormats');
     expect(standard).not.toContain('destroyed');
 
     expect(hoverAt(discovered, inspection, 'deep')).toContain(
-      '**usage flags:** 0x16 (texture-binding | render-attachment | copy-dst)',
+      '| **Usage flags** | 0x16 · texture-binding · render-attachment · copy-dst |',
     );
   });
 
@@ -1894,5 +1975,178 @@ describe('hover datasheet discipline', () => {
       '_Inspected with 1 synthesized input (slot values) and 1 unmet requirement' +
         ' (arguments) — see deep hover or the full report._',
     );
+  });
+});
+
+describe('hover width budget and code spans', () => {
+  const wgsl = [
+    '@group(0) @binding(0) var<storage, read_write> instanceTransforms: array<mat4x4f>;',
+    '',
+    '@vertex fn mainVertex() -> @builtin(position) vec4f { return vec4f(); }',
+    '@fragment fn mainFragment() -> @location(0) vec4f { return vec4f(); }',
+  ].join('\n');
+
+  async function renderPipeline() {
+    const discovered = discoverTypeGpuModule(
+      '/workspace/render.ts',
+      `const pipeline = root.createRenderPipeline({ vertex, fragment });`,
+    );
+    const inspection = await materializeInspection(
+      '/workspace',
+      '/workspace/render.ts',
+      1,
+      discovered,
+      {
+        ok: true,
+        targets: [{
+          label: 'pipeline',
+          kind: 'render-pipeline',
+          ok: true,
+          callIds: [1],
+          wgsl,
+          bindGroupLayouts: [{
+            group: 0,
+            label: 'sceneLayout',
+            entries: [{
+              binding: 0,
+              name: 'instanceTransforms',
+              visibility: ['vertex', 'fragment'],
+              resource: { buffer: { type: 'storage', minBindingSize: 256 } },
+            }],
+          }],
+        }],
+        calls: [{
+          id: 1,
+          name: 'device.createRenderPipeline',
+          targetLabel: 'pipeline',
+          descriptor: {
+            primitive: { topology: 'triangle-list' },
+            vertex: {
+              buffers: [{
+                arrayStride: 24,
+                attributes: [
+                  { shaderLocation: 0, format: 'float32x4', offset: 0 },
+                  { shaderLocation: 1, format: 'float32x2', offset: 16 },
+                ],
+              }],
+            },
+            fragment: { targets: [{ format: 'bgra8unorm' }] },
+          },
+        }],
+      },
+    );
+    return { discovered, inspection };
+  }
+
+  function hoverAt(
+    discovered: Awaited<ReturnType<typeof renderPipeline>>['discovered'],
+    inspection: Awaited<ReturnType<typeof renderPipeline>>['inspection'],
+    maxColumns: number,
+  ): string {
+    const hover = createHover(
+      discovered.symbols[0]!,
+      discovered,
+      inspection,
+      1,
+      new Set(),
+      {
+        ...defaultSurfaceOptions,
+        hoverPresentation: { sections: {}, sectionOrder: [], maxColumns },
+      },
+    );
+    return (hover.contents as { value: string }).value;
+  }
+
+  it('defaults to a narrower budget for Zed than for other clients', () => {
+    expect(defaultMaxColumnsForClient('Zed')).toBe(72);
+    expect(defaultMaxColumnsForClient('zed-industries')).toBe(72);
+    expect(defaultMaxColumnsForClient('Visual Studio Code')).toBe(96);
+    expect(defaultMaxColumnsForClient(undefined)).toBe(96);
+  });
+
+  it('falls back from tables to key/value lines below the width budget', async () => {
+    const { discovered, inspection } = await renderPipeline();
+
+    const wide = hoverAt(discovered, inspection, 96);
+    expect(wide).toContain('| Binding | Type | Stages |');
+    expect(wide).toContain('| **Primitive** |');
+
+    const narrow = hoverAt(discovered, inspection, 40);
+    expect(narrow).not.toContain('| Binding | Type | Stages |');
+    expect(narrow).not.toContain('| **Primitive** |');
+    expect(narrow).toContain('**Primitive:** triangle-list · ccw · cull none · 1 sample');
+    expect(narrow).toContain('`instanceTransforms`:** storage read\\_write');
+    expect(narrow).toContain('@location(0)');
+    expect(narrow).toContain('@location(1)');
+    expect(narrow).toContain('bgra8unorm');
+
+    for (const line of wide.split('\n')) {
+      if (!line.startsWith('|')) continue;
+      const cells = line.replace(/^\|\s*/, '').replace(/\s*\|$/, '')
+        .split(/(?<!\\)\|/);
+      expect(tableRowWidth(cells)).toBeLessThanOrEqual(96);
+    }
+  });
+
+  it('code-spans identifiers and prints vocabulary values plainly', async () => {
+    const { discovered, inspection } = await renderPipeline();
+    const markdown = hoverAt(discovered, inspection, 96);
+
+    expect(markdown).toContain('`mainVertex`');
+    expect(markdown).toContain('`instanceTransforms`');
+    for (const vocabulary of [
+      'triangle-list', 'ccw', 'none', 'bgra8unorm', 'float32x4', '@location(0)',
+    ]) {
+      expect(markdown).toContain(vocabulary);
+      expect(markdown).not.toContain(`\`${vocabulary}\``);
+    }
+  });
+
+  it('states the stages once and puts the declaration count on the WGSL link', async () => {
+    const { discovered, inspection } = await renderPipeline();
+    const markdown = hoverAt(discovered, inspection, 96);
+
+    expect(markdown).toContain(
+      '| **Stages** | vertex `mainVertex` → fragment `mainFragment` |',
+    );
+    expect(markdown.match(/vertex `mainVertex`/g)).toHaveLength(1);
+    expect(markdown).not.toContain('**Entrypoints:**');
+    expect(markdown).toMatch(/Open generated WGSL\]\([^)]+\) · 4 lines · \d+ B · 3 declarations/);
+    expect(markdown).not.toContain('**Declarations (3)**');
+
+    const deep = createHover(
+      discovered.symbols[0]!,
+      discovered,
+      inspection,
+      1,
+      new Set(),
+      { ...defaultSurfaceOptions, hoverDetailLevel: 'deep' },
+    );
+    const deepMarkdown = (deep.contents as { value: string }).value;
+    expect(deepMarkdown).toContain('**Declarations (3)**');
+    expect(deepMarkdown).not.toContain('· 3 declarations');
+  });
+
+  it('keeps settings written against the old section ids working', async () => {
+    const { discovered, inspection } = await renderPipeline();
+    const hidden = createHover(
+      discovered.symbols[0]!,
+      discovered,
+      inspection,
+      1,
+      new Set(),
+      {
+        ...defaultSurfaceOptions,
+        hoverPresentation: {
+          sections: { pipelineState: 'hide' },
+          sectionOrder: ['bindings', 'schema'],
+        },
+      },
+    );
+    const markdown = (hidden.contents as { value: string }).value;
+    expect(markdown).not.toContain('| **Primitive** |');
+    expect(markdown).toContain('**Bindings**');
+    expect(markdown.indexOf('**Bindings**'))
+      .toBeLessThan(markdown.indexOf('**Generated WGSL**'));
   });
 });

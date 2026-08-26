@@ -22,9 +22,7 @@ const DEV_INSPECTOR_ENTRY: &str = "inspector/bin/typegpu-runtime-inspector-mcp.m
 
 struct TypeGpuInspectorExtension;
 
-/// Reports npm acquisition progress back to Zed's UI. Only the language server
-/// has a slot in that UI, so the context server path passes `None` and stays
-/// silent rather than borrowing an unrelated server's status line.
+/// `server_id` enables install-status reporting; the context server has no status slot.
 fn report(status_id: Option<&LanguageServerId>, status: LanguageServerInstallationStatus) {
     if let Some(id) = status_id {
         zed::set_language_server_installation_status(id, &status);

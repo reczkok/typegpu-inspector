@@ -118,8 +118,7 @@ export class RuntimeInspectorClient {
               modulePath,
               settings.projectRoot ?? this.workspaceRoot,
             ),
-            // The inspector applies its quiescent prologue (rAF/submit/dispatch
-            // stubs) by default; passing it again would redeclare its locals.
+            // The inspector prepends its own quiescent prologue.
             quiescent: true,
           },
         },
@@ -334,9 +333,7 @@ export async function resolveInspectorLaunch(
   };
 }
 
-// Injected at build time from this package's own version: the monorepo
-// releases the server and the runtime inspector in lockstep, so one bump
-// moves both. See src/buildInfo.d.ts.
+// Build-time define; the inspector releases at the server's version.
 const FALLBACK_INSPECTOR_VERSION = __TYPEGPU_INSPECTOR_VERSION__;
 const FALLBACK_INSPECTOR_SPEC =
   `typegpu-runtime-inspector-mcp@${FALLBACK_INSPECTOR_VERSION}`;
@@ -398,20 +395,15 @@ async function installedRuntimeMatches(
   }
 }
 
-/** How the runtime install will shell out to npm, and where that came from. */
 export type NpmInvocation = {
   command: string;
-  /** Leading arguments (the npm-cli.js path when npm is run through node). */
   args: string[];
-  /** True only for Windows `.cmd` shims, which Node refuses to spawn directly. */
   shell: boolean;
-  /** Human-readable provenance, quoted in install failure messages. */
   source: string;
 };
 
 function pathEntries(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): string[] {
-  // Windows environment variable lookup is case-insensitive, but the object
-  // we are handed (a sanitized MCP launch env) is not.
+  // Windows env lookup is case-insensitive.
   const raw = env.PATH ?? env.Path ?? env.path ?? '';
   return raw
     .split(platform === 'win32' ? ';' : ':')
@@ -423,7 +415,7 @@ function isExecutableFile(candidate: string, platform: NodeJS.Platform): boolean
   try {
     const stats = statSync(candidate);
     if (!stats.isFile()) return false;
-    // Windows has no execute bit; the extension in the name is the signal.
+    // No execute bit on Windows.
     return platform === 'win32' ? true : (stats.mode & 0o111) !== 0;
   } catch {
     return false;
@@ -444,13 +436,6 @@ function findOnPath(
   return undefined;
 }
 
-/**
- * Find npm without assuming it is on PATH. Editors frequently launch language
- * servers from a GUI session whose PATH predates any Node version manager, so
- * an `npm` that works in the user's terminal is simply absent here. When it
- * is, npm is still reachable as the `npm-cli.js` that ships inside the Node
- * installation, run through that same node binary.
- */
 function realpathOr(path: string): string {
   try {
     return realpathSync(path);
@@ -459,6 +444,7 @@ function realpathOr(path: string): string {
   }
 }
 
+/** Resolves npm from PATH, else `npm-cli.js` inside the Node installation. */
 export function resolveNpmInvocation(
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
@@ -485,10 +471,7 @@ export function resolveNpmInvocation(
     ? configuredNode
     : findOnPath(nodeNames, env, platform);
   if (node) {
-    // npm lives beside node in the installation prefix: `lib/node_modules`
-    // on macOS/Linux, `node_modules` directly next to node.exe on Windows.
-    // The node on a GUI PATH is usually a shim (Homebrew, nvm, fnm, volta),
-    // so resolve the real binary first or the prefix is the shim directory.
+    // realpath first: the node on a GUI PATH is usually a version-manager shim.
     const nodeDirectory = dirname(realpathOr(node));
     const cli = platform === 'win32'
       ? join(nodeDirectory, 'node_modules', 'npm', 'bin', 'npm-cli.js')
@@ -661,10 +644,7 @@ function returnedTargetLabels(output: InspectorOutput): string[] {
 
 // Must exceed the inspector's own MAX_SESSION_ESTABLISHMENT_MS (240s) so the
 // transport never kills a request the inspector still considers on-budget.
-// The first request on a fresh machine also carries the Playwright Chromium
-// download (~550 MB), which the inspector keeps outside its establishment
-// budget, so the transport cap has to absorb it: 15 minutes covers a 5 Mbit/s
-// connection.
+// Also covers the first-run Chromium download at ~5 Mbit/s.
 const ESTABLISHMENT_GRACE_MS = 900_000;
 
 // First contact with an npx-launched inspector can include downloading the

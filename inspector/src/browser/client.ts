@@ -95,9 +95,6 @@ async function inspectTypegpuModuleInBrowser(
   const waitBudget = createBrowserWaitBudget(request.timeoutMs);
   const environmentLedger = installEnvironmentProviders();
   if (request.quiescent) {
-    // A quiescent run never executes the application's frame loop, so a
-    // passing target is static validation evidence and must not be read as
-    // proof the app renders. Say so in the ledger the report carries.
     environmentLedger.push({
       tier: 'environment',
       kind: 'device-session',
