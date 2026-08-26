@@ -652,7 +652,7 @@ const ESTABLISHMENT_GRACE_MS = 900_000;
 // machine. The SDK's 60s default initialize timeout guarantees failure there.
 const CONNECT_TIMEOUT_MS = 600_000;
 
-/** Surfaces the envelope's own failure evidence when no target reports came back. */
+/** Reports the envelope's own failure when no target reports came back. */
 function envelopeFailureDetail(output: InspectorOutput): string {
   const parts: string[] = [];
   const error = output.error;

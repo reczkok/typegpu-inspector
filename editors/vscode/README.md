@@ -1,8 +1,8 @@
 # TypeGPU Inspector for VS Code
 
 TypeGPU shader inspection in the editor. The extension runs the module you are
-editing in a headless Chromium with WebGPU and reports what TypeGPU produced
-back in the TypeScript buffer:
+editing in a headless Chromium with WebGPU and shows what TypeGPU produced, in
+the TypeScript buffer:
 
 - hovers with generated WGSL, memory layouts, bindings, and pipeline state,
   below the TypeScript quick info;
@@ -14,16 +14,16 @@ back in the TypeScript buffer:
 ## First run
 
 Opening a TypeGPU file starts warming the inspection session in the background;
-the status bar shows "TypeGPU warming up" while that happens. Before the first
-inspection the extension asks, in a modal dialog, whether it may download
-`typegpu-runtime-inspector-mcp` from npm and a Playwright Chromium build
-(about 170 MB to download, 550 MB on disk) into its global storage. It then
-executes the project's top-level TypeGPU module code inside that browser, so a
-module with import-time side effects performs them. The extension declares
-itself unsupported in Restricted Mode for the same reason.
+the status bar shows "TypeGPU warming up" meanwhile. Before the first
+inspection the extension asks, in a dialog, whether it may download
+`typegpu-runtime-inspector-mcp` from npm and a Playwright Chromium (about
+170 MB to download, 550 MB on disk) into its global storage. It then runs the
+project's top-level TypeGPU module code inside that browser, so a module with
+import-time side effects performs them. For the same reason the extension
+stays off in Restricted Mode.
 
-Nothing is sent anywhere: no telemetry, no analytics, and no network traffic
-beyond those two downloads and whatever the module requests. Deleting the
+Nothing is sent anywhere. There is no telemetry, and the only network traffic
+is those two downloads plus whatever the module requests itself. Deleting the
 download is safe. Answer "Not now" to skip inspection for the session, or set
 `typegpuInspector.inspectOn` to `off`.
 

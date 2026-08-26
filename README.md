@@ -1,43 +1,62 @@
 # TypeGPU Inspector
 
 An editor extension for Zed and VS Code. It runs the TypeGPU module you are
-editing in a headless Chromium with WebGPU and reports the WGSL and runtime
-descriptors TypeGPU produced back in the TypeScript buffer. It is not a static
-analyzer: it executes the module's top-level code, so use it on projects you
-trust.
+editing in a headless Chromium with WebGPU and shows the WGSL and runtime
+descriptors TypeGPU produced, in the TypeScript buffer.
+
+It is a heavy tool and may not be for everyone. It keeps a Chromium and a Vite
+server running next to your editor and re-runs your module on every save.
+Expect about 550 MB on disk, a few hundred MB of memory while it works, and a
+first run that takes minutes. It executes the module's top-level code, much
+like starting your dev server. If you only want syntax highlighting, a WGSL
+grammar is enough.
 
 ## What you get
 
 - Hovers on TypeGPU declarations: generated WGSL, entry points, bindings,
   pipeline state, resource descriptors.
-- Inlay hints carrying each declaration's inspection status.
-- Diagnostics from the WGSL compiler and from WebGPU validation, mapped onto
-  the TypeScript token where that mapping is reliable.
-- Document links to the generated `.wgsl` file and the full report. In
-  VS Code, a generated-WGSL document and an inspection report open beside the
-  editor and follow the cursor.
+- Inlay hints with each declaration's inspection status.
+- Diagnostics from the WGSL compiler and from WebGPU validation, mapped to the
+  TypeScript token when the mapping is reliable.
+- Links to the generated `.wgsl` file and the full report. In VS Code, a
+  generated-WGSL document and an inspection report open beside the editor and
+  follow the cursor.
 - Schema layout: offsets, alignment, padding, host shareability, and a tighter
   field order when one is provably smaller.
 
-Pipelines, shader functions, schemas, buffers, textures, views, samplers, query
-sets, bind group layouts and groups, vertex layouts, slots, accessors, GPU
-variables, and collections of them are recognised.
+Recognized: pipelines, shader functions, schemas, buffers, textures, views,
+samplers, query sets, bind group layouts and groups, vertex layouts, slots,
+accessors, GPU variables, and collections of them.
 
 ## Install
 
-- VS Code: install `reczkok.typegpu-inspector` from the Marketplace.
-- Zed: install "TypeGPU Inspector" from the extension registry.
+**VS Code:** install `reczkok.typegpu-inspector` from the Marketplace.
 
-For a development install, see [Development](#development).
+**Zed:** not in the extension registry, so it is installed as a dev extension.
+
+> [!WARNING]
+> A dev extension skips Zed's review. Nobody has checked this code except the
+> people who wrote it. Read it before you install it and stay on a release tag.
+> It is kept out of the registry because it downloads a headless Chromium and
+> runs your project's code, and Zed has no way to ask you first. A clone you
+> can read is the closest thing to asking.
+
+```sh
+git clone https://github.com/reczkok/typegpu-inspector.git
+cd typegpu-inspector && git checkout v0.6.0
+```
+
+Then run `zed: install dev extension` and pick that folder. Zed builds it
+(needs Rust from rustup) and pulls the language server and runtime from npm on
+first use. To update, check out the next tag and install again.
 
 ## Requirements
 
 - Node.js 20 or newer on `PATH`.
-- About 550 MB of disk for the one-time download described in
-  [What it downloads and runs](#what-it-downloads-and-runs).
-- A trusted project. Inspection executes the project's top-level TypeGPU
-  module code, which is why VS Code declares the extension unsupported in
-  Restricted Mode.
+- About 550 MB of disk for the one-time download (see
+  [What it downloads and runs](#what-it-downloads-and-runs)).
+- A trusted project. Inspection runs the project's code, so VS Code keeps the
+  extension off in Restricted Mode.
 
 ## Configuration
 
@@ -60,32 +79,17 @@ its settings UI.
 | `inspectorPackage` | `typegpuInspector.inspectorPackage` | `"bundled"` | `"bundled"` or an npm package name |
 | `projectRoot` | `typegpuInspector.projectRoot` | `""` | Override workspace-root inference |
 
-The deprecated `detailLevel` maps onto the two detail levels above.
 `typegpuInspector.serverPath` is VS Code only and points at a local language
 server build.
 
-`wgsl` shows only the generated WGSL for shaders and pipelines (up to 120 lines, or `hoverPresentation.wgslPreviewLines`) and the compact facts for anything else. At every level the generated WGSL comes before the tables.
-
-Hover and inlay detail are independent. `sourceMapping` is heuristic, and a
-diagnostic always keeps its link to the generated WGSL location.
-`hoverPresentation` sets each hover section to `auto`, `show`, or `hide`,
-reorders them with `sectionOrder`, and bounds the ones that can grow; VS Code's
-settings schema lists the section names and ranges. A lower detail level never
-abbreviates schemas, bindings, render targets, vertex attributes, or short
-resource descriptors.
-
-A hover states each role's facts as a two-column table: stages, primitive
-state, colour targets, vertex slots and their attributes for a pipeline; kind,
-usage, size, format and layout for a resource. Inline code marks identifiers
-from your code and from the generated WGSL; WebGPU vocabulary — topologies,
-formats, cull modes, usage names — is plain text.
-
-`hoverPresentation.maxColumns` is the widest table a hover renders, in visible
-characters. It defaults to 72 in Zed and 96 elsewhere, and is clamped to
-40–200. A table that would exceed it is emitted as wrapping key/value lines
-instead, so narrow hovers change shape rather than losing content. The section
-names `resource`, `schema`, `pipelineState`, and `pipelineContext` all address
-the `datasheet` section.
+`wgsl` shows only the generated WGSL for shaders and pipelines (120 lines by
+default) and compact facts for everything else. At every level the WGSL comes
+before the tables. Hover and inlay detail are independent. `hoverPresentation`
+sets each section to `auto`, `show`, or `hide`, reorders them with
+`sectionOrder`, and bounds the ones that can grow. `maxColumns` (72 in Zed, 96
+elsewhere) is the widest table a hover renders; a wider one is written as
+key/value lines. VS Code's settings schema lists the section names and ranges.
+`sourceMapping` is heuristic. A diagnostic always links to the generated WGSL.
 
 Invalid values are dropped and logged. Changes apply without a restart, except
 `serverPath`.
@@ -94,13 +98,12 @@ Invalid values are dropped and logged. Changes apply without a restart, except
 
 The first inspection downloads `typegpu-runtime-inspector-mcp` from npm and a
 Playwright Chromium build (about 170 MB to download, 550 MB on disk), once
-per machine. It then executes
-the project's top-level TypeGPU module code inside that browser, so a module
-with import-time side effects performs them. VS Code asks once, in a modal
-dialog, before the first download.
+per machine. It then runs the project's top-level TypeGPU module code inside
+that browser, so a module with import-time side effects performs them. VS Code
+asks once, in a dialog, before the first download.
 
-Nothing is sent anywhere: no telemetry, no analytics, and no network traffic
-beyond those two downloads and whatever the inspected module requests.
+Nothing is sent anywhere. There is no telemetry, and the only network traffic
+is those two downloads plus whatever the inspected module requests itself.
 
 VS Code keeps the inspector under
 `globalStorage/reczkok.typegpu-inspector/runtime` in its user directory
@@ -114,29 +117,29 @@ directory. Playwright caches browsers separately in
 ## Limitations
 
 - The harness around the module is generated. It covers DOM lookups, assets,
-  TypeGPU setup, and resource creation, but a module needing an application
+  TypeGPU setup, and resource creation. A module that needs an application
   shell, a login flow, or a remote API at import time can fail before the
   interesting value is reached.
-- Resources, layouts, and pipelines are created and validated; no application
-  draw or dispatch work is submitted. A passing target is validation evidence,
-  not proof that a frame renders correctly.
+- Resources, layouts, and pipelines are created and validated; no draw or
+  dispatch is submitted. A passing target means WebGPU accepted it. It says
+  nothing about what a frame looks like.
 - The adapter is usually a software WebGPU implementation, so it says nothing
-  about GPU performance or driver behaviour.
+  about GPU performance or driver behavior.
 - Missing shader arguments and slot values are synthesized when the type allows
-  it, and the hover records that. Synthesized render targets and vertex inputs
-  are inspection defaults, not the application's own.
-- Packing suggestions are exhaustive up to 14 top-level fields. Larger
-  structures get one candidate ordered by alignment and size, so no suggestion
-  does not prove the order is optimal.
+  it, and the hover says so. Synthesized render targets and vertex inputs are
+  inspection defaults; the application's own are not known.
+- Packing suggestions are exhaustive up to 14 top-level fields. Larger structs
+  get one candidate ordered by alignment and size, so the absence of a
+  suggestion does not mean the order is optimal.
 
 ## Agent access
 
-The same runtime ships as a stdio MCP server. The Zed extension registers it
-automatically; other clients use the published `typegpu-runtime-inspector-mcp`
-package. See [`inspector/README.md`](inspector/README.md).
+The same runtime is a stdio MCP server. The Zed extension registers it; other
+clients use the `typegpu-runtime-inspector-mcp` package. See
+[`inspector/README.md`](inspector/README.md).
 
-Editor-hosted agents get the same evidence through diagnostics: a file an
-agent writes while it is open in the editor is inspected as if saved, and the
+Agents running inside the editor get the same information from diagnostics: a
+file an agent writes while it is open is inspected as if saved, and the
 results land in the problems panel.
 
 ## Development
@@ -154,9 +157,10 @@ Checks are `pnpm check`, `pnpm test`, `pnpm test:browser`, `pnpm test:e2e`, and
 `node inspector/bin/typegpu-runtime-inspector-mcp.mjs doctor` checks Node, npx,
 and the Chromium/WebGPU launch.
 
-In Zed, run `zed: install dev extension` and select the repository root. The
-dev extension uses `server/dist/server.cjs` from the checkout, so rerun
-`pnpm build` and restart the language server after changing it.
+In Zed, run `zed: install dev extension` and select the repository root. When
+`server/dist/server.cjs` exists in the checkout the dev extension uses it
+instead of the npm package, so rerun `pnpm build` and restart the language
+server after changing it.
 
 In VS Code, build and install a local VSIX. It embeds the language server, so
 rebuilding the server alone does not update an installed extension.

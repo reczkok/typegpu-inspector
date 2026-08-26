@@ -60,7 +60,7 @@ export const READ_ONLY_TOOL_ANNOTATIONS = {
 export const INSPECT_TYPEGPU_TOOL_CONFIG = {
   title: 'Inspect TypeGPU',
   description:
-    "Inspect TypeGPU code in a headless Chromium with WebGPU, from an inline probe, an inspection module, or exported symbols. Project/workspace roots, local TypeGPU dependencies, and Vite context are inferred; add project.root, project.dependencyAliases, target.virtualPath, or environment fields only when diagnostics ask for them. Modules run quiescently by default (frame loops, queue submits, and pipeline dispatch/draw stubbed), so a passing target is static validation evidence rather than proof the app renders; set environment.quiescent=false to observe real frame/submit behaviour. Returns summary, targets, dependencySummary, warnings, and nextActions.",
+    "Inspect TypeGPU code in a headless Chromium with WebGPU, from an inline probe, an inspection module, or exported symbols. Project/workspace roots, local TypeGPU dependencies, and Vite context are inferred; add project.root, project.dependencyAliases, target.virtualPath, or environment fields only when diagnostics ask for them. Modules run quiescently by default (frame loops, queue submits, and pipeline dispatch/draw stubbed), so a passing target means WebGPU accepted it and no frame was rendered; set environment.quiescent=false to observe real frame/submit behaviour. Returns summary, targets, dependencySummary, warnings, and nextActions.",
   inputSchema: agentInspectionInputSchema,
   outputSchema: agentInspectionOutputSchema,
   annotations: INSPECTION_TOOL_ANNOTATIONS,

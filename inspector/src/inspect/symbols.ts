@@ -248,8 +248,8 @@ function virtualModuleExtension(modulePath: string): string {
 /**
  * Reverse edge of the binding scope. Only direct importers that both consume
  * this module and author a `.with(...)` binding are evaluated; ordinary app
- * importers are deliberately excluded. This keeps importer execution bounded
- * while exposing the real pipeline bindings that make the target resolvable.
+ * importers are excluded, which keeps importer execution bounded while still
+ * finding the pipeline bindings that make the target resolvable.
  */
 function findSemanticBindingImporters(modulePath: string): string[] {
   const directory = dirname(modulePath);

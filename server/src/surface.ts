@@ -168,8 +168,7 @@ export async function materializeInspection(
         output,
       );
     } catch {
-      // Report artifacts are an affordance, never a reason to discard a valid
-      // runtime inspection. The hover simply omits the unavailable link.
+      // A failed report write only costs the hover its link.
     }
     return [target.id, materialized] as const;
   }));
@@ -706,7 +705,7 @@ const DETAIL_LEVEL_SUMMARIES: Record<HoverDetailLevel, string> = {
   wgsl: 'generated WGSL only',
   compact: 'core shape',
   standard: 'role-focused detail',
-  deep: 'complete evidence',
+  deep: 'everything',
 };
 
 /**
@@ -1578,7 +1577,7 @@ function appendInspectionNotes(
   }
 }
 
-/** Environment-tier entries are runtime facts, not assumptions. */
+/** Environment-tier entries describe the run itself and are never listed as assumptions. */
 const EDITOR_DEFAULT_LEDGER_KEYS = new Set(['device-session:quiescent-run']);
 
 function hoverAssumptions(
@@ -2629,7 +2628,7 @@ const INFORMATIONAL_TARGET_DIAGNOSTIC_CODES = new Set([
   'pipeline-validated-without-recorded-creation',
 ]);
 
-/** Setup context, not a failure reason; must never shadow the actual error. */
+/** Setup notes must not shadow the actual error. */
 function isInformationalDiagnostic(diagnostic: InspectorDiagnostic): boolean {
   if (diagnostic.severity !== undefined) return diagnostic.severity === 'note';
   return INFORMATIONAL_TARGET_DIAGNOSTIC_CODES.has(diagnostic.code);

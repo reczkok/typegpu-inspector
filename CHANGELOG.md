@@ -1,125 +1,81 @@
 # Changelog
 
-All notable changes to TypeGPU Inspector — the Zed extension, the VS Code
-extension, the language server, and the runtime inspector — are recorded here.
-The four packages are versioned and released together.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+Changes to TypeGPU Inspector: the Zed extension, the VS Code extension, the
+language server, and the runtime inspector. The four packages are versioned
+and released together. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.6.0] - 2026-08-26
 
 ### Added
 
-- VS Code: a generated-WGSL document beside the editor ("Open Generated WGSL
-  to the Side", also a button in the editor title of TypeGPU files). It follows
-  the cursor across targets, carries the WGSL compiler's diagnostics, and has a
-  CodeLens back to the source; "Pin" keeps one target in its own tab. Hovers
-  link to it as *Open WGSL* and *Peek* (the editor's peek view).
-- VS Code: "Open Inspection Report to the Side" renders the full report in the
-  Markdown preview, following the cursor the same way.
-- Language server: `typegpu/targets`, `typegpu/wgsl`, and `typegpu/report`
-  requests behind those views. Editors that do not send them are unaffected.
-- An open document that changes on disk — a file written by a tool or an
-  agent — is inspected as if it had been saved, in editors that support file
-  watching.
-
-- `hoverDetailLevel: "wgsl"`: generated WGSL only for shaders and pipelines,
-  compact facts for everything else. The generated WGSL now precedes the
-  tables at every level, and `hoverPresentation.wgslPreviewLines` accepts up
-  to 400.
-- `hoverPresentation.maxColumns` bounds the width of hover tables in visible
-  characters (72 in Zed, 96 elsewhere, clamped to 40–200). A table that would
-  exceed it renders as wrapping key/value lines instead of being clipped.
-- `datasheet` is a hover section id. `resource`, `schema`, `pipelineState`, and
-  `pipelineContext` address the same section.
+- VS Code: a generated-WGSL document beside the editor. It follows the cursor
+  across targets, shows the compiler's diagnostics in place, and has a
+  CodeLens back to the source. Hovers link to it as Open WGSL and Peek.
+- VS Code: an inspection report beside the editor, rendered in the Markdown
+  preview.
+- `hoverDetailLevel: "wgsl"`: generated WGSL only for shaders and pipelines.
+  The WGSL now comes before the tables at every level, and
+  `hoverPresentation.wgslPreviewLines` accepts up to 400.
+- `hoverPresentation.maxColumns` bounds hover table width (72 in Zed, 96
+  elsewhere). A wider table renders as key/value lines.
+- Language server requests `typegpu/targets`, `typegpu/wgsl`, and
+  `typegpu/report` for editor views.
+- An open document that changes on disk, for example one written by an agent,
+  is inspected as if it had been saved.
 
 ### Changed
 
-- VS Code: the TypeScript quick info renders above the TypeGPU hover, so the
-  type is visible without scrolling.
-- MCP: the text block of every tool result carries the full JSON payload.
-  Clients such as Claude Code show only text, and previously saw a four-line
-  headline.
-- A target whose TypeGPU resolution fails is classified `source`, not
-  `harness`.
-- Resolution errors no longer mention the inspector's probe wrappers.
+- Zed is installed as a dev extension; the extension is not in Zed's registry.
+- VS Code: the TypeScript quick info renders above the TypeGPU hover.
+- Hovers are datasheets: one two-column table per role, usage names instead of
+  bitmasks, bindings as group:binding with name, type, and stages. `standard`
+  summarizes synthesized inputs in one line; `deep` keeps the full ledger.
+- MCP tool results repeat the JSON payload in the text block, for clients that
+  show only text.
+- A failed TypeGPU resolution is classified `source`, not `harness`, and no
+  longer mentions the inspector's probe wrappers.
 - A compiler diagnostic that maps only to a declaration no longer claims an
   approximate location; the related location names the generated WGSL line.
-
-- A hover states each role's facts in one two-column table — stages, primitive
-  state, colour targets, and one row per vertex slot and attribute for a
-  pipeline; kind, usage, size, format, and layout for a resource — in place of
-  a bold heading per fact.
-- Inline code marks identifiers from the inspected code and the generated WGSL.
-  WebGPU vocabulary is plain text.
-- The bindings table is group:binding with the name, type, and stages;
-  the WebGPU layout column appears at `deep`.
-- Hovers have no nested lists, and state the pipeline stages once.
-- `standard` and `compact` carry the generated shader's declaration count on
-  the WGSL link; `deep` keeps the full declaration list.
-- Hovers decode WebGPU usage bitmasks into names in the resource's `Usage` row
-  (`uniform · copy-src · copy-dst`); the raw mask appears only at the `deep`
-  level and in the full report.
-- The `standard` hover replaces the per-entry assumption list with one line
-  naming the synthesized input categories; `compact` shows none; `deep` keeps
-  the full ledger. `hoverPresentation.sections.assumptions: "show"` forces the
-  full list at any level. The editor's quiescent run is reported under runtime
-  notes at `deep` and no longer counts as a target assumption.
-- Documentation rewritten as reference material, with an authorship note.
+- Documentation rewritten, with an authorship note.
 
 ## [0.5.0] - 2026-08-26
 
-First public store release: VS Code Marketplace and the Zed extension registry.
+First public release: VS Code Marketplace, and Zed as a dev extension.
 
 ### Added
 
-- TypeGPU 0.12 support. The bundled runtime pins `typegpu` 0.12.3 and
-  `unplugin-typegpu` 0.12.2, and inspection understands the named `tgpu` import
-  (`import { tgpu } from 'typegpu'`) alongside the default import.
-- Resource hovers describe the 0.12 types — `root`, guarded compute pipelines,
-  command encoders, render and compute passes, render bundle encoders —
-  instead of falling back to a generic runtime type.
-- VS Code: an extension icon, a Marketplace gallery banner, and a first-run
-  notice stating, before anything is downloaded, that the extension fetches
-  `typegpu-runtime-inspector-mcp` plus a Playwright Chromium (about 550 MB on disk) into the
-  extension's global storage and executes the project's top-level TypeGPU
-  module code in that headless browser.
-- VS Code: Workspace Trust is declared and honoured. In Restricted Mode the
-  language server is not started, and a status-bar hint explains why.
-- `pnpm bump <version>` (`scripts/bump-version.mjs`) rewrites the version in
-  every manifest in one step.
-- This changelog, shipped inside the VSIX so the Marketplace renders it.
+- TypeGPU 0.12 support (`typegpu` 0.12.3, `unplugin-typegpu` 0.12.2),
+  including the named `tgpu` import.
+- Resource hovers for the 0.12 types: root, guarded compute pipelines, command
+  encoders, render and compute passes, render bundle encoders.
+- VS Code: icon, gallery banner, a first-run notice before anything is
+  downloaded, and Workspace Trust support (the server stays off in Restricted
+  Mode).
+- `pnpm bump <version>` and this changelog.
 
 ### Changed
 
-- Runtime inspection is quiescent by default on every path, including the MCP
-  agent tools: `requestAnimationFrame`, `ResizeObserver`, `queue.submit`, and
-  pipeline draw/dispatch are stubbed before the module is imported, so an
-  import-time render loop can no longer lose the WebGPU device and block every
-  target in the module. The run is recorded in the report ledger; pass
-  `quiescent: false` to observe real frame and submit behaviour.
-- VS Code activation no longer loads the language server in projects that do
-  not use TypeGPU. The extension activates cheaply and starts the client once a
-  TypeGPU import is seen.
-- Version strings are single-sourced. The language server's `serverInfo`, its
-  MCP client identity, the runtime inspector spec it installs, and the VS Code
-  doctor command are injected at build time from the owning package's
+- Runtime inspection is quiescent by default on every path: frame loops,
+  ResizeObserver, queue submits, and draw/dispatch are stubbed before import,
+  so an import-time render loop cannot lose the WebGPU device. Pass
+  `quiescent: false` to observe real frame behavior.
+- VS Code activates cheaply and starts the language server once a TypeGPU
+  import is seen.
+- Version strings are injected at build time from each package's
   `package.json`.
-- The language server no longer assumes `npm` is on `PATH` when installing the
-  runtime inspector. It falls back to the `npm-cli.js` shipped next to the
-  discovered `node`, and reports what it searched when neither is found.
+- The runtime installer no longer needs `npm` on `PATH`; it falls back to the
+  `npm-cli.js` next to the discovered `node`.
 - The published language server bundle is minified.
 
 ### Fixed
 
-- The first-run Chromium download no longer counts against the inspection
-  timeout, and it announces itself on the server's output channel instead of
-  running silently for minutes.
-- The runtime installer resolves a Node.js shim (Homebrew, nvm, fnm, volta) to
-  its real installation before looking for `npm-cli.js` beside it.
-- A failed runtime install caused by a not-yet-published package version says
-  so, instead of only quoting npm's ETARGET output.
+- The first-run Chromium download is excluded from the inspection timeout and
+  announced on the output channel.
+- Node.js shims (Homebrew, nvm, fnm, volta) resolve to the real installation
+  before `npm-cli.js` is looked up.
+- A runtime install that fails on a not-yet-published version says so.
 
 ## [0.4.7] - 2026-08-05
 
@@ -138,5 +94,6 @@ First public store release: VS Code Marketplace and the Zed extension registry.
 Internal iterations: hover and inlay surface work, discovery and diagnostics
 tuning, packaging experiments. Not published to any store.
 
+[0.6.0]: https://github.com/reczkok/typegpu-inspector/releases/tag/v0.6.0
 [0.5.0]: https://github.com/reczkok/typegpu-inspector/releases/tag/v0.5.0
 [0.4.7]: https://github.com/reczkok/typegpu-inspector/releases/tag/v0.4.7

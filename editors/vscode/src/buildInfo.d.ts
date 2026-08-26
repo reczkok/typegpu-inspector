@@ -5,7 +5,7 @@
  * The monorepo releases the extension, the language server, and the runtime
  * inspector in lockstep from a single version bump, so the extension version
  * is also the `typegpu-runtime-inspector-mcp` spec the doctor command must
- * probe — it has to match the server's FALLBACK_INSPECTOR_SPEC exactly,
- * because npx caches per spec string.
+ * probe. It has to match the server's FALLBACK_INSPECTOR_SPEC, because npx
+ * caches per spec string.
  */
 declare const __TYPEGPU_INSPECTOR_VERSION__: string;

@@ -118,7 +118,7 @@ const runtimeOptionsSchema = {
     .optional()
     .default(true)
     .describe(
-      'Run the inspected module quiescently: requestAnimationFrame, ResizeObserver, queue.submit, and pipeline dispatch/draw are stubbed before import so an import-time frame loop cannot draw over the inspector validation scopes and lose the WebGPU device. Reported through a device-session quiescent-run ledger entry, so a passing target is static validation evidence, not evidence the app renders. When browserSetup is also passed, it runs after the quiescent prologue and may override individual stubs. Set false only when the run must observe real frame/submit behaviour.',
+      'Run the inspected module quiescently: requestAnimationFrame, ResizeObserver, queue.submit, and pipeline dispatch/draw are stubbed before import so an import-time frame loop cannot draw over the inspector validation scopes and lose the WebGPU device. Reported through a device-session quiescent-run ledger entry, so a passing target means WebGPU accepted it; no frame was rendered. When browserSetup is also passed, it runs after the quiescent prologue and may override individual stubs. Set false only when the run must observe real frame/submit behaviour.',
     ),
   staticAssetRoutes: z
     .array(staticAssetRouteSchema)

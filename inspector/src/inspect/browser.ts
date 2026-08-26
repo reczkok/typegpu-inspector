@@ -9,7 +9,7 @@ import {
 } from 'playwright-chromium';
 
 /**
- * The inspector deliberately loads a loopback Vite server inside an isolated
+ * The inspector loads a loopback Vite server inside an isolated
  * Playwright context. Project Vite configs commonly enable HTTPS with a
  * development certificate (for example @vitejs/plugin-basic-ssl), which is
  * intentionally not trusted by Chromium. Trust it inside this disposable

@@ -41,13 +41,11 @@ export function createZeroValue(schema: unknown, label?: string): unknown {
  * necessary, floating/integer scalars and vectors use ones, matrices use their
  * identity, and structs/fixed arrays recursively apply the same policy.
  *
- * This is deliberately based on data shape, never field names. A plain zero
+ * The policy looks at data shape only, never at field names. A plain zero
  * composite routinely turns valid shader invariants (dimensions, periods,
- * scales, normalizers) into division-by-zero or NaN during comptime resolution.
- * Identity matrices and recursively non-zero leaves are a more neutral,
- * non-degenerate inspection fixture. The ledger still marks every such value
- * as synthesized, so success is reported with assumptions rather than as
- * evidence of application runtime values.
+ * scales, normalizers) into division-by-zero or NaN during comptime resolution;
+ * identity matrices and recursively non-zero leaves avoid that. The ledger
+ * marks every such value as synthesized.
  */
 export function createPlaceholderValue(schema: unknown, label?: string): unknown {
   return createPlaceholder(schema, label, 0, new Set());

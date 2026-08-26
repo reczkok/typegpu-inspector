@@ -434,9 +434,8 @@ async function cleanupTempDir(path: string): Promise<void> {
   await rm(path, { force: true, recursive: true }).catch(() => undefined);
 }
 
-// TypeGPU's own "Found duplicate TypeGPU version." warning is deliberately
-// NOT filtered: a second typegpu instance breaks slot identity (and therefore
-// auto-binding), so the signal must reach reports.
+// TypeGPU's own "Found duplicate TypeGPU version." warning is kept: a second
+// typegpu instance breaks slot identity and with it auto-binding.
 function isHarnessConsoleNoise(text: string): boolean {
   return (
     text === '[vite] connecting...' ||

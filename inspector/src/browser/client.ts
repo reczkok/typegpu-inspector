@@ -37,7 +37,7 @@ import {
 const MAX_REPORTED_CALLS = 1_000;
 
 /**
- * Fields that exist only on the wire, not on `BrowserInspectResult` itself —
+ * Fields that exist only on the wire and not on `BrowserInspectResult`.
  * `src/types.ts` is owned elsewhere, so these are attached structurally and
  * read defensively on the Node side.
  */

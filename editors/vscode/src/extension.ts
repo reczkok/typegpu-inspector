@@ -390,9 +390,9 @@ export async function activate(context: ExtensionContext): Promise<void> {
       const current = config.get<string>('hoverDetailLevel') ?? 'standard';
       const levels = [
         { label: 'wgsl', description: 'Generated WGSL only for shaders and pipelines' },
-        { label: 'compact', description: 'Complete core resource shape without secondary evidence' },
-        { label: 'standard', description: 'Role-focused facts and a bounded generated WGSL excerpt' },
-        { label: 'deep', description: 'Diagnostics, provenance, runtime metadata, and raw evidence' },
+        { label: 'compact', description: 'Core facts only' },
+        { label: 'standard', description: 'Facts for the declaration\'s role and a short generated WGSL excerpt' },
+        { label: 'deep', description: 'Everything: diagnostics, provenance, runtime metadata' },
       ];
       const picked = await window.showQuickPick(
         levels.map((level) => ({

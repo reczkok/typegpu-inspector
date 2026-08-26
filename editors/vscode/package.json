@@ -145,9 +145,9 @@
           ],
           "enumDescriptions": [
             "Generated WGSL only for shaders and pipelines; compact facts for everything else.",
-            "Complete core resource shape without secondary evidence.",
-            "Role-focused facts and a bounded generated WGSL excerpt.",
-            "Diagnostics, provenance, runtime metadata, and raw evidence."
+            "Core facts only.",
+            "Facts for the declaration's role and a short generated WGSL excerpt.",
+            "Everything: diagnostics, provenance, runtime metadata."
           ],
           "description": "How much detail hover reports show. Defaults to standard."
         },

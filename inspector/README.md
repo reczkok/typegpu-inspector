@@ -5,8 +5,8 @@ It loads a module through Vite, creates a browser `GPUDevice`, and reports
 generated WGSL, shader compilation messages, WebGPU validation errors, bind
 group layout stats, console and page errors, and recorded GPU calls.
 
-Inspections reuse a bounded Vite/Chromium session per workspace and
-configuration. Every request still gets a fresh page and JavaScript realm.
+Inspections share one Vite/Chromium session per workspace and configuration;
+each request gets a fresh page and JavaScript realm.
 
 ## Setup
 
@@ -57,12 +57,12 @@ typegpu-runtime-inspector-mcp@<version>` as a stdio command named
 
 `target.kind` selects one of three sources:
 
-- `probe` — `body` of `async inspect({ root, device, tgpu, d, std, common })`,
+- `probe`: `body` of `async inspect({ root, device, tgpu, d, std, common })`,
   returning a target or an array of them. `virtualPath` fixes where relative
   imports resolve from.
-- `module` — `path` to a module exporting `inspect` (`exportName` overrides the
+- `module`: `path` to a module exporting `inspect` (`exportName` overrides the
   name).
-- `symbols` — `modulePath` plus `targets`, selectors into the module's exports.
+- `symbols`: `modulePath` plus `targets`, selectors into the module's exports.
   `setupBody` runs before target creation; `includePrivate` also exposes
   top-level locals.
 
@@ -102,19 +102,19 @@ instead.
 | Field | Default | Effect |
 | --- | --- | --- |
 | `quiescent` | `true` | Stubs `requestAnimationFrame`, `ResizeObserver`, `queue.submit`, and pipeline dispatch/draw before import. |
-| `documentHtml` | — | Assigned to `document.body` before import. |
-| `browserSetup` | — | Browser JavaScript run after the quiescent prologue and before import. |
+| `documentHtml` | none | Assigned to `document.body` before import. |
+| `browserSetup` | none | Browser JavaScript run after the quiescent prologue and before import. |
 | `staticAssetRoutes` | `[]` | `{ urlPrefix, directory }` routes served by the Vite server. |
 | `features` | `[]` | WebGPU features requested from the adapter. |
 | `strictNames` | `true` | Deterministic TypeGPU generated names. |
 | `autoBind` | `true` | Satisfy missing slot and accessor bindings. |
 
-A browser module that starts a frame loop at import time would otherwise draw
-into the inspector's validation scopes and lose the device, so `quiescent`
-defaults to `true` and is recorded as a `device-session:quiescent-run` ledger
-entry. A passing target is therefore static validation evidence, not proof that
-the application renders. Set it to `false` when the run must observe real frame
-or submit behaviour, such as a warm-up dispatch that initializes a pipeline.
+`quiescent` defaults to `true` because a module that starts a frame loop at
+import time would draw into the inspector's validation scopes and lose the
+device. The run is recorded as a `device-session:quiescent-run` ledger entry.
+With it on, a passing target means WebGPU accepted the pipelines; no frame was
+rendered. Set it to `false` when the run has to observe real frames or
+submits, for example a warm-up dispatch that initializes a pipeline.
 
 ### Output
 
@@ -124,7 +124,7 @@ or submit behaviour, such as a warm-up dispatch that initializes a pipeline.
 | `includeWgsl` | `"full"` only | Canonical WGSL per target. |
 | `includeCalls` | `"full"` only | Recorded GPU calls. |
 | `includeCallWgsl` | `false` | Repeat WGSL inside `createShaderModule` descriptors. |
-| `maxWgslBytes` | — | Truncate each WGSL string to this many UTF-8 bytes. |
+| `maxWgslBytes` | none | Truncate each WGSL string to this many UTF-8 bytes. |
 | `diagnosticsOnly` | `false` | Return diagnostics, target status, console messages, page errors. |
 | `includeLegacyInspection` | `false` | Repeat the formatted report under `inspection`. |
 | `timeoutMs` | `15000` | Wall clock for one inspection, Vite startup included. |
@@ -154,7 +154,7 @@ Unsupported: `not-shader-resolvable`, `plain-object-not-inspectable`,
 `pipeline-resource-shape`, `raw-webgpu-pipeline-unsupported`,
 `typegpu-<stage>-function-not-resolvable`, `typegpu-value-not-resolvable`.
 
-Notes rather than failures: `slot-bindings-auto-applied`,
+Notes: `slot-bindings-auto-applied`,
 `inspection-defaults-applied`, `structural-resource-only`,
 `direct-symbol-inspection`, `webgpu-validation-unavailable`,
 `pipeline-validated-without-recorded-creation`, `pipeline-wrapper-unwrapped`.

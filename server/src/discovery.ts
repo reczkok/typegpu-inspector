@@ -84,7 +84,7 @@ export type SpecializationSynthesis = {
 
 /**
  * Each specialization becomes an independently resolved browser target. Keep
- * the default deliberately small: it is large enough for the common 2x2 and
+ * the default small: it is large enough for the common 2x2 and
  * 2x2x2 finite-generic cases without letting a broad union make every save
  * fan out into dozens of shader resolutions.
  */
