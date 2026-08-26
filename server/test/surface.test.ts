@@ -18,6 +18,13 @@ import {
   materializeInspection,
   mergeDocumentInspections,
 } from '../src/surface.js';
+import {
+  offsetOnLine,
+  sourceRangeOnLine,
+  statementMap,
+  statementMapSource,
+  statementMapWgsl,
+} from './fixtures/statementMapFixture.js';
 
 describe('inspection surface', () => {
   it('drops materialization-only runtime evidence after preserving editor surfaces', async () => {
@@ -2201,5 +2208,146 @@ describe('hover width budget and code spans', () => {
     expect(markdown).toContain('**Bindings**');
     expect(markdown.indexOf('**Bindings**'))
       .toBeLessThan(markdown.indexOf('**Generated WGSL**'));
+  });
+});
+
+describe('statement-map diagnostics', () => {
+  const discovered = discoverTypeGpuModule('/workspace/boids.ts', statementMapSource);
+  const targetOf = (name: string) =>
+    discovered.targets.find((target) => target.symbolNames.includes(name))!;
+
+  it('places a recorded resolution failure on the failing statement', async () => {
+    const inspection = await materializeInspection(
+      '/workspace',
+      '/workspace/boids.ts',
+      1,
+      discovered,
+      {
+        ok: false,
+        targets: [
+          {
+            label: targetOf('stepBoid').label,
+            kind: 'resolvable',
+            ok: false,
+            compilationMessages: [],
+            statementMap: { functions: [], failure: { fn: 'stepBoid', path: [1, 'body', 0, 'else', 'then', 0] } },
+            error: {
+              message:
+                "Resolution of the following tree failed:\n- <root>\n- fn:stepBoid: 'vel = vel + d.vec3f(0.1)' is invalid, because the operands do not match.",
+            },
+          },
+          {
+            label: targetOf('mainCompute').label,
+            kind: 'resolvable',
+            ok: false,
+            compilationMessages: [],
+            statementMap: { functions: [], failure: { fn: 'stepBoid', path: [1, 'body', 0, 'else', 'then', 0] } },
+            error: {
+              message:
+                "Resolution of the following tree failed:\n- <root>\n- computeFn:mainCompute\n- fn:stepBoid: 'vel = vel + d.vec3f(0.1)' is invalid, because the operands do not match.",
+            },
+          },
+        ],
+      },
+    );
+    const diagnostics = createDiagnostics('file:///workspace/boids.ts', discovered, inspection);
+    expect(diagnostics).toHaveLength(2);
+
+    const helper = diagnostics.find((diagnostic) => String(diagnostic.message).startsWith('stepBoid'))!;
+    // The quoted snippet narrows the column within the mapped statement.
+    expect(helper.range).toEqual(sourceRangeOnLine(16, 'vel = vel + d.vec3f'));
+    expect(helper.relatedInformation).toBeUndefined();
+    expect(helper.data).toMatchObject({ mapping: { strategy: 'statement', confidence: 'high' } });
+
+    const entry = diagnostics.find((diagnostic) => String(diagnostic.message).startsWith('mainCompute'))!;
+    expect(entry.range).toEqual(sourceRangeOnLine(30, 'stepBoid'));
+    expect(entry.relatedInformation).toEqual([{
+      location: {
+        uri: 'file:///workspace/boids.ts',
+        range: sourceRangeOnLine(16, 'vel = vel + d.vec3f(0.1);'),
+      },
+      message: 'in stepBoid',
+    }]);
+  });
+
+  it('keeps TypeGPU fix suggestions out of the resolution trace', async () => {
+    const inspection = await materializeInspection(
+      '/workspace',
+      '/workspace/boids.ts',
+      1,
+      discovered,
+      {
+        ok: false,
+        targets: [{
+          label: targetOf('stepBoid').label,
+          kind: 'resolvable',
+          ok: false,
+          compilationMessages: [],
+          statementMap: { functions: [], failure: { fn: 'stepBoid', path: [0] } },
+          error: {
+            message: [
+              'Resolution of the following tree failed:',
+              '- <root>',
+              "- fn:stepBoid: 'let vel = d.vec3f(1)' is invalid, because references cannot be assigned to 'let' variable declarations.",
+              '-----',
+              "- Try 'let vel = vec3f(boid.vel)' if you need to reassign 'vel' later",
+              "- Try 'const vel = boid.vel' if you won't reassign 'vel' later.",
+              '-----',
+            ].join('\n'),
+          },
+        }],
+      },
+    );
+    const [diagnostic] = createDiagnostics('file:///workspace/boids.ts', discovered, inspection);
+    expect(diagnostic!.message).not.toContain('resolution failed at');
+    expect(diagnostic!.message).toContain(
+      "'let vel = d.vec3f(1)' is invalid, because references cannot be assigned to 'let' variable declarations. " +
+        "Try 'let vel = vec3f(boid.vel)' if you need to reassign 'vel' later " +
+        "Try 'const vel = boid.vel' if you won't reassign 'vel' later.",
+    );
+    expect(diagnostic!.range.start).toEqual({ line: 11, character: 2 });
+  });
+
+  it('routes a compiler message in an inlined helper to the call site with related source', async () => {
+    const offset = offsetOnLine(statementMapWgsl, 14, '(vel + vec3f(0.10000000149011612))');
+    const inspection = await materializeInspection(
+      '/workspace',
+      '/workspace/boids.ts',
+      1,
+      discovered,
+      {
+        ok: false,
+        targets: [{
+          label: targetOf('mainCompute').label,
+          kind: 'resolvable',
+          ok: false,
+          wgsl: statementMapWgsl,
+          statementMap,
+          compilationMessages: [{
+            type: 'error',
+            message: 'no matching overload for operator +',
+            offset,
+            length: '(vel + vec3f(0.10000000149011612))'.length,
+            lineNum: 15,
+            linePos: 15,
+          }],
+          callIds: [1],
+        }],
+      },
+    );
+    const diagnostics = createDiagnostics('file:///workspace/boids.ts', discovered, inspection);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]!.range).toEqual(sourceRangeOnLine(30, 'stepBoid'));
+    expect(diagnostics[0]!.message).not.toContain('approximate');
+    expect(diagnostics[0]!.relatedInformation?.map((info) => info.message)).toEqual([
+      'in stepBoid',
+      'in fn stepBoid',
+    ]);
+    expect(diagnostics[0]!.relatedInformation?.[0]?.location.range).toEqual(
+      sourceRangeOnLine(16, 'vel = vel + d.vec3f(0.1);'),
+    );
+    expect(diagnostics[0]!.data).toMatchObject({
+      mapping: { strategy: 'statement-call-site', confidence: 'high', sourceSymbol: 'stepBoid' },
+    });
   });
 });

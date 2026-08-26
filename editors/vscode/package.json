@@ -292,7 +292,7 @@
         "typegpuInspector.sourceMapping": {
           "type": "boolean",
           "default": true,
-          "description": "Heuristically map WGSL diagnostics back to TypeScript source (early feature)."
+          "description": "Map WGSL and resolution diagnostics back to the authored statement (exact on TypeGPU 0.12+, heuristic below)."
         },
         "typegpuInspector.schemaLayoutHealth": {
           "type": "boolean",

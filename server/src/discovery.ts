@@ -1,5 +1,6 @@
 import ts from 'typescript';
 import type { Position, Range } from 'vscode-languageserver';
+import type { StatementPathSegment } from './protocol.js';
 
 export type TypeGpuRole =
   | 'compute-entrypoint'
@@ -34,6 +35,8 @@ export type DiscoveredSymbol = {
   range: Range;
   /** Lexical tokens in the authored shader source that can survive into WGSL. */
   shaderSourceTokens?: ShaderSourceToken[];
+  /** `'use gpu'` bodies, for statement-level mapping from the runtime's statement map. */
+  shaderBodies?: ShaderBody[];
   targetIds: string[];
   probeArguments?: string[];
   probeArgumentPlan?: ProbeArgumentPlanEntry[];
@@ -46,6 +49,20 @@ export type DiscoveredSymbol = {
 export type ShaderSourceToken = {
   text: string;
   range: Range;
+};
+
+export type ShaderStatement = {
+  path: StatementPathSegment[];
+  /** The whole statement. */
+  range: Range;
+  /** `if (…)` / `for (…)` header of a compound statement; equals `range` for leaves. */
+  headRange: Range;
+};
+
+/** One `'use gpu'` block, with its statements keyed the way tinyest orders them. */
+export type ShaderBody = {
+  range: Range;
+  statements: ShaderStatement[];
 };
 
 export type PipelineSource = {
@@ -193,12 +210,7 @@ export function discoverTypeGpuModule(
           role,
           range: nodeRange(declaration.name, sourceFile),
           ...(declaration.initializer && hasGeneratedShaderSource(role)
-            ? {
-                shaderSourceTokens: collectShaderSourceTokens(
-                  declaration.initializer,
-                  sourceFile,
-                ),
-              }
+            ? shaderSourceFields(declaration.initializer, sourceFile)
             : {}),
           ...(contextualProbeInputs.get(declaration.name.text) ??
             probeArgumentsFromExpression(declaration.initializer, sourceFile)),
@@ -226,12 +238,7 @@ export function discoverTypeGpuModule(
         role,
         range: nodeRange(statement.name, sourceFile),
         ...(hasGeneratedShaderSource(role) && statement.body
-          ? {
-              shaderSourceTokens: collectShaderSourceTokens(
-                statement,
-                sourceFile,
-              ),
-            }
+          ? shaderSourceFields(statement, sourceFile)
           : {}),
         ...(contextualProbeInputs.get(statement.name.text) ??
           probeArgumentsFromParameters(
@@ -2408,6 +2415,120 @@ function hasGeneratedShaderSource(role: TypeGpuRole): boolean {
     role === 'shader-constant' ||
     role === 'compute-pipeline' ||
     role === 'render-pipeline';
+}
+
+function shaderSourceFields(
+  node: ts.Node,
+  sourceFile: ts.SourceFile,
+): Pick<DiscoveredSymbol, 'shaderSourceTokens' | 'shaderBodies'> {
+  const shaderBodies = collectShaderBodies(node, sourceFile);
+  return {
+    shaderSourceTokens: collectShaderSourceTokens(node, sourceFile),
+    ...(shaderBodies.length > 0 ? { shaderBodies } : {}),
+  };
+}
+
+function collectShaderBodies(node: ts.Node, sourceFile: ts.SourceFile): ShaderBody[] {
+  return useGpuBodies(node).flatMap((fn) => {
+    const body = (fn as ts.FunctionLikeDeclaration).body;
+    if (!body || !ts.isBlock(body)) return [];
+    const statements: ShaderStatement[] = [];
+    collectBlockStatements(body, [], statements, sourceFile, true);
+    return [{ range: nodeRange(body, sourceFile), statements }];
+  });
+}
+
+/**
+ * Mirrors tinyest-for-wgsl: every statement of a block is one node, in
+ * order, except the directive prologue of the function body, which Babel
+ * keeps out of `body`. Multi-declarator declarations are rejected upstream.
+ */
+function collectBlockStatements(
+  block: ts.Block,
+  prefix: StatementPathSegment[],
+  out: ShaderStatement[],
+  sourceFile: ts.SourceFile,
+  functionBody: boolean,
+): void {
+  let prologue = functionBody;
+  let index = 0;
+  for (const statement of block.statements) {
+    if (
+      prologue &&
+      ts.isExpressionStatement(statement) &&
+      ts.isStringLiteral(statement.expression)
+    ) {
+      continue;
+    }
+    prologue = false;
+    collectStatement(statement, [...prefix, index], out, sourceFile);
+    index += 1;
+  }
+}
+
+function collectStatement(
+  statement: ts.Statement,
+  path: StatementPathSegment[],
+  out: ShaderStatement[],
+  sourceFile: ts.SourceFile,
+): void {
+  const range = nodeRange(statement, sourceFile);
+  if (ts.isBlock(statement)) {
+    out.push({ path, range, headRange: range });
+    collectBlockStatements(statement, path, out, sourceFile, false);
+    return;
+  }
+  if (ts.isIfStatement(statement)) {
+    out.push({
+      path,
+      range,
+      headRange: statementHeadRange(statement, statement.thenStatement, sourceFile),
+    });
+    collectStatement(statement.thenStatement, [...path, 'then'], out, sourceFile);
+    if (statement.elseStatement) {
+      collectStatement(statement.elseStatement, [...path, 'else'], out, sourceFile);
+    }
+    return;
+  }
+  if (ts.isForStatement(statement)) {
+    out.push({
+      path,
+      range,
+      headRange: statementHeadRange(statement, statement.statement, sourceFile),
+    });
+    if (statement.initializer) {
+      const initializer = nodeRange(statement.initializer, sourceFile);
+      out.push({ path: [...path, 'init'], range: initializer, headRange: initializer });
+    }
+    if (statement.incrementor) {
+      const incrementor = nodeRange(statement.incrementor, sourceFile);
+      out.push({ path: [...path, 'update'], range: incrementor, headRange: incrementor });
+    }
+    collectStatement(statement.statement, [...path, 'body'], out, sourceFile);
+    return;
+  }
+  if (ts.isWhileStatement(statement) || ts.isForOfStatement(statement)) {
+    out.push({
+      path,
+      range,
+      headRange: statementHeadRange(statement, statement.statement, sourceFile),
+    });
+    collectStatement(statement.statement, [...path, 'body'], out, sourceFile);
+    return;
+  }
+  out.push({ path, range, headRange: range });
+}
+
+/** From the statement's start through the `)` that closes its header. */
+function statementHeadRange(
+  statement: ts.Statement,
+  body: ts.Statement,
+  sourceFile: ts.SourceFile,
+): Range {
+  const start = statement.getStart(sourceFile);
+  let end = body.getStart(sourceFile);
+  while (end > start && sourceFile.text[end - 1] !== ')') end -= 1;
+  return { start: positionAt(start, sourceFile), end: positionAt(end, sourceFile) };
 }
 
 function collectShaderSourceTokens(

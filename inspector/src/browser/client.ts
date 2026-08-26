@@ -15,6 +15,7 @@ import {
   type TypeGpuInspectionTarget,
 } from './targetInspector.ts';
 import { isTaggedBindingSource } from './engine/providers.ts';
+import { statementMapGeneratorClass } from './statementMap.ts';
 import type { RecordedBindingRegistry } from './engine/types.ts';
 import type {
   BrowserInspectRequest,
@@ -141,9 +142,11 @@ async function inspectTypegpuModuleInBrowser(
 
     const recorder = createGpuRecorder(rawDevice, { waitBudget });
     installGpuSessionProvider(rawDevice, environmentLedger);
+    const generatorClass = statementMapGeneratorClass();
     const root = tgpu.initFromDevice({
       device: recorder.device,
       unstable_names: request.strictNames ? 'strict' : 'random',
+      ...(generatorClass ? { unstable_shaderGeneratorClass: generatorClass } : {}),
     });
 
     await applyBrowserSetup(request, { root, device: recorder.device, tgpu, d, std, common });

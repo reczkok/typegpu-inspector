@@ -16,8 +16,10 @@ grammar is enough.
 - Hovers on TypeGPU declarations: generated WGSL, entry points, bindings,
   pipeline state, resource descriptors.
 - Inlay hints with each declaration's inspection status.
-- Diagnostics from the WGSL compiler and from WebGPU validation, mapped to the
-  TypeScript token when the mapping is reliable.
+- Diagnostics from the WGSL compiler, from WebGPU validation, and from
+  TypeGPU's own resolution, placed on the authored statement. With TypeGPU
+  0.12 or newer the runtime records which statement produced each generated
+  line, so the position is exact; older versions fall back to token matching.
 - Links to the generated `.wgsl` file and the full report. In VS Code, a
   generated-WGSL document and an inspection report open beside the editor and
   follow the cursor.
@@ -89,7 +91,8 @@ sets each section to `auto`, `show`, or `hide`, reorders them with
 `sectionOrder`, and bounds the ones that can grow. `maxColumns` (72 in Zed, 96
 elsewhere) is the widest table a hover renders; a wider one is written as
 key/value lines. VS Code's settings schema lists the section names and ranges.
-`sourceMapping` is heuristic. A diagnostic always links to the generated WGSL.
+`sourceMapping` is exact at statement level on TypeGPU 0.12 or newer and
+heuristic below that. A diagnostic always links to the generated WGSL.
 
 Invalid values are dropped and logged. Changes apply without a restart, except
 `serverPath`.

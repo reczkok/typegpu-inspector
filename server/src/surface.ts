@@ -59,6 +59,7 @@ import { analyzeSchemaLayout } from './schemaLayout.js';
 import { analyzeWgsl, formatByteSize, type WgslAnalysis } from './wgsl.js';
 import {
   compilerGeneratedRange,
+  mapResolutionFailure,
   mapWgslDiagnostic,
 } from './sourceMapping.js';
 
@@ -565,6 +566,7 @@ export function createDiagnostics(
             message,
             target.target,
             discovered.symbols,
+            target.report.statementMap,
           )
         : undefined;
       const generatedRange = mapping?.generatedRange ??
@@ -572,6 +574,12 @@ export function createDiagnostics(
           ? compilerGeneratedRange(target.report.wgsl, message)
           : undefined);
       const relatedInformation: DiagnosticRelatedInformation[] = [];
+      if (mapping?.relatedSource) {
+        relatedInformation.push({
+          location: { uri: sourceUri, range: mapping.relatedSource.range },
+          message: `in ${mapping.relatedSource.sourceSymbol}`,
+        });
+      }
       if (target.generatedUri && generatedRange) {
         relatedInformation.push({
           location: { uri: target.generatedUri, range: generatedRange },
@@ -627,20 +635,41 @@ export function createDiagnostics(
     }
 
     if (!target.report.ok && (target.report.compilationMessages?.length ?? 0) === 0) {
-      // A resolution trace names the failing item (e.g. `asin`); when a
-      // trace name appears exactly once in the authored shader tokens, point
-      // the diagnostic at that call instead of the whole declaration. The
-      // path is walked deepest-first, so an ambiguous leaf still maps to the
-      // nearest uniquely identifiable enclosing helper.
-      const trace = options.sourceMapping
+      // The runtime's statement map names the statement that aborted the
+      // resolution exactly; a quoted snippet then only refines the column
+      // within it. Without the map, a resolution trace names the failing
+      // item (e.g. `asin`); when a trace name appears exactly once in the
+      // authored shader tokens, point the diagnostic at that call instead of
+      // the whole declaration. The path is walked deepest-first, so an
+      // ambiguous leaf still maps to the nearest uniquely identifiable
+      // enclosing helper.
+      const failure = target.report.statementMap?.failure;
+      const failureMapping = options.sourceMapping && failure
+        ? mapResolutionFailure(failure, target.target, discovered.symbols)
+        : undefined;
+      const trace = options.sourceMapping && !failureMapping
         ? parseResolutionTrace(target.report.error)
         : undefined;
-      const tokenRange = (trace
-        ? resolutionTraceTokenRange(targetSymbols, trace)
-        : undefined) ??
-        (options.sourceMapping
-          ? quotedErrorSnippetRange(targetSymbols, target.report.error)
-          : undefined);
+      const tokenRange = failureMapping?.sourceRange
+        ? (failureMapping.relatedSource
+            ? undefined
+            : quotedErrorSnippetRange(
+                targetSymbols,
+                target.report.error,
+                failureMapping.sourceRange,
+              )) ?? failureMapping.sourceRange
+        : (trace
+          ? resolutionTraceTokenRange(targetSymbols, trace)
+          : undefined) ??
+          (options.sourceMapping
+            ? quotedErrorSnippetRange(targetSymbols, target.report.error)
+            : undefined);
+      const failureRelated: DiagnosticRelatedInformation[] = failureMapping?.relatedSource
+        ? [{
+            location: { uri: sourceUri, range: failureMapping.relatedSource.range },
+            message: `in ${failureMapping.relatedSource.sourceSymbol}`,
+          }]
+        : [];
       // A structural condition (unbound slot, needs a wrapper, ...) means the
       // target just cannot be inspected standalone — the code is not wrong.
       // Hint severity keeps it out of the Problems panel and off the red path.
@@ -653,7 +682,22 @@ export function createDiagnostics(
         message: structural
           ? `${target.target.label} is not inspectable standalone: ${targetFailure(target.report)}`
           : `${target.target.label}: ${targetFailure(target.report)}`,
-        data: { sourceUri, targetId: id },
+        ...(failureRelated.length > 0 ? { relatedInformation: failureRelated } : {}),
+        data: {
+          sourceUri,
+          targetId: id,
+          ...(failureMapping
+            ? {
+                mapping: {
+                  confidence: failureMapping.confidence,
+                  strategy: failureMapping.strategy,
+                  ...(failureMapping.sourceSymbol
+                    ? { sourceSymbol: failureMapping.sourceSymbol }
+                    : {}),
+                },
+              }
+            : {}),
+        },
       });
     }
   }
@@ -2717,6 +2761,7 @@ function resolutionTraceTokenRange(
 function quotedErrorSnippetRange(
   symbols: DiscoveredSymbol[],
   error: unknown,
+  within?: Range,
 ): Range | undefined {
   const message = readErrorText(error);
   if (!message) return undefined;
@@ -2725,7 +2770,12 @@ function quotedErrorSnippetRange(
     // Single identifiers are too ambiguous to pin a location safely.
     if (words.length < 2) continue;
     for (const symbol of symbols) {
-      const range = tightestTokenWindow(symbol.shaderSourceTokens ?? [], words);
+      const tokens = (symbol.shaderSourceTokens ?? []).filter((token) =>
+        within === undefined ||
+        (comparePosition(within.start, token.range.start) <= 0 &&
+          comparePosition(token.range.end, within.end) <= 0)
+      );
+      const range = tightestTokenWindow(tokens, words);
       if (range) return range;
     }
   }
@@ -2826,8 +2876,16 @@ function parseResolutionTrace(error: unknown, depth = 0): ResolutionTrace | unde
       : undefined;
     return cause === undefined ? undefined : parseResolutionTrace(cause, depth + 1);
   }
-  const named = message
+  // TypeGPU appends fix suggestions after the tree between `-----` rules;
+  // they are advice, not tree entries.
+  const [tree = '', hintBlock] = message
     .slice(headerIndex + RESOLUTION_TREE_HEADER.length)
+    .split(/\n-{3,}\n?/);
+  const hints = (hintBlock ?? '')
+    .split('\n')
+    .map((line) => line.trim().replace(/^- /, ''))
+    .filter((line) => line !== '' && !/^-{3,}$/.test(line));
+  const named = tree
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line.startsWith('- '))
@@ -2849,11 +2907,10 @@ function parseResolutionTrace(error: unknown, depth = 0): ResolutionTrace | unde
     );
   const deepest = named[named.length - 1];
   if (!deepest) return undefined;
+  const detail = [deepest.detail, ...hints].filter((part) => part).join(' ');
   return {
     name: deepest.name,
-    ...(deepest.detail !== undefined && deepest.detail !== ''
-      ? { detail: deepest.detail }
-      : {}),
+    ...(detail !== '' ? { detail } : {}),
     path: named.map((entry) => entry.name),
   };
 }

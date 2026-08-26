@@ -1,4 +1,4 @@
-import { statSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveModulePath } from 'exsolve';
@@ -72,6 +72,65 @@ export function resolvePackagePathFrom(
     );
   }
   return resolvePackagePath(specifier);
+}
+
+/**
+ * `typegpu/~internal` from the same package `typegpuPath` came from, so the
+ * statement-map generator subclasses the instance the inspected module uses.
+ * Undefined when the package predates the export (TypeGPU < 0.12) or is a
+ * source alias without an `internal` module beside its entry.
+ */
+export function resolveTypegpuInternalPath(typegpuPath: string): string | undefined {
+  const packageDir = findPackageDir(dirname(typegpuPath), 'typegpu');
+  if (packageDir) {
+    const manifest = readJsonFile(join(packageDir, 'package.json'));
+    const exportsField = manifest?.exports;
+    const entry = exportsField && typeof exportsField === 'object'
+      ? (exportsField as Record<string, unknown>)['./~internal']
+      : undefined;
+    const target = readExportTarget(entry);
+    if (target) {
+      const candidate = resolve(packageDir, target);
+      if (fileExists(candidate)) return candidate;
+    }
+  }
+  for (const sibling of ['internal.ts', 'internal.js', 'internal.mjs']) {
+    const candidate = join(dirname(typegpuPath), sibling);
+    if (fileExists(candidate)) return candidate;
+  }
+  return undefined;
+}
+
+function readExportTarget(entry: unknown): string | undefined {
+  if (typeof entry === 'string') return entry;
+  if (!entry || typeof entry !== 'object') return undefined;
+  const conditions = entry as Record<string, unknown>;
+  for (const key of ['browser', 'import', 'default']) {
+    const nested = readExportTarget(conditions[key]);
+    if (nested) return nested;
+  }
+  return undefined;
+}
+
+function findPackageDir(startDir: string, packageName: string): string | undefined {
+  let dir = startDir;
+  for (let depth = 0; depth < 4; depth += 1) {
+    const manifest = readJsonFile(join(dir, 'package.json'));
+    if (manifest?.name === packageName) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return undefined;
+}
+
+function readJsonFile(path: string): Record<string, unknown> | undefined {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
+    return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function resolvePackageAliasPath(

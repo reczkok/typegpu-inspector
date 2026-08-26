@@ -2,13 +2,22 @@ import type { Range } from 'vscode-languageserver';
 import type {
   DiscoveredSymbol,
   InspectionTarget,
+  ShaderBody,
   ShaderSourceToken,
+  ShaderStatement,
 } from './discovery.js';
-import type { CompilerMessage } from './protocol.js';
+import type {
+  CompilerMessage,
+  InspectorStatementMap,
+  StatementPathSegment,
+} from './protocol.js';
 
 export type WgslMappingConfidence = 'high' | 'medium' | 'none';
 
 export type WgslMappingStrategy =
+  | 'statement'
+  | 'statement-token'
+  | 'statement-call-site'
   | 'generated-token'
   | 'generated-token-ordinal'
   | 'declaration-name'
@@ -27,6 +36,25 @@ export type WgslDiagnosticMapping = {
   sourceRange?: Range;
   sourceSymbol?: string;
   generatedToken?: string;
+  /**
+   * The authored statement when it lives in another symbol of the same file
+   * (a helper inlined into this target's WGSL); `sourceRange` then points at
+   * the call site.
+   */
+  relatedSource?: {
+    range: Range;
+    sourceSymbol: string;
+  };
+};
+
+type StatementMapFunction = InspectorStatementMap['functions'][number];
+type StatementMapEntry = StatementMapFunction['statements'][number];
+
+type AuthoredStatementHit = {
+  symbol: DiscoveredSymbol;
+  inTarget: boolean;
+  /** Undefined when the generated line is the function header or a closing brace. */
+  statement?: ShaderStatement;
 };
 
 type GeneratedDeclaration = {
@@ -56,9 +84,12 @@ type SymbolAssociation = {
 };
 
 /**
- * Maps a WebGPU compiler location to authored TS source. There's no real
- * source map — the unplugin's metadata is a structural AST with no offsets —
- * so high confidence needs an unambiguous match: one authored occurrence, a
+ * Maps a WebGPU compiler location to authored TS source. The runtime's
+ * statement map (TypeGPU >= 0.12) names the authored statement behind every
+ * generated line exactly; token matching then only has to disambiguate
+ * within that statement. Without it there is no source map at all — the
+ * unplugin's metadata is a structural AST with no offsets — so high
+ * confidence needs an unambiguous match: one authored occurrence, a
  * diagnostic-named token, a caret on an identifier, or a unique callee/token
  * in the selection. Repeated tokens map by ordinal only when generated and
  * authored occurrence counts agree, and stay medium confidence.
@@ -68,6 +99,7 @@ export function mapWgslDiagnostic(
   message: CompilerMessage,
   target: InspectionTarget,
   symbols: DiscoveredSymbol[],
+  statementMap?: InspectorStatementMap,
 ): WgslDiagnosticMapping {
   const generatedRange = compilerGeneratedRange(wgsl, message);
   const messageOffset = compilerOffset(wgsl, message);
@@ -90,6 +122,29 @@ export function mapWgslDiagnostic(
     ? associateGeneratedDeclaration(declaration, targetSymbols)
     : { confidence: 'none', symbols: [] } satisfies SymbolAssociation;
   const matchingSymbols = association.symbols;
+
+  if (statementMap && messageOffset !== undefined) {
+    const mapped = mapThroughStatementMap(
+      wgsl,
+      message,
+      messageOffset,
+      statementMap,
+      targetSymbols,
+      symbols,
+      association,
+    );
+    if (mapped) {
+      return {
+        ...mapped,
+        ...(generatedRange ? { generatedRange } : {}),
+        ...(generatedDeclaration
+          ? { generatedDeclaration }
+          : mapped.generatedDeclaration
+          ? { generatedDeclaration: mapped.generatedDeclaration }
+          : {}),
+      };
+    }
+  }
 
   if (!declaration) {
     return {
@@ -197,6 +252,238 @@ export function mapWgslDiagnostic(
   };
 }
 
+/**
+ * Locates the statement whose resolution aborted a target. Returns the
+ * authored statement range (or, for a helper inlined into another target,
+ * the call site with the statement as related source).
+ */
+export function mapResolutionFailure(
+  failure: NonNullable<InspectorStatementMap['failure']>,
+  target: InspectionTarget,
+  symbols: DiscoveredSymbol[],
+): WgslDiagnosticMapping | undefined {
+  const targetSymbols = symbols.filter((symbol) =>
+    target.symbolNames.includes(symbol.name) || symbol.targetIds.includes(target.id)
+  );
+  const symbol = authoredFunctionSymbol(failure.fn, targetSymbols, symbols);
+  if (!symbol) return undefined;
+  const body = selectBody(symbol.shaderBodies ?? [], failure.path.length > 0 ? [failure.path] : []);
+  if (!body) return undefined;
+  const statement = failure.path.length > 0
+    ? body.statements.find((candidate) => samePath(candidate.path, failure.path))
+    : undefined;
+  if (failure.path.length > 0 && !statement) return undefined;
+  return finishStatementMapping(
+    { symbol, inTarget: targetSymbols.includes(symbol), ...(statement ? { statement } : {}) },
+    statement ? statement.headRange : symbol.range,
+    undefined,
+    targetSymbols,
+  );
+}
+
+function mapThroughStatementMap(
+  wgsl: string,
+  message: CompilerMessage,
+  messageOffset: number,
+  statementMap: InspectorStatementMap,
+  targetSymbols: DiscoveredSymbol[],
+  symbols: DiscoveredSymbol[],
+  association: SymbolAssociation,
+): WgslDiagnosticMapping | undefined {
+  const lineStarts = precomputeForWgsl(wgsl).lineStarts;
+  const line = lineAtOffset(lineStarts, messageOffset);
+  const fn = statementMapFunctionAtLine(statementMap, line);
+  if (!fn) return undefined;
+  const entry = deepestEntryAtLine(fn, line);
+  const symbol = authoredFunctionSymbol(fn.name, targetSymbols, symbols) ??
+    associatedBodySymbol(association);
+  if (!symbol) return undefined;
+  const body = selectBody(symbol.shaderBodies ?? [], fn.statements.map((candidate) => candidate.path));
+  if (!body) return undefined;
+  const generatedDeclaration = statementMapDeclaration(wgsl, fn, lineStarts);
+
+  const hit: AuthoredStatementHit = { symbol, inTarget: targetSymbols.includes(symbol) };
+  if (!entry) {
+    return {
+      ...finishStatementMapping(hit, symbol.range, undefined, targetSymbols),
+      ...(generatedDeclaration ? { generatedDeclaration } : {}),
+    };
+  }
+  const statement = body.statements.find((candidate) => samePath(candidate.path, entry.path));
+  if (!statement) return undefined;
+  hit.statement = statement;
+  const authored = entry.line === line ? statement.headRange : statement.range;
+
+  const statementTokens = (symbol.shaderSourceTokens ?? []).filter((token) =>
+    rangeContains(authored, token.range)
+  );
+  const generatedToken = selectedGeneratedIdentifier(
+    wgsl,
+    message,
+    new Set(statementTokens.map((token) => token.text)),
+  );
+  let pinned: { range: Range; confidence: 'high' | 'medium' } | undefined;
+  if (generatedToken) {
+    const sourceMatches = statementTokens.filter((token) => token.text === generatedToken);
+    if (sourceMatches.length === 1) {
+      pinned = { range: sourceMatches[0]!.range, confidence: 'high' };
+    } else if (sourceMatches.length > 1) {
+      const start = lineStarts[entry.line] ?? 0;
+      const end = lineStarts[entry.line + entry.lineCount] ?? wgsl.length;
+      const generatedOccurrences = identifierOccurrences(wgsl, generatedToken, start, end);
+      const ordinal = generatedOccurrences.findIndex((occurrence) =>
+        messageOffset >= occurrence.start && messageOffset <= occurrence.end
+      );
+      if (generatedOccurrences.length === sourceMatches.length && ordinal >= 0) {
+        pinned = { range: sourceMatches[ordinal]!.range, confidence: 'medium' };
+      }
+    }
+  }
+  return {
+    ...finishStatementMapping(hit, pinned?.range ?? authored, pinned?.confidence, targetSymbols),
+    ...(generatedToken ? { generatedToken } : {}),
+    ...(generatedDeclaration ? { generatedDeclaration } : {}),
+  };
+}
+
+/**
+ * A statement inside this target's own symbol maps directly. One inside
+ * another symbol of the file (a helper inlined into the WGSL) maps to its
+ * unique call site in the target, carrying the statement as related source,
+ * so the helper's own diagnostic stays the one that pins the line.
+ */
+function finishStatementMapping(
+  hit: AuthoredStatementHit,
+  authored: Range,
+  pinnedConfidence: 'high' | 'medium' | undefined,
+  targetSymbols: DiscoveredSymbol[],
+): WgslDiagnosticMapping {
+  const strategy: WgslMappingStrategy = pinnedConfidence ? 'statement-token' : 'statement';
+  const direct: WgslDiagnosticMapping = {
+    confidence: pinnedConfidence ?? 'high',
+    strategy,
+    sourceRange: authored,
+    sourceSymbol: hit.symbol.name,
+  };
+  if (hit.inTarget) return direct;
+  const callSites = sourceTokenMatches(
+    targetSymbols,
+    hit.symbol.runtimeName ?? hit.symbol.name,
+  );
+  if (callSites.length !== 1) return direct;
+  return {
+    confidence: 'high',
+    strategy: 'statement-call-site',
+    sourceRange: callSites[0]!.token.range,
+    sourceSymbol: hit.symbol.name,
+    relatedSource: { range: authored, sourceSymbol: hit.symbol.name },
+  };
+}
+
+function authoredFunctionSymbol(
+  generatedName: string,
+  targetSymbols: DiscoveredSymbol[],
+  symbols: DiscoveredSymbol[],
+): DiscoveredSymbol | undefined {
+  const byName = symbols.filter((symbol) =>
+    (symbol.shaderBodies?.length ?? 0) > 0 &&
+    generatedDeclarationMatchesSymbol(generatedName, symbol)
+  );
+  const inTarget = byName.filter((symbol) => targetSymbols.includes(symbol));
+  const candidates = inTarget.length > 0 ? inTarget : byName;
+  return candidates.length === 1 ? candidates[0] : undefined;
+}
+
+/** Anonymous generated entrypoints (`item`, `fn`) associate by shader stage. */
+function associatedBodySymbol(association: SymbolAssociation): DiscoveredSymbol | undefined {
+  if (association.confidence === 'none') return undefined;
+  const candidates = association.symbols.filter((symbol) =>
+    (symbol.shaderBodies?.length ?? 0) > 0
+  );
+  return candidates.length === 1 ? candidates[0] : undefined;
+}
+
+/** The body whose statements cover every generated path; the only body when there is one. */
+function selectBody(
+  bodies: ShaderBody[],
+  generatedPaths: StatementPathSegment[][],
+): ShaderBody | undefined {
+  const covering = bodies.filter((body) =>
+    generatedPaths.every((path) =>
+      body.statements.some((statement) => samePath(statement.path, path))
+    )
+  );
+  if (covering.length === 1) return covering[0];
+  return bodies.length === 1 && generatedPaths.length === 0 ? bodies[0] : undefined;
+}
+
+function statementMapFunctionAtLine(
+  statementMap: InspectorStatementMap,
+  line: number,
+): StatementMapFunction | undefined {
+  let best: StatementMapFunction | undefined;
+  for (const fn of statementMap.functions) {
+    if (fn.line > line || line > statementMapFunctionEnd(fn)) continue;
+    if (!best || fn.line > best.line) best = fn;
+  }
+  return best;
+}
+
+/** Last line of the function: its closing brace follows the last statement. */
+function statementMapFunctionEnd(fn: StatementMapFunction): number {
+  return fn.statements.reduce(
+    (end, statement) => Math.max(end, statement.line + statement.lineCount - 1),
+    fn.line,
+  ) + 1;
+}
+
+function deepestEntryAtLine(
+  fn: StatementMapFunction,
+  line: number,
+): StatementMapEntry | undefined {
+  let best: StatementMapEntry | undefined;
+  for (const entry of fn.statements) {
+    if (line < entry.line || line >= entry.line + entry.lineCount) continue;
+    if (!best || entry.path.length > best.path.length) best = entry;
+  }
+  return best;
+}
+
+function statementMapDeclaration(
+  wgsl: string,
+  fn: StatementMapFunction,
+  lineStarts: number[],
+): WgslDiagnosticMapping['generatedDeclaration'] | undefined {
+  const lineStart = lineStarts[fn.line];
+  if (lineStart === undefined) return undefined;
+  const lineEnd = lineStarts[fn.line + 1] ?? wgsl.length;
+  const header = wgsl.slice(lineStart, lineEnd);
+  const match = new RegExp(`\\bfn\\s+(${escapeRegExp(fn.name)})\\s*\\(`).exec(header);
+  if (!match) return undefined;
+  const nameStart = lineStart + match.index + match[0].indexOf(fn.name);
+  return {
+    kind: 'fn',
+    name: fn.name,
+    range: offsetsToRange(wgsl, nameStart, nameStart + fn.name.length),
+  };
+}
+
+function samePath(left: StatementPathSegment[], right: StatementPathSegment[]): boolean {
+  return left.length === right.length && left.every((segment, index) => segment === right[index]);
+}
+
+function rangeContains(outer: Range, inner: Range): boolean {
+  return comparePositions(outer.start, inner.start) <= 0 &&
+    comparePositions(inner.end, outer.end) <= 0;
+}
+
+function comparePositions(
+  left: { line: number; character: number },
+  right: { line: number; character: number },
+): number {
+  return left.line - right.line || left.character - right.character;
+}
+
 export function compilerGeneratedRange(
   wgsl: string,
   message: CompilerMessage,
@@ -252,14 +539,10 @@ function selectedGeneratedIdentifier(
   if (quotedIdentifiers.size === 1) return [...quotedIdentifiers][0];
   if (quotedIdentifiers.size > 1) return undefined;
 
-  const callCallees = new Set(
-    [...selected.matchAll(/\b([A-Za-z_]\w*)\s*\(/g)]
-      .map((match) => match[1])
-      .filter((identifier): identifier is string =>
-        identifier !== undefined && sourceIdentifiers.has(identifier)
-      ),
-  );
-  if (callCallees.size === 1) return [...callCallees][0];
+  // A selection that is one call expression names its callee; a call nested
+  // in a wider selection (an operator's operand) does not.
+  const callee = /^\(*\s*([A-Za-z_]\w*)\s*\([\s\S]*\)\s*\)*$/.exec(selected.trim())?.[1];
+  if (callee !== undefined && sourceIdentifiers.has(callee)) return callee;
 
   const sourceRelevantIdentifiers = [...selectedIdentifiers].filter((identifier) =>
     sourceIdentifiers.has(identifier)

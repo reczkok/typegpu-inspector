@@ -46,7 +46,7 @@ export type InspectorSettings = {
   inlayHints: boolean;
   diagnostics: boolean;
   documentLinks: boolean;
-  /** Heuristic WGSL-diagnostic → TS-token mapping (early feature). */
+  /** Diagnostic → authored-statement mapping (exact on TypeGPU 0.12+, heuristic below). */
   sourceMapping: boolean;
   schemaLayoutHealth: boolean;
   schemaPackingSuggestions: boolean;
@@ -98,6 +98,32 @@ export type CompilerMessage = {
   length?: number;
 };
 
+/** Index into a block, or the named child slot of a compound statement. */
+export type StatementPathSegment = number | 'then' | 'else' | 'init' | 'update' | 'body';
+
+/**
+ * Statement-level map from generated WGSL lines back to the authored
+ * `'use gpu'` bodies, recorded by the runtime while TypeGPU generated the
+ * code. Runtimes on TypeGPU < 0.12 omit it.
+ */
+export type InspectorStatementMap = {
+  functions: Array<{
+    name: string;
+    /** 0-based line of the function header in `wgsl`. */
+    line: number;
+    statements: Array<{
+      path: StatementPathSegment[];
+      line: number;
+      lineCount: number;
+    }>;
+  }>;
+  /** The function and statement whose resolution aborted the target. */
+  failure?: {
+    fn: string;
+    path: StatementPathSegment[];
+  };
+};
+
 export type InspectorDiagnostic = {
   code: string;
   message: string;
@@ -145,6 +171,7 @@ export type InspectorTargetReport = {
     }>;
   }>;
   compilationMessages?: CompilerMessage[];
+  statementMap?: InspectorStatementMap;
   compilationSummary?: {
     total?: number;
     errorCount?: number;

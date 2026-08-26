@@ -53,6 +53,14 @@ import type {
   TypeGpuTargetReport,
 } from '../types.ts';
 import { inferTargetOutcome } from './outcome.ts';
+import {
+  buildStatementMap,
+  createStatementMapGenerator,
+  currentRecorderSequence,
+  findLatestRecordedFailure,
+  findStatementMapForCode,
+  type StatementMapRecorder,
+} from './statementMap.ts';
 
 export type TypeGpuInspectionTarget = {
   label?: string | undefined;
@@ -95,6 +103,7 @@ export async function inspectPipelineTargets(
 
   for (const [index, target] of targets.entries()) {
     const callStart = recorder.calls.length;
+    const recorderSequence = currentRecorderSequence();
     let targetValue = target.value;
     const report: TypeGpuTargetReport = {
       label: target.label ?? `target ${index + 1}`,
@@ -179,7 +188,7 @@ export async function inspectPipelineTargets(
       }
 
       await recorder.flushCompilationInfo();
-      hydrateReportFromCalls(report, recorder.calls.slice(callStart));
+      hydrateReportFromCalls(report, recorder.calls.slice(callStart), recorderSequence);
       report.ok = !hasCompilationErrors(report.compilationMessages);
     } catch (error) {
       if (
@@ -188,13 +197,23 @@ export async function inspectPipelineTargets(
       ) {
         addTargetDiagnostics(report, [createValidationUnavailableDiagnostic()]);
         await recorder.flushCompilationInfo().catch(() => undefined);
-        hydrateReportFromCalls(report, recorder.calls.slice(callStart));
+        hydrateReportFromCalls(report, recorder.calls.slice(callStart), recorderSequence);
         report.ok = true;
       } else {
         report.error = serializeError(error);
         addTargetDiagnostics(report, diagnoseTargetFailure(targetValue, report.kind, error));
         await recorder.flushCompilationInfo().catch(() => undefined);
-        hydrateReportFromCalls(report, recorder.calls.slice(callStart));
+        hydrateReportFromCalls(report, recorder.calls.slice(callStart), recorderSequence);
+        // A failure recorded by the newest generator locates the statement
+        // that aborted this target, but only while no WGSL was produced:
+        // afterwards the error came from the compiler or WebGPU, not from
+        // resolution.
+        const failure = report.wgsl === undefined
+          ? findLatestRecordedFailure(recorderSequence)
+          : undefined;
+        if (failure) {
+          report.statementMap = { functions: report.statementMap?.functions ?? [], failure };
+        }
         report.ok = false;
       }
     } finally {
@@ -525,12 +544,16 @@ async function validateResolvableTarget(
   const { device } = recorder;
   const engineCtx = engine ?? createEngineContext({ enabled: false, sources: [] });
   const resolutionStart = performance.now();
+  let statementRecorder: StatementMapRecorder | undefined;
   const result = satisfyAndAttempt(
     engineCtx,
     () => {
       const provisions = slotValueProvisions(engineCtx);
+      const recording = createStatementMapGenerator();
+      statementRecorder = recording?.recorder;
       return tgpu.resolveWithContext([value as never], {
         names: strictNames ? 'strict' : 'random',
+        ...(recording ? { unstable_shaderGenerator: recording.generator } : {}),
         ...(provisions.length > 0
           ? {
             config: (cfg: TgpuConfigurable) =>
@@ -549,6 +572,12 @@ async function validateResolvableTarget(
   report.resolutionMs = performance.now() - resolutionStart;
   report.wgsl = result.code;
   report.wgslSize = byteLength(result.code);
+  const statementMap = statementRecorder
+    ? buildStatementMap(statementRecorder, result.code)
+    : undefined;
+  if (statementMap) {
+    report.statementMap = statementMap;
+  }
   const bindGroupLayouts = inspectResolvedBindGroupLayouts(
     result.usedBindGroupLayouts,
   );
@@ -659,7 +688,11 @@ function addTargetDiagnostics(
   report.diagnostics = existing;
 }
 
-function hydrateReportFromCalls(report: TypeGpuTargetReport, calls: RecordedGpuCall[]): void {
+function hydrateReportFromCalls(
+  report: TypeGpuTargetReport,
+  calls: RecordedGpuCall[],
+  recorderSequence: number,
+): void {
   const shaderCalls = calls.filter((call) => call.name === 'device.createShaderModule');
   const pipelineCalls = calls.filter(
     (call) =>
@@ -671,6 +704,10 @@ function hydrateReportFromCalls(report: TypeGpuTargetReport, calls: RecordedGpuC
     if (descriptor && typeof descriptor === 'object' && 'code' in descriptor) {
       report.wgsl = String(descriptor.code);
       report.wgslSize = byteLength(report.wgsl);
+      const statementMap = findStatementMapForCode(report.wgsl, recorderSequence);
+      if (statementMap) {
+        report.statementMap = statementMap;
+      }
     }
   }
 

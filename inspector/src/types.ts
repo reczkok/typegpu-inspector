@@ -208,6 +208,41 @@ export type InspectionStats = {
   timings?: InspectionTimings | undefined;
 };
 
+/** Index into a block, or the named child slot of a compound statement. */
+export type StatementPathSegment = number | 'then' | 'else' | 'init' | 'update' | 'body';
+
+export type StatementMapEntry = {
+  /** Path from the function body to the statement, mirroring the tinyest tree. */
+  path: StatementPathSegment[];
+  /** 0-based line in the target's `wgsl` where the statement's code starts. */
+  line: number;
+  lineCount: number;
+};
+
+export type StatementMapFunction = {
+  /** Generated WGSL function name (unique within the resolved code). */
+  name: string;
+  /** 0-based line of the function header in the target's `wgsl`. */
+  line: number;
+  statements: StatementMapEntry[];
+};
+
+export type StatementMapFailure = {
+  fn: string;
+  /** Empty when the failure is in the function header rather than a statement. */
+  path: StatementPathSegment[];
+};
+
+/**
+ * Statement-level map from generated WGSL back to the authored `'use gpu'`
+ * bodies, recorded while TypeGPU generates the code. Absent on runtimes
+ * without a pluggable shader generator (TypeGPU < 0.12).
+ */
+export type StatementMap = {
+  functions: StatementMapFunction[];
+  failure?: StatementMapFailure | undefined;
+};
+
 export type TypeGpuTargetReport = {
   label: string;
   kind: InspectionTargetKind;
@@ -230,6 +265,7 @@ export type TypeGpuTargetReport = {
   bindGroupLayouts?: TypeGpuBindGroupLayoutReport[] | undefined;
   compilationMessages: ShaderCompilationMessage[];
   compilationSummary: CompilationMessageStats;
+  statementMap?: StatementMap | undefined;
   pipelineCreation?: {
     attempted: boolean;
     ok: boolean;

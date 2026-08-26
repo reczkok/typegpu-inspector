@@ -6,6 +6,23 @@ and released together. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Statement-level source mapping. On TypeGPU 0.12 or newer the runtime
+  inspector records, while TypeGPU generates WGSL, which authored statement
+  produced each line (`statementMap` on every target report), and the
+  language server places compiler diagnostics and resolution errors on that
+  statement. A helper inlined into another target's WGSL maps to its call site
+  with the statement as related information. Older TypeGPU versions keep the
+  token heuristics.
+
+### Fixed
+
+- A compiler selection that merely contains a call (an operator's operand)
+  no longer pins the diagnostic to that call's callee.
+
 ## [0.6.1] - 2026-08-26
 
 ### Changed

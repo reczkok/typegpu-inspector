@@ -217,6 +217,7 @@ function summarizeTarget(
       : target.compilationMessages.length > 0
       ? target.compilationMessages
       : undefined,
+    statementMap: compact ? undefined : target.statementMap,
     wgsl: options.includeWgsl ? formatWgsl(target.wgsl, options) : undefined,
   });
 }

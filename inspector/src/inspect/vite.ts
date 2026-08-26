@@ -14,6 +14,7 @@ import {
   getPackageRoot,
   resolvePackageAliasPath,
   resolvePackagePathFrom,
+  resolveTypegpuInternalPath,
 } from './paths.ts';
 import { buildRecordingShimModule } from './recordingShim.ts';
 
@@ -35,6 +36,7 @@ const TYPEGPU_OPTIMIZE_DEP_EXCLUDES = [
   'typegpu/data',
   'typegpu/std',
   'typegpu/common',
+  'typegpu/~internal',
   '@typegpu/color',
   '@typegpu/geometry',
   '@typegpu/noise',
@@ -67,6 +69,10 @@ export async function createInspectorViteServer(
     'typegpu/common',
     input.dependencyResolution,
   );
+  // Derived from typegpuPath, never resolved on its own: a bundled fallback
+  // here would load a second TypeGPU beside the module's.
+  const typegpuInternalPath = resolveTypegpuInternalPath(typegpuPath) ??
+    resolve(getPackageRoot(), 'src/browser/typegpuInternalStub.ts');
   const modulePackageRoots = await findPackageRoots(dirname(input.modulePath));
   const typegpuPlugin = await loadTypegpuVitePlugin(input.cwd, input.dependencyResolution);
   const port = await getAvailablePort();
@@ -94,6 +100,7 @@ export async function createInspectorViteServer(
         // prefix regex would otherwise match it). typegpuPath is already
         // alias-aware, so the shim wraps whatever package the project uses.
         { find: /^typegpu$/, replacement: `${typegpuPath}?${SHIM_MODULE_QUERY}` },
+        { find: /^typegpu\/~internal$/, replacement: typegpuInternalPath },
         ...Object.entries(input.dependencyAliases).map(([find, replacement]) => ({
           find,
           replacement,
@@ -134,6 +141,7 @@ export async function createInspectorViteServer(
           ...Object.values(input.dependencyAliases).map(aliasFsAllowPath),
           ...Object.values(input.dependencyResolution.packageAliases ?? {}).map(aliasFsAllowPath),
           dirname(typegpuPath),
+          dirname(typegpuInternalPath),
         ]),
       },
     },

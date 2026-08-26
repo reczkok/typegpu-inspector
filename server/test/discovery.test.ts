@@ -920,3 +920,93 @@ describe('discoverTypeGpuModule', () => {
       });
   });
 });
+
+describe('shader bodies', () => {
+  it('orders statements the way tinyest does, skipping the directive prologue', () => {
+    const source = [
+      'export const step = tgpu.fn([d.u32])((index) => {',
+      "  'use gpu';",
+      "  'another directive';",
+      '  let vel = d.vec3f(1);',
+      '  for (let i = 0; i < 4; i++) {',
+      '    if (std.length(vel) > 2) {',
+      '      vel = std.normalize(vel) * 2;',
+      '    } else if (i > 2) vel = vel + d.vec3f(0.1);',
+      '  }',
+      '  while (vel.x > 0) {',
+      '    vel.x -= 1;',
+      '  }',
+      '  {',
+      '    const nested = 1;',
+      '  }',
+      "  'late string';",
+      '  return vel;',
+      '});',
+    ].join('\n');
+    const { symbols } = discoverTypeGpuModule('/workspace/step.ts', source);
+    const body = symbols.find((symbol) => symbol.name === 'step')?.shaderBodies?.[0];
+    expect(body).toBeDefined();
+    expect(body!.statements.map((statement) => statement.path.join('.'))).toEqual([
+      '0',
+      '1',
+      '1.init',
+      '1.update',
+      '1.body',
+      '1.body.0',
+      '1.body.0.then',
+      '1.body.0.then.0',
+      '1.body.0.else',
+      '1.body.0.else.then',
+      '2',
+      '2.body',
+      '2.body.0',
+      '3',
+      '3.0',
+      '4',
+      '5',
+    ]);
+    const byPath = new Map(body!.statements.map((statement) => [statement.path.join('.'), statement]));
+    expect(byPath.get('1')!.headRange).toEqual({
+      start: { line: 4, character: 2 },
+      end: { line: 4, character: 29 },
+    });
+    expect(byPath.get('1')!.range.end).toEqual({ line: 8, character: 3 });
+    expect(byPath.get('1.init')!.range).toEqual({
+      start: { line: 4, character: 7 },
+      end: { line: 4, character: 16 },
+    });
+    expect(byPath.get('1.body.0.else')!.headRange).toEqual({
+      start: { line: 7, character: 11 },
+      end: { line: 7, character: 21 },
+    });
+    expect(byPath.get('1.body.0.else.then')!.range).toEqual({
+      start: { line: 7, character: 22 },
+      end: { line: 7, character: 47 },
+    });
+    expect(byPath.get('2')!.headRange.end).toEqual({ line: 9, character: 19 });
+    expect(byPath.get('4')!.range.start).toEqual({ line: 15, character: 2 });
+  });
+
+  it('records one body per inline shader of a pipeline and none for WGSL templates', () => {
+    const { symbols } = discoverTypeGpuModule(
+      '/workspace/pipeline.ts',
+      [
+        'export const pipeline = root',
+        '  .withVertex(tgpu.vertexFn({ out: { pos: d.builtin.position } })(() => {',
+        "    'use gpu';",
+        '    return { pos: d.vec4f() };',
+        '  }), {})',
+        '  .withFragment(tgpu.fragmentFn({ out: d.vec4f })(() => {',
+        "    'use gpu';",
+        '    const c = 1;',
+        '    return d.vec4f(c);',
+        '  }), { format: "rgba8unorm" })',
+        '  .createPipeline();',
+        'export const raw = tgpu.fn([], d.f32)`() { return 1.0; }`;',
+      ].join('\n'),
+    );
+    const pipeline = symbols.find((symbol) => symbol.name === 'pipeline');
+    expect(pipeline?.shaderBodies?.map((body) => body.statements.length)).toEqual([1, 2]);
+    expect(symbols.find((symbol) => symbol.name === 'raw')?.shaderBodies).toBeUndefined();
+  });
+});

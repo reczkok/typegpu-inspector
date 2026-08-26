@@ -4,7 +4,15 @@ import {
   type DiscoveredSymbol,
   type InspectionTarget,
 } from '../src/discovery.js';
-import { mapWgslDiagnostic } from '../src/sourceMapping.js';
+import type { InspectorStatementMap } from '../src/protocol.js';
+import { mapResolutionFailure, mapWgslDiagnostic } from '../src/sourceMapping.js';
+import {
+  offsetOnLine,
+  sourceRangeOnLine,
+  statementMap,
+  statementMapSource,
+  statementMapWgsl,
+} from './fixtures/statementMapFixture.js';
 
 describe('WGSL diagnostic source mapping', () => {
   it('maps a uniquely selected generated identifier to its exact TS token', () => {
@@ -537,5 +545,156 @@ fn postProcessFragment(@builtin(position) position: vec4f) -> @location(0) vec4f
     expect(mapping).toMatchObject({ confidence: 'none', strategy: 'unmapped' });
     expect(mapping.generatedRange).toBeDefined();
     expect(mapping.sourceRange).toBeUndefined();
+  });
+});
+
+describe('statement-map source mapping', () => {
+  const discovered = discoverTypeGpuModule('/workspace/boids.ts', statementMapSource);
+  const targetOf = (name: string) =>
+    discovered.targets.find((target) => target.symbolNames.includes(name))!;
+  const message = (line: number, needle: string, text: string, occurrence = 0) => {
+    const offset = offsetOnLine(statementMapWgsl, line, needle, occurrence);
+    return {
+      type: 'error',
+      message: text,
+      offset,
+      length: needle.length,
+      lineNum: line + 1,
+      linePos: offset - statementMapWgsl.lastIndexOf('\n', offset - 1),
+    };
+  };
+
+  it('maps a statement inside the target to its authored statement', () => {
+    const mapping = mapWgslDiagnostic(
+      statementMapWgsl,
+      message(14, '(vel + vec3f(0.10000000149011612))', 'no matching overload for operator +'),
+      targetOf('stepBoid'),
+      discovered.symbols,
+      statementMap,
+    );
+    expect(mapping).toMatchObject({
+      confidence: 'high',
+      strategy: 'statement',
+      sourceSymbol: 'stepBoid',
+      generatedDeclaration: { kind: 'fn', name: 'stepBoid' },
+    });
+    expect(mapping.sourceRange).toEqual(sourceRangeOnLine(16, 'vel = vel + d.vec3f(0.1);'));
+    expect(mapping.generatedDeclaration?.range.start).toEqual({ line: 6, character: 3 });
+  });
+
+  it('pins a repeated token by ordinal within the statement', () => {
+    const mapping = mapWgslDiagnostic(
+      statementMapWgsl,
+      message(14, 'vel', "unresolved value 'vel'", 1),
+      targetOf('stepBoid'),
+      discovered.symbols,
+      statementMap,
+    );
+    expect(mapping).toMatchObject({
+      confidence: 'medium',
+      strategy: 'statement-token',
+      generatedToken: 'vel',
+    });
+    expect(mapping.sourceRange).toEqual(sourceRangeOnLine(16, 'vel', 1));
+  });
+
+  it('pins a unique token in a compound statement header', () => {
+    const mapping = mapWgslDiagnostic(
+      statementMapWgsl,
+      message(22, 'gid', 'something about gid'),
+      targetOf('mainCompute'),
+      discovered.symbols,
+      statementMap,
+    );
+    expect(mapping).toMatchObject({
+      confidence: 'high',
+      strategy: 'statement-token',
+      sourceSymbol: 'mainCompute',
+    });
+    expect(mapping.sourceRange).toEqual(sourceRangeOnLine(27, 'gid'));
+  });
+
+  it('maps a closing-brace line to the enclosing statement and a header to the declaration', () => {
+    const closing = mapWgslDiagnostic(
+      statementMapWgsl,
+      message(17, '}', 'unexpected brace'),
+      targetOf('stepBoid'),
+      discovered.symbols,
+      statementMap,
+    );
+    expect(closing).toMatchObject({ strategy: 'statement', confidence: 'high' });
+    expect(closing.sourceRange).toEqual({
+      start: { line: 12, character: 2 },
+      end: { line: 18, character: 3 },
+    });
+
+    const header = mapWgslDiagnostic(
+      statementMapWgsl,
+      message(6, 'index', "unused parameter 'index'"),
+      targetOf('stepBoid'),
+      discovered.symbols,
+      statementMap,
+    );
+    expect(header).toMatchObject({ strategy: 'statement', confidence: 'high' });
+    expect(header.sourceRange).toEqual(sourceRangeOnLine(9, 'stepBoid'));
+  });
+
+  it('maps a helper inlined into another target to its call site with the statement as related source', () => {
+    const mapping = mapWgslDiagnostic(
+      statementMapWgsl,
+      message(14, '(vel + vec3f(0.10000000149011612))', 'no matching overload for operator +'),
+      targetOf('mainCompute'),
+      discovered.symbols,
+      statementMap,
+    );
+    expect(mapping).toMatchObject({
+      confidence: 'high',
+      strategy: 'statement-call-site',
+      sourceSymbol: 'stepBoid',
+      generatedDeclaration: { kind: 'fn', name: 'stepBoid' },
+    });
+    expect(mapping.sourceRange).toEqual(sourceRangeOnLine(30, 'stepBoid'));
+    expect(mapping.relatedSource).toEqual({
+      range: sourceRangeOnLine(16, 'vel = vel + d.vec3f(0.1);'),
+      sourceSymbol: 'stepBoid',
+    });
+  });
+
+  it('falls back to token heuristics when the map does not cover the line', () => {
+    const partial = { functions: statementMap.functions.filter((fn) => fn.name !== 'rotateXY') };
+    const mapping = mapWgslDiagnostic(
+      statementMapWgsl,
+      message(1, 'sin', "unresolved call 'sin'"),
+      targetOf('rotateXY'),
+      discovered.symbols,
+      partial,
+    );
+    expect(mapping).toMatchObject({ strategy: 'generated-token', confidence: 'high' });
+    expect(mapping.sourceRange).toEqual(sourceRangeOnLine(4, 'sin'));
+  });
+
+  it('locates a recorded resolution failure', () => {
+    const failure: NonNullable<InspectorStatementMap['failure']> = {
+      fn: 'stepBoid',
+      path: [1, 'body', 0, 'else', 'then', 0],
+    };
+    const direct = mapResolutionFailure(failure, targetOf('stepBoid'), discovered.symbols);
+    expect(direct).toMatchObject({ strategy: 'statement', confidence: 'high', sourceSymbol: 'stepBoid' });
+    expect(direct?.sourceRange).toEqual(sourceRangeOnLine(16, 'vel = vel + d.vec3f(0.1);'));
+
+    const viaCall = mapResolutionFailure(failure, targetOf('mainCompute'), discovered.symbols);
+    expect(viaCall).toMatchObject({ strategy: 'statement-call-site' });
+    expect(viaCall?.sourceRange).toEqual(sourceRangeOnLine(30, 'stepBoid'));
+    expect(viaCall?.relatedSource?.range).toEqual(sourceRangeOnLine(16, 'vel = vel + d.vec3f(0.1);'));
+
+    const compound = mapResolutionFailure({ fn: 'stepBoid', path: [1] }, targetOf('stepBoid'), discovered.symbols);
+    expect(compound?.sourceRange).toEqual(sourceRangeOnLine(12, 'for (let i = 0; i < 4; i++)'));
+
+    expect(mapResolutionFailure({ fn: 'stepBoid', path: [9] }, targetOf('stepBoid'), discovered.symbols))
+      .toBeUndefined();
+    expect(mapResolutionFailure({ fn: 'elsewhere', path: [0] }, targetOf('stepBoid'), discovered.symbols))
+      .toBeUndefined();
+    expect(mapResolutionFailure({ fn: 'stepBoid_1', path: [] }, targetOf('stepBoid'), discovered.symbols))
+      .toMatchObject({ sourceRange: sourceRangeOnLine(9, 'stepBoid') });
   });
 });

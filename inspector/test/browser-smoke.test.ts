@@ -422,6 +422,67 @@ describe('browser harness', () => {
     expect(report.stats.computePipelineCount).toBe(1);
   });
 
+  maybeIt('records statement maps for resolved shaders, root pipelines, and failed resolutions', async () => {
+    const report = await inspectTypegpuModule({
+      cwd: resolve(import.meta.dirname, '..'),
+      source: {
+        kind: 'inspectBody',
+        inspectBody: `
+          const helper = tgpu.fn([d.f32], d.f32)((x) => {
+            'use gpu';
+            let y = x * 2;
+            if (y > 1) {
+              y = y - 1;
+            }
+            return y;
+          }).$name('helper');
+          const broken = tgpu.fn([d.f32], d.f32)((x) => {
+            'use gpu';
+            const flag = x > 1;
+            return flag + 1;
+          }).$name('broken');
+          const main = tgpu.computeFn({ workgroupSize: [1] })(() => {
+            'use gpu';
+            const value = helper(1);
+          }).$name('main');
+
+          return [
+            { label: 'helper', kind: 'resolvable', value: helper },
+            { label: 'broken', kind: 'resolvable', value: broken },
+            {
+              label: 'pipeline',
+              kind: 'compute-pipeline',
+              value: root.createComputePipeline({ compute: main }),
+            },
+          ];
+        `,
+      },
+      timeoutMs: 30_000,
+    });
+
+    const byLabel = new Map(report.targets.map((target) => [target.label, target]));
+    const helper = byLabel.get('helper')!;
+    expect(helper.ok, JSON.stringify(helper.error)).toBe(true);
+    expect(helper.statementMap?.functions.map((fn) => fn.name)).toEqual(['helper']);
+    const helperLines = helper.wgsl!.split('\n');
+    const thenEntry = helper.statementMap!.functions[0]!.statements.find((statement) =>
+      statement.path.join('.') === '1.then.0'
+    )!;
+    expect(helperLines[thenEntry.line]!.trim()).toBe('y = (y - 1f);');
+    expect(helperLines[helper.statementMap!.functions[0]!.line]).toMatch(/^fn helper\(/);
+
+    const broken = byLabel.get('broken')!;
+    expect(broken.ok).toBe(false);
+    expect(broken.statementMap?.failure).toEqual({ fn: 'broken', path: [1] });
+
+    const pipeline = byLabel.get('pipeline')!;
+    expect(pipeline.ok, JSON.stringify(pipeline.error)).toBe(true);
+    expect(pipeline.statementMap?.functions.map((fn) => fn.name)).toEqual(['helper', 'main']);
+    const pipelineLines = pipeline.wgsl!.split('\n');
+    const mainEntry = pipeline.statementMap!.functions[1]!.statements[0]!;
+    expect(pipelineLines[mainEntry.line]!.trim()).toBe('let value = helper(1f);');
+  });
+
   maybeIt('validates an agent-first probe with inferred context', async () => {
     const result = await inspectTypegpuTool({
       target: {
