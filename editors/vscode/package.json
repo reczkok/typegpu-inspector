@@ -75,8 +75,48 @@
       {
         "command": "typegpuInspector.selectInlayDetail",
         "title": "TypeGPU Inspector: Select Inlay Detail"
+      },
+      {
+        "command": "typegpuInspector.openWgslPreview",
+        "title": "TypeGPU Inspector: Open Generated WGSL to the Side",
+        "icon": "$(open-preview)"
+      },
+      {
+        "command": "typegpuInspector.openWgsl",
+        "title": "TypeGPU Inspector: Open Generated WGSL for Target"
+      },
+      {
+        "command": "typegpuInspector.peekWgsl",
+        "title": "TypeGPU Inspector: Peek Generated WGSL for Target"
+      },
+      {
+        "command": "typegpuInspector.revealSource",
+        "title": "TypeGPU Inspector: Reveal TypeGPU Source"
       }
     ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "typegpuInspector.openWgslPreview",
+          "when": "typegpuInspector.typegpuFile && resourceScheme == file",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "typegpuInspector.openWgsl",
+          "when": "false"
+        },
+        {
+          "command": "typegpuInspector.peekWgsl",
+          "when": "false"
+        },
+        {
+          "command": "typegpuInspector.revealSource",
+          "when": "false"
+        }
+      ]
+    },
     "configuration": {
       "title": "TypeGPU Inspector",
       "properties": {

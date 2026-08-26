@@ -18,8 +18,10 @@ import {
   type LanguageClientOptions,
   type ServerOptions,
 } from 'vscode-languageclient/node';
+import { WgslPreview, isTargetRef } from './wgslPreview.js';
 
 let client: LanguageClient | undefined;
+let preview: WgslPreview | undefined;
 let clientStarting: Promise<void> | undefined;
 let statusItem: StatusBarItem | undefined;
 
@@ -210,6 +212,16 @@ function createClient(context: ExtensionContext): LanguageClient {
       { scheme: 'file', language: 'javascriptreact' },
     ],
     initializationOptions: initializationOptions(),
+    // Hover action links (open/peek WGSL, switch detail) are command URIs.
+    markdown: {
+      isTrusted: {
+        enabledCommands: [
+          'typegpuInspector.openWgsl',
+          'typegpuInspector.peekWgsl',
+          'typegpuInspector.selectVerbosity',
+        ],
+      },
+    },
   };
   return new LanguageClient(
     'typegpuInspector',
@@ -230,6 +242,9 @@ async function startClient(context: ExtensionContext): Promise<void> {
       'typegpu/inspectionStatus',
       (payload: InspectionStatus) => {
         if (statusItem) renderStatus(statusItem, payload);
+        if (payload.state === 'done' || payload.state === 'failed') {
+          preview?.refresh(payload.uri);
+        }
         if (payload.state === 'failed') {
           void notifyInspectionFailure(payload);
         }
@@ -302,7 +317,19 @@ async function notifyInspectionFailure(status: InspectionStatus): Promise<void> 
   }
 }
 
+/** Drives the editor-title "Open Generated WGSL" button. */
+function updateFileContext(document: TextDocument | undefined): void {
+  void commands.executeCommand(
+    'setContext',
+    'typegpuInspector.typegpuFile',
+    document !== undefined && importsTypeGpu(document),
+  );
+}
+
 export async function activate(context: ExtensionContext): Promise<void> {
+  preview = new WgslPreview(() => client);
+  context.subscriptions.push(preview);
+  updateFileContext(window.activeTextEditor?.document);
   const status = window.createStatusBarItem(StatusBarAlignment.Left, 50);
   statusItem = status;
   status.name = 'TypeGPU Inspector';
@@ -329,7 +356,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
         `npx -y typegpu-runtime-inspector-mcp@${__TYPEGPU_INSPECTOR_VERSION__} doctor`,
       );
     }),
-    commands.registerCommand('typegpuInspector.selectVerbosity', async () => {
+    commands.registerCommand('typegpuInspector.selectVerbosity', async (level?: unknown) => {
       const config = workspace.getConfiguration('typegpuInspector');
       const current = config.get<string>('hoverDetailLevel') ?? 'standard';
       const levels = [
@@ -338,18 +365,41 @@ export async function activate(context: ExtensionContext): Promise<void> {
         { label: 'standard', description: 'Role-focused facts and a bounded generated WGSL excerpt' },
         { label: 'deep', description: 'Diagnostics, provenance, runtime metadata, and raw evidence' },
       ];
-      const picked = await window.showQuickPick(
-        levels.map((level) => ({
-          ...level,
-          description: level.label === current
-            ? `${level.description} · current`
-            : level.description,
+      const direct = levels.find((entry) => entry.label === level);
+      const picked = direct ?? await window.showQuickPick(
+        levels.map((entry) => ({
+          ...entry,
+          description: entry.label === current
+            ? `${entry.description} · current`
+            : entry.description,
         })),
         { placeHolder: 'How much detail should hovers show?' },
       );
       if (picked && picked.label !== current) {
         await config.update('hoverDetailLevel', picked.label, ConfigurationTarget.Global);
       }
+    }),
+    commands.registerCommand('typegpuInspector.openWgslPreview', async () => {
+      if (!client) {
+        const active = window.activeTextEditor?.document;
+        if (active) await considerDocument(context, active);
+      }
+      if (!client) {
+        void window.showInformationMessage(
+          'TypeGPU Inspector has not started yet — open a file that imports typegpu.',
+        );
+        return;
+      }
+      await preview?.openLive();
+    }),
+    commands.registerCommand('typegpuInspector.openWgsl', async (ref: unknown) => {
+      if (isTargetRef(ref)) await preview?.openPinned(ref);
+    }),
+    commands.registerCommand('typegpuInspector.peekWgsl', async (ref: unknown) => {
+      if (isTargetRef(ref)) await preview?.peek(ref);
+    }),
+    commands.registerCommand('typegpuInspector.revealSource', async (ref: unknown) => {
+      if (isTargetRef(ref)) await preview?.revealSource(ref);
     }),
     commands.registerCommand('typegpuInspector.selectInlayDetail', async () => {
       const config = workspace.getConfiguration('typegpuInspector');
@@ -401,6 +451,9 @@ export async function activate(context: ExtensionContext): Promise<void> {
     workspace.onDidOpenTextDocument((document) => {
       void considerDocument(context, document);
     }),
+    window.onDidChangeActiveTextEditor((editor) => {
+      updateFileContext(editor?.document);
+    }),
     workspace.onDidSaveTextDocument((document) => {
       void considerDocument(context, document);
     }),
@@ -435,5 +488,6 @@ export async function activate(context: ExtensionContext): Promise<void> {
 export async function deactivate(): Promise<void> {
   await client?.stop();
   client = undefined;
+  preview = undefined;
   statusItem = undefined;
 }

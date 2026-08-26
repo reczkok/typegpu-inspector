@@ -91,6 +91,8 @@ export type DocumentInspection = {
 };
 
 export type SurfaceOptions = {
+  /** Set per hover; enables the VS Code command links that need it. */
+  documentUri?: string;
   sourceMapping: boolean;
   schemaLayoutHealth: boolean;
   schemaPackingSuggestions: boolean;
@@ -378,7 +380,22 @@ export function createHover(
       level === 'deep' ? editorDefaultLedgerEntries(materialized) : [],
     );
   }
+  if (options.presentation === 'vscode') appendDetailSwitcher(lines, level);
   return hover(lines, symbol.range, options);
+}
+
+/** Command links need trusted markdown; the VS Code client allow-lists these commands. */
+function commandArguments(value: unknown): string {
+  return encodeURIComponent(JSON.stringify([value]));
+}
+
+function appendDetailSwitcher(lines: string[], current: HoverDetailLevel): void {
+  const items = DETAIL_LEVELS.map((level) =>
+    level === current
+      ? `**${level}**`
+      : `[${level}](command:typegpuInspector.selectVerbosity?${commandArguments(level)} "${DETAIL_LEVEL_SUMMARIES[level]}")`
+  );
+  lines.push('', `_Detail: ${items.join(' · ')}_`);
 }
 
 export function createInlayHints(
@@ -971,6 +988,7 @@ function appendTarget(
   appendArtifactLinks(
     lines,
     target,
+    options,
     listDeclarations ? undefined : analysis?.declarations.length,
   );
 
@@ -1344,6 +1362,7 @@ function appendWgslPreview(
 function appendArtifactLinks(
   lines: string[],
   target: MaterializedTarget,
+  options: SurfaceOptions,
   declarationCount?: number,
 ): void {
   const links: string[] = [];
@@ -1355,7 +1374,19 @@ function appendArtifactLinks(
           declarationCount ? plural(declarationCount, 'declaration') : undefined,
         ].filter(Boolean).map((fact) => ` · ${fact}`).join('')
       : '';
-    links.push(`[Open generated WGSL](${target.generatedUri})${facts}`);
+    // VS Code opens the WGSL in its own live view; Zed gets the file on disk.
+    if (options.presentation === 'vscode' && options.documentUri) {
+      const args = commandArguments({
+        uri: options.documentUri,
+        targetId: target.target.id,
+      });
+      links.push(
+        `[Open WGSL](command:typegpuInspector.openWgsl?${args} "Open the generated WGSL beside this editor")` +
+          `  ·  [Peek](command:typegpuInspector.peekWgsl?${args} "Peek the generated WGSL inline")${facts}`,
+      );
+    } else {
+      links.push(`[Open generated WGSL](${target.generatedUri})${facts}`);
+    }
   }
   if (target.generatedReportUri) {
     links.push(`[Open full inspection report](${target.generatedReportUri})`);

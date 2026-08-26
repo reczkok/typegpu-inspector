@@ -18,6 +18,11 @@ import {
   discoverTypeGpuModule,
   type DiscoveredModule,
 } from './discovery.js';
+import {
+  describeTargets,
+  generatedWgsl,
+  type WgslResponse,
+} from './editorRequests.js';
 import { RuntimeInspectorClient } from './mcpInspector.js';
 import {
   InspectionScheduler,
@@ -239,20 +244,10 @@ connection.onHover(async ({ textDocument, position }) => {
     containsPosition(candidate.range, position));
   if (!symbol) return null;
 
-  if (
-    (settings.inspectOn === 'hover' || settings.inspectOn === 'save-and-hover') &&
-    symbol.targetIds.length > 0 &&
-    state.savedVersion === document.version &&
-    (
-      state.inspection?.sourceVersion !== document.version ||
-      symbol.targetIds.some((id) => !isAttempted(state.inspection, id))
-    )
-  ) {
-    // Hover-triggered inspection stays alive even when the hover surface is
-    // hidden: in "hover"/"save-and-hover" modes this is what keeps
-    // diagnostics and inlays updating.
-    void requestInspection(document, symbol.targetIds, 'interactive');
-  }
+  // Hover-triggered inspection stays alive even when the hover surface is
+  // hidden: in "hover"/"save-and-hover" modes this is what keeps
+  // diagnostics and inlays updating.
+  inspectOnDemand(document, state, symbol.targetIds);
 
   if (!settings.hover) return null;
   return createHover(
@@ -261,7 +256,56 @@ connection.onHover(async ({ textDocument, position }) => {
     state.inspection,
     document.version,
     progress.targets(document.uri, document.version),
-    surfaceOptions(),
+    { ...surfaceOptions(), documentUri: document.uri },
+  );
+});
+
+function inspectOnDemand(
+  document: TextDocument,
+  state: DocumentState,
+  targetIds: readonly string[],
+): void {
+  if (
+    (settings.inspectOn === 'hover' || settings.inspectOn === 'save-and-hover') &&
+    targetIds.length > 0 &&
+    state.savedVersion === document.version &&
+    (
+      state.inspection?.sourceVersion !== document.version ||
+      targetIds.some((id) => !isAttempted(state.inspection, id))
+    )
+  ) {
+    void requestInspection(document, targetIds, 'interactive');
+  }
+}
+
+connection.onRequest('typegpu/targets', (params: {
+  textDocument: { uri: string };
+}) => {
+  const document = documents.get(params.textDocument.uri);
+  const state = document ? ensureFreshState(document) : undefined;
+  if (!document || !state) return null;
+  return describeTargets(
+    document.version,
+    state.discovered,
+    state.inspection,
+    progress.targets(document.uri, document.version),
+  );
+});
+
+connection.onRequest<WgslResponse | null, void>('typegpu/wgsl', (params: {
+  textDocument: { uri: string };
+  targetId: string;
+}) => {
+  const document = documents.get(params.textDocument.uri);
+  const state = document ? ensureFreshState(document) : undefined;
+  if (!document || !state) return null;
+  inspectOnDemand(document, state, [params.targetId]);
+  return generatedWgsl(
+    document.version,
+    state.discovered,
+    state.inspection,
+    params.targetId,
+    progress.targets(document.uri, document.version),
   );
 });
 
