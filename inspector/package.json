@@ -3,6 +3,7 @@
   "version": "0.5.0",
   "type": "module",
   "description": "Editor-focused TypeGPU inspector with synthesized probes, render defaults, and real WebGPU validation.",
+  "mcpName": "io.github.reczkok/typegpu-runtime-inspector-mcp",
   "license": "MIT",
   "repository": {
     "type": "git",

@@ -1,6 +1,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, realpathSync, statSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { mkdir, open, readFile, unlink } from 'node:fs/promises';
 import { dirname, join, relative, resolve, isAbsolute } from 'node:path';
@@ -451,6 +451,14 @@ function findOnPath(
  * is, npm is still reachable as the `npm-cli.js` that ships inside the Node
  * installation, run through that same node binary.
  */
+function realpathOr(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+
 export function resolveNpmInvocation(
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
@@ -479,7 +487,9 @@ export function resolveNpmInvocation(
   if (node) {
     // npm lives beside node in the installation prefix: `lib/node_modules`
     // on macOS/Linux, `node_modules` directly next to node.exe on Windows.
-    const nodeDirectory = dirname(node);
+    // The node on a GUI PATH is usually a shim (Homebrew, nvm, fnm, volta),
+    // so resolve the real binary first or the prefix is the shim directory.
+    const nodeDirectory = dirname(realpathOr(node));
     const cli = platform === 'win32'
       ? join(nodeDirectory, 'node_modules', 'npm', 'bin', 'npm-cli.js')
       : resolve(nodeDirectory, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js');
@@ -537,7 +547,11 @@ async function runRuntimeInstall(runtimeDir: string): Promise<void> {
       } else {
         rejectInstall(
           new Error(
-            `Could not install ${FALLBACK_INSPECTOR_SPEC} using ${npm.source} (npm exited ${code}).${tail ? `\n${tail}` : ''}`,
+            `Could not install ${FALLBACK_INSPECTOR_SPEC} using ${npm.source} (npm exited ${code}).${
+              /ETARGET|notarget|E404/.test(tail)
+                ? ` The npm registry has no ${FALLBACK_INSPECTOR_SPEC} yet; the runtime package is published alongside each editor release, so retry in a few minutes or set typegpuInspector.inspectorPackage to a published version.`
+                : ''
+            }${tail ? `\n${tail}` : ''}`,
           ),
         );
       }
@@ -647,7 +661,11 @@ function returnedTargetLabels(output: InspectorOutput): string[] {
 
 // Must exceed the inspector's own MAX_SESSION_ESTABLISHMENT_MS (240s) so the
 // transport never kills a request the inspector still considers on-budget.
-const ESTABLISHMENT_GRACE_MS = 300_000;
+// The first request on a fresh machine also carries the Playwright Chromium
+// download (~550 MB), which the inspector keeps outside its establishment
+// budget, so the transport cap has to absorb it: 15 minutes covers a 5 Mbit/s
+// connection.
+const ESTABLISHMENT_GRACE_MS = 900_000;
 
 // First contact with an npx-launched inspector can include downloading the
 // package and its Playwright Chromium, which takes minutes on a fresh

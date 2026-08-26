@@ -8,13 +8,13 @@ repository = "https://github.com/reczkok/typegpu-inspector"
 
 [language_servers.typegpu-inspector]
 name = "TypeGPU Inspector"
-languages = ["TypeScript", "TSX", "JavaScript", "JSX"]
-
-[context_servers.typegpu-inspector]
-name = "TypeGPU Inspector"
+# Zed's built-in language names. `.jsx` belongs to Zed's "JavaScript" language
+# (path_suffixes = js, jsx, mjs, cjs), so there is no separate "JSX" entry.
+languages = ["TypeScript", "TSX", "JavaScript"]
 
 [language_servers.typegpu-inspector.language_ids]
 "TypeScript" = "typescript"
 "TSX" = "typescriptreact"
 "JavaScript" = "javascript"
-"JSX" = "javascriptreact"
+
+[context_servers.typegpu-inspector]

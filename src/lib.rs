@@ -2,8 +2,8 @@ use std::env;
 use std::path::PathBuf;
 
 use zed_extension_api::{
-    self as zed, Command, ContextServerId, EnvVars, LanguageServerId, Project, Result, Worktree,
-    serde_json::Value,
+    self as zed, Command, ContextServerId, EnvVars, LanguageServerId,
+    LanguageServerInstallationStatus, Project, Result, Worktree, serde_json::Value,
     settings::LspSettings,
 };
 
@@ -11,7 +11,8 @@ const SERVER_ID: &str = "typegpu-inspector";
 const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const LANGUAGE_SERVER_PACKAGE: &str = "typegpu-inspector-language-server";
-const LANGUAGE_SERVER_ENTRY: &str = "node_modules/typegpu-inspector-language-server/dist/server.cjs";
+const LANGUAGE_SERVER_ENTRY: &str =
+    "node_modules/typegpu-inspector-language-server/dist/server.cjs";
 const DEV_LANGUAGE_SERVER_ENTRY: &str = "server/dist/server.cjs";
 
 const INSPECTOR_PACKAGE: &str = "typegpu-runtime-inspector-mcp";
@@ -21,10 +22,24 @@ const DEV_INSPECTOR_ENTRY: &str = "inspector/bin/typegpu-runtime-inspector-mcp.m
 
 struct TypeGpuInspectorExtension;
 
+/// Reports npm acquisition progress back to Zed's UI. Only the language server
+/// has a slot in that UI, so the context server path passes `None` and stays
+/// silent rather than borrowing an unrelated server's status line.
+fn report(status_id: Option<&LanguageServerId>, status: LanguageServerInstallationStatus) {
+    if let Some(id) = status_id {
+        zed::set_language_server_installation_status(id, &status);
+    }
+}
+
 /// Resolves a server entry script: the local monorepo build when running as a
 /// dev extension, otherwise an npm-acquired copy inside the extension work
 /// directory (Zed registry builds must not ship the servers themselves).
-fn resolve_entry(dev_entry: &str, package: &str, installed_entry: &str) -> Result<PathBuf> {
+fn resolve_entry(
+    status_id: Option<&LanguageServerId>,
+    dev_entry: &str,
+    package: &str,
+    installed_entry: &str,
+) -> Result<PathBuf> {
     let work_dir = env::current_dir()
         .map_err(|error| format!("could not read extension work directory: {error}"))?;
 
@@ -41,10 +56,28 @@ fn resolve_entry(dev_entry: &str, package: &str, installed_entry: &str) -> Resul
         }
     }
 
-    let installed = zed::npm_package_installed_version(package)?;
+    report(
+        status_id,
+        LanguageServerInstallationStatus::CheckingForUpdate,
+    );
+    let installed = zed::npm_package_installed_version(package).inspect_err(|error| {
+        report(
+            status_id,
+            LanguageServerInstallationStatus::Failed(error.clone()),
+        );
+    })?;
+
     if installed.as_deref() != Some(PACKAGE_VERSION) {
-        zed::npm_install_package(package, PACKAGE_VERSION)?;
+        report(status_id, LanguageServerInstallationStatus::Downloading);
+        zed::npm_install_package(package, PACKAGE_VERSION).inspect_err(|error| {
+            report(
+                status_id,
+                LanguageServerInstallationStatus::Failed(error.clone()),
+            );
+        })?;
     }
+
+    report(status_id, LanguageServerInstallationStatus::None);
     Ok(work_dir.join(installed_entry))
 }
 
@@ -93,6 +126,7 @@ impl zed::Extension for TypeGpuInspectorExtension {
 
         if needs_default_server {
             let server = resolve_entry(
+                Some(language_server_id),
                 DEV_LANGUAGE_SERVER_ENTRY,
                 LANGUAGE_SERVER_PACKAGE,
                 LANGUAGE_SERVER_ENTRY,
@@ -116,8 +150,12 @@ impl zed::Extension for TypeGpuInspectorExtension {
 
         // The same runtime inspector the language server launches, exposed as
         // a stdio MCP server for the Zed agent.
-        let inspector =
-            resolve_entry(DEV_INSPECTOR_ENTRY, INSPECTOR_PACKAGE, INSPECTOR_ENTRY)?;
+        let inspector = resolve_entry(
+            None,
+            DEV_INSPECTOR_ENTRY,
+            INSPECTOR_PACKAGE,
+            INSPECTOR_ENTRY,
+        )?;
 
         Ok(Command {
             command: zed::node_binary_path()?,

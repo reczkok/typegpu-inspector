@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -55,7 +55,9 @@ async function makeExecutable(directory: string, name: string): Promise<string> 
 }
 
 async function temporaryDirectory(prefix: string): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), prefix));
+  // macOS puts tmpdir under /var -> /private/var; resolve it so expectations
+  // built from this path match what the resolver derives after realpath.
+  const directory = await realpath(await mkdtemp(join(tmpdir(), prefix)));
   temporaryDirectories.push(directory);
   return directory;
 }
@@ -106,6 +108,23 @@ describe('npm resolution for the runtime install', () => {
     );
 
     expect(invocation.command).toBe(node);
+    expect(invocation.args).toEqual([join(cliDirectory, 'npm-cli.js')]);
+  });
+
+  it('resolves a node shim to its real installation before looking for npm-cli.js', async () => {
+    const prefix = await temporaryDirectory('typegpu-npm-real-');
+    const realBin = join(prefix, 'bin');
+    await mkdir(realBin, { recursive: true });
+    const realNode = await makeExecutable(realBin, 'node');
+    const cliDirectory = join(prefix, 'lib', 'node_modules', 'npm', 'bin');
+    await mkdir(cliDirectory, { recursive: true });
+    await writeFile(join(cliDirectory, 'npm-cli.js'), '// npm\n');
+    const shimDirectory = await temporaryDirectory('typegpu-npm-shim-');
+    await symlink(realNode, join(shimDirectory, 'node'));
+
+    const invocation = resolveNpmInvocation({ PATH: shimDirectory }, 'linux');
+
+    expect(invocation.command).toBe(join(shimDirectory, 'node'));
     expect(invocation.args).toEqual([join(cliDirectory, 'npm-cli.js')]);
   });
 

@@ -6,6 +6,7 @@ import {
   getErrorMessage,
 } from './browser/diagnostics.ts';
 import {
+  ensureChromiumInstalled,
   INSPECTOR_BROWSER_CONTEXT_OPTIONS,
   launchInspectorBrowser,
 } from './inspect/browser.ts';
@@ -82,6 +83,9 @@ export async function inspectTypegpuModule(
   input: InspectTypegpuModuleInput,
   options: InspectTypegpuModuleOptions = {},
 ): Promise<TypeGpuInspectionReport> {
+  // A first-run Chromium download happens before the deadline exists, so a
+  // slow connection cannot turn it into an inspection timeout.
+  await ensureChromiumInstalled();
   return runInspection(input, {
     deadline: createInspectionDeadline(input.timeoutMs ?? DEFAULT_INSPECTION_TIMEOUT_MS),
     signal: options.signal,

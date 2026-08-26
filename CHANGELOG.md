@@ -51,6 +51,16 @@ First public store release: VS Code Marketplace and the Zed extension registry.
   found.
 - The published language server bundle is minified.
 
+### Fixed
+
+- First-run Chromium download no longer counts against the inspection
+  timeout, and it announces itself on the server's output channel instead of
+  running silently for minutes.
+- The runtime installer resolves a Node.js shim (Homebrew, nvm, fnm, volta)
+  to its real installation before looking for `npm-cli.js` beside it.
+- A failed runtime install caused by a not-yet-published package version
+  says so, instead of only quoting npm's ETARGET output.
+
 ## [0.4.7] - 2026-08-05
 
 ### Changed

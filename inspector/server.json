@@ -1,0 +1,25 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.reczkok/typegpu-runtime-inspector-mcp",
+  "title": "TypeGPU Runtime Inspector",
+  "description": "Inspects TypeGPU modules in real headless WebGPU: pipelines, layouts, bindings, WGSL.",
+  "version": "0.5.0",
+  "websiteUrl": "https://github.com/reczkok/typegpu-inspector#readme",
+  "repository": {
+    "url": "https://github.com/reczkok/typegpu-inspector",
+    "source": "github",
+    "subfolder": "inspector"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "typegpu-runtime-inspector-mcp",
+      "version": "0.5.0",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

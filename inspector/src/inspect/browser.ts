@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import {
@@ -62,6 +63,18 @@ ${browserInstallHint()}`,
   }
 }
 
+/**
+ * Downloads Chromium ahead of the first launch when this Playwright copy has
+ * no browser yet. Callers run this before starting their inspection budget:
+ * a ~550 MB download must not count against a timeout sized for Vite and
+ * Chromium start-up, and it must be visible on stderr rather than silent.
+ */
+export async function ensureChromiumInstalled(): Promise<boolean> {
+  if (existsSync(chromium.executablePath())) return false;
+  await installChromiumOnce();
+  return true;
+}
+
 /** Runs `playwright install chromium` from this package's own Playwright copy. */
 function installChromiumOnce(): Promise<void> {
   if (!chromiumInstallPromise) {
@@ -80,6 +93,10 @@ function runChromiumInstall(): Promise<void> {
     dirname(createRequire(import.meta.url).resolve('playwright-chromium/package.json')),
     'cli.js',
   );
+  const startedAt = performance.now();
+  process.stderr.write(
+    '[typegpu-inspector] Playwright Chromium is not installed; downloading it once (about 550 MB). This can take several minutes on a slow connection.\n',
+  );
   return new Promise((resolveInstall, rejectInstall) => {
     const child = spawn(process.execPath, [cli, 'install', 'chromium'], {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -93,6 +110,9 @@ function runChromiumInstall(): Promise<void> {
     child.on('error', rejectInstall);
     child.on('close', (code) => {
       if (code === 0) {
+        process.stderr.write(
+          `[typegpu-inspector] Playwright Chromium downloaded in ${Math.round((performance.now() - startedAt) / 1000)}s.\n`,
+        );
         resolveInstall();
       } else {
         rejectInstall(
