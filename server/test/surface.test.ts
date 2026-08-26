@@ -1395,8 +1395,12 @@ fn main() {
       },
     );
     const warning = createDiagnostics('file:///workspace/rotate.ts', discovered, unreachable)[0]!;
-    expect(warning.message).toBe('rotateXY: code is unreachable (generated WGSL line 3)');
+    expect(warning.message).toBe('rotateXY: code is unreachable');
     expect(warning.range).toEqual(discovered.symbols[0]!.range);
+    expect(warning.relatedInformation?.[0]).toMatchObject({
+      message: 'in fn rotateXY',
+      location: { range: { start: { line: 2 } } },
+    });
 
     const probed = await materializeInspection(
       '/workspace',

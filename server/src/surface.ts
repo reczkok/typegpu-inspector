@@ -577,20 +577,21 @@ export function createDiagnostics(
         relatedInformation.push({
           location: { uri: target.generatedUri, range: generatedRange },
           message: mapping?.generatedDeclaration
-            ? `Generated WGSL location in ${mapping.generatedDeclaration.kind} ${mapping.generatedDeclaration.name}`
-            : 'Generated WGSL location',
+            ? `in ${mapping.generatedDeclaration.kind} ${mapping.generatedDeclaration.name}`
+            : 'generated WGSL',
         });
       }
       // High-confidence mappings pin the exact authored token. Medium
       // confidence (ordinal/inline heuristics that passed the ambiguity
       // refusals in sourceMapping.ts) still points at the guessed token, but
-      // the diagnostic says so. A declaration-level fallback is not a guess,
-      // so it names the generated line instead.
+      // the diagnostic says so. A declaration-level fallback is not a guess:
+      // the related location carries the generated line, and only when there
+      // is none does the message name it.
       const pinned = mapping?.sourceRange !== undefined &&
         mapping.strategy !== 'declaration-name';
       const suffix = pinned && mapping.confidence === 'medium'
         ? ' (approximate source location)'
-        : !pinned && mapping?.confidence !== 'high' && message.lineNum
+        : !pinned && relatedInformation.length === 0 && message.lineNum
         ? ` (generated WGSL line ${message.lineNum})`
         : '';
       diagnostics.push({
