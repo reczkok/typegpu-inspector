@@ -1,6 +1,6 @@
 {
   "name": "typegpu-runtime-inspector-mcp",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "type": "module",
   "description": "MCP server that validates TypeGPU code in a headless Chromium with WebGPU.",
   "mcpName": "io.github.reczkok/typegpu-runtime-inspector-mcp",
