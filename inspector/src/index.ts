@@ -147,6 +147,10 @@ export function createToolResult(formattedReport: unknown, isError = false) {
   };
 }
 
+/**
+ * Clients are not required to surface structuredContent (Claude Code shows
+ * only the text block), so the text carries a headline plus the same JSON.
+ */
 function formatToolText(structuredContent: Record<string, unknown>, isError: boolean): string {
   const parts = [`ok: ${String(structuredContent.ok ?? !isError)}`];
   if (isRecord(structuredContent.summary)) {
@@ -172,7 +176,7 @@ function formatToolText(structuredContent: Record<string, unknown>, isError: boo
   if (Array.isArray(structuredContent.nextActions) && structuredContent.nextActions.length > 0) {
     parts.push(`nextActions: ${structuredContent.nextActions.length}`);
   }
-  return parts.join('\n');
+  return `${parts.join('\n')}\n\n${JSON.stringify(structuredContent, null, 2)}`;
 }
 
 async function readClientRoots(

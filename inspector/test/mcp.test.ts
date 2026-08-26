@@ -29,15 +29,15 @@ describe('MCP tool metadata', () => {
     expect(LIST_TYPEGPU_EXPORTS_TOOL_CONFIG.outputSchema).toBeDefined();
   });
 
-  it('returns structured content plus a compact text summary', () => {
+  it('returns structured content plus a text block carrying the same payload', () => {
     const result = createToolResult({ ok: true, summary: { targetCount: 1 } });
 
     expect(result.structuredContent).toEqual({ ok: true, summary: { targetCount: 1 } });
     expect(result.content).toHaveLength(1);
     expect(result.content[0]?.type).toBe('text');
-    expect(result.content[0]?.text).toContain('ok: true');
-    expect(result.content[0]?.text).not.toContain('"structuredContent"');
-    expect(() => JSON.parse(result.content[0]?.text ?? '')).toThrow();
+    const text = result.content[0]?.text ?? '';
+    expect(text.startsWith('ok: true\n')).toBe(true);
+    expect(JSON.parse(text.slice(text.indexOf('{')))).toEqual(result.structuredContent);
   });
 
   it('can mark agent-facing tool results as errors without throwing protocol errors', () => {
