@@ -118,8 +118,12 @@ child.stdout.on('data', (chunk) => {
       finish(
         expectedHoverText.length > 0
           ? expectedHoverText.every((expected) => value.includes(expected))
-          : value.includes('inspection-defaults-applied') &&
-            value.includes('zero-argument tgpu.fn'),
+          // The default standard hover discloses that inputs were synthesized
+          // in one line and keeps the per-entry ledger and the setup note code
+          // for the deep hover and the full report.
+          : value.includes('Inspected with 1 synthesized input (arguments)') &&
+            value.includes('see deep hover or the full report') &&
+            !value.includes('inspection-defaults-applied'),
         message.result,
       );
     }

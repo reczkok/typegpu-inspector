@@ -60,7 +60,7 @@ export const READ_ONLY_TOOL_ANNOTATIONS = {
 export const INSPECT_TYPEGPU_TOOL_CONFIG = {
   title: 'Inspect TypeGPU',
   description:
-    "Agent-first TypeGPU inspection. Use this for probes, inspection modules, and exported TypeGPU symbols. It infers project/workspace roots, local TypeGPU dependencies, and Vite context; add project.root, project.dependencyAliases, target.virtualPath, or environment fields only when diagnostics ask for them. Runs modules quiescently by default (frame loops, queue submits, and pipeline dispatch/draw stubbed), so results are static validation evidence rather than proof the app renders; set environment.quiescent=false to observe real frame/submit behaviour. Returns top-level summary, targets, dependencySummary, warnings, and nextActions.",
+    "Inspect TypeGPU code in a headless Chromium with WebGPU, from an inline probe, an inspection module, or exported symbols. Project/workspace roots, local TypeGPU dependencies, and Vite context are inferred; add project.root, project.dependencyAliases, target.virtualPath, or environment fields only when diagnostics ask for them. Modules run quiescently by default (frame loops, queue submits, and pipeline dispatch/draw stubbed), so a passing target is static validation evidence rather than proof the app renders; set environment.quiescent=false to observe real frame/submit behaviour. Returns summary, targets, dependencySummary, warnings, and nextActions.",
   inputSchema: agentInspectionInputSchema,
   outputSchema: agentInspectionOutputSchema,
   annotations: INSPECTION_TOOL_ANNOTATIONS,
@@ -69,7 +69,7 @@ export const INSPECT_TYPEGPU_TOOL_CONFIG = {
 export const RESOLVE_TYPEGPU_CONTEXT_TOOL_CONFIG = {
   title: 'Resolve TypeGPU context',
   description:
-    'Explain the inferred project/package/workspace roots, TypeGPU dependency sources, versions, Vite config, warnings, and nextActions for a target path. Use when monorepo dependency resolution is uncertain.',
+    'Explain the inferred project, package, and workspace roots, TypeGPU dependency sources and versions, Vite config, warnings, and nextActions for a target path. Use when monorepo dependency resolution is uncertain.',
   inputSchema: resolveTypegpuContextInputSchema,
   outputSchema: resolveTypegpuContextOutputSchema,
   annotations: READ_ONLY_TOOL_ANNOTATIONS,
@@ -78,7 +78,7 @@ export const RESOLVE_TYPEGPU_CONTEXT_TOOL_CONFIG = {
 export const LIST_TYPEGPU_EXPORTS_TOOL_CONFIG = {
   title: 'List TypeGPU exports',
   description:
-    'Scan one TypeScript/JavaScript module for exported symbols and suggested inspect_typegpu symbol targets. Use before target.kind="symbols" when selector names are uncertain.',
+    'Scan one TypeScript or JavaScript module for exported symbols and suggested inspect_typegpu symbol targets. Use before target.kind="symbols" when selector names are uncertain.',
   inputSchema: listTypegpuExportsInputSchema,
   outputSchema: listTypegpuExportsOutputSchema,
   annotations: READ_ONLY_TOOL_ANNOTATIONS,

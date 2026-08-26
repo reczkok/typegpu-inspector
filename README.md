@@ -1,480 +1,172 @@
 # TypeGPU Inspector
 
-This is an editor inspector for TypeGPU. It runs the saved module in a local
-Chromium WebGPU environment, asks TypeGPU for the real WGSL and runtime
-descriptors, then puts the useful parts back into the TypeScript editor.
+An editor extension for Zed and VS Code. It runs the TypeGPU module you are
+editing in a headless Chromium with WebGPU and reports the WGSL and runtime
+descriptors TypeGPU produced back in the TypeScript buffer. It is not a static
+analyzer: it executes the module's top-level code, so use it on projects you
+trust.
 
-It is not another static linter. It executes top level module code, so use it
-on projects you trust.
+## What you get
+
+- Hovers on TypeGPU declarations: generated WGSL, entry points, bindings,
+  pipeline state, resource descriptors.
+- Inlay hints carrying each declaration's inspection status.
+- Diagnostics from the WGSL compiler and from WebGPU validation, mapped onto
+  the TypeScript token where that mapping is reliable.
+- Document links to the generated `.wgsl` file and the full report.
+- Schema layout: offsets, alignment, padding, host shareability, and a tighter
+  field order when one is provably smaller.
+
+Pipelines, shader functions, schemas, buffers, textures, views, samplers, query
+sets, bind group layouts and groups, vertex layouts, slots, accessors, GPU
+variables, and collections of them are recognised.
+
+## Install
+
+- VS Code: install `reczkok.typegpu-inspector` from the Marketplace.
+- Zed: install "TypeGPU Inspector" from the extension registry.
+
+For a development install, see [Development](#development).
+
+## Requirements
+
+- Node.js 20 or newer on `PATH`.
+- About 550 MB of disk for the one-time download described in
+  [What it downloads and runs](#what-it-downloads-and-runs).
+- A trusted project. Inspection executes the project's top-level TypeGPU
+  module code, which is why VS Code declares the extension unsupported in
+  Restricted Mode.
+
+## Configuration
+
+Zed reads these keys under `lsp.typegpu-inspector.initialization_options`. VS
+Code reads the same names with a `typegpuInspector.` prefix and shows them in
+its settings UI.
+
+| Zed key | VS Code key | Default | Meaning |
+| --- | --- | --- | --- |
+| `inspectOn` | `typegpuInspector.inspectOn` | `"save"` | `save`, `hover`, `save-and-hover`, `off` |
+| `warmUpOnOpen` | `typegpuInspector.warmUpOnOpen` | `true` | Prepare the session when a TypeGPU file opens |
+| `hoverDetailLevel` | `typegpuInspector.hoverDetailLevel` | `"standard"` | `compact`, `standard`, `deep` |
+| `inlayDetailLevel` | `typegpuInspector.inlayDetailLevel` | `"compact"` | `compact`, `summary`, `detailed` |
+| `hoverPresentation` | `typegpuInspector.hoverPresentation` | `{}` | Section visibility, order, budgets |
+| `timeoutMs` | `typegpuInspector.timeoutMs` | `45000` | Per inspection; clamped to 1000–600000 |
+| `maxWgslBytes` | `typegpuInspector.maxWgslBytes` | `2000000` | Clamped to 16384–64000000 |
+| `strictNames` | `typegpuInspector.strictNames` | `true` | TypeGPU strict generated names |
+| `features` | not exposed | `[]` | WebGPU features requested from the adapter |
+| `hover`, `inlayHints`, `diagnostics`, `documentLinks`, `sourceMapping`, `schemaLayoutHealth`, `schemaPackingSuggestions` | same names, prefixed | `true` | One switch per editor surface |
+| `inspectorPackage` | `typegpuInspector.inspectorPackage` | `"bundled"` | `"bundled"` or an npm package name |
+| `projectRoot` | `typegpuInspector.projectRoot` | `""` | Override workspace-root inference |
+
+The deprecated `detailLevel` maps onto the two detail levels above.
+`typegpuInspector.serverPath` is VS Code only and points at a local language
+server build.
+
+Hover and inlay detail are independent. `sourceMapping` is heuristic, and a
+diagnostic always keeps its link to the generated WGSL location.
+`hoverPresentation` sets each hover section to `auto`, `show`, or `hide`,
+reorders them with `sectionOrder`, and bounds the ones that can grow; VS Code's
+settings schema lists the section names and ranges. A lower detail level never
+abbreviates schemas, bindings, render targets, vertex attributes, or short
+resource descriptors.
+
+Invalid values are dropped and logged. Changes apply without a restart, except
+`serverPath`.
 
 ## What it downloads and runs
 
-The first time you inspect something, the extension downloads two things into
-its own storage directory, once per machine:
+The first inspection downloads `typegpu-runtime-inspector-mcp` from npm and a
+Playwright Chromium build (about 170 MB to download, 550 MB on disk), once
+per machine. It then executes
+the project's top-level TypeGPU module code inside that browser, so a module
+with import-time side effects performs them. VS Code asks once, in a modal
+dialog, before the first download.
 
-- `typegpu-runtime-inspector-mcp` — the runtime inspector, from npm;
-- a Playwright Chromium build (~150 MB) — the headless browser the inspection
-  runs in.
+Nothing is sent anywhere: no telemetry, no analytics, and no network traffic
+beyond those two downloads and whatever the inspected module requests.
 
-It then executes your project's **top-level TypeGPU module code** in that
-browser. That is how it can report real pipelines, real layouts, and the WGSL
-TypeGPU actually generated, but it also means a module with side effects at
-import time will perform them. Inspect projects you trust; the VS Code
-extension declares itself unsupported in Restricted Mode for the same reason,
-and asks once before the first download.
+VS Code keeps the inspector under
+`globalStorage/reczkok.typegpu-inspector/runtime` in its user directory
+(`~/Library/Application Support/Code/User`, `~/.config/Code/User`, or
+`%APPDATA%\Code\User`); Zed installs it into the extension's own work
+directory. Playwright caches browsers separately in
+`~/Library/Caches/ms-playwright`, `~/.cache/ms-playwright`, or
+`%LOCALAPPDATA%\ms-playwright`. Deleting either directory is safe. Setting
+`inspectOn` to `off` stops the extension from running anything.
 
-Nothing is sent anywhere. There is no telemetry, no analytics, and no network
-traffic beyond the two downloads above and whatever your own module requests.
-Inspection results never leave your machine.
+## Limitations
 
-The download lives in the editor's per-extension global storage:
+- The harness around the module is generated. It covers DOM lookups, assets,
+  TypeGPU setup, and resource creation, but a module needing an application
+  shell, a login flow, or a remote API at import time can fail before the
+  interesting value is reached.
+- Resources, layouts, and pipelines are created and validated; no application
+  draw or dispatch work is submitted. A passing target is validation evidence,
+  not proof that a frame renders correctly.
+- The adapter is usually a software WebGPU implementation, so it says nothing
+  about GPU performance or driver behaviour.
+- Missing shader arguments and slot values are synthesized when the type allows
+  it, and the hover records that. Synthesized render targets and vertex inputs
+  are inspection defaults, not the application's own.
+- Packing suggestions are exhaustive up to 14 top-level fields. Larger
+  structures get one candidate ordered by alignment and size, so no suggestion
+  does not prove the order is optimal.
 
-| Editor | Location |
-| --- | --- |
-| VS Code (macOS) | `~/Library/Application Support/Code/User/globalStorage/reczkok.typegpu-inspector/runtime` |
-| VS Code (Linux) | `~/.config/Code/User/globalStorage/reczkok.typegpu-inspector/runtime` |
-| VS Code (Windows) | `%APPDATA%\Code\User\globalStorage\reczkok.typegpu-inspector\runtime` |
-| Zed / npx | npm's cache (`npx` `_npx` directory) |
+## Agent access
 
-Playwright's browsers are cached separately, under `~/Library/Caches/ms-playwright`
-(macOS), `~/.cache/ms-playwright` (Linux), or `%LOCALAPPDATA%\ms-playwright`
-(Windows). Deleting either directory is safe: the next inspection downloads
-what it needs again. To stop the extension from running anything at all, set
-`typegpuInspector.inspectOn` to `off`.
+The same runtime ships as a stdio MCP server. The Zed extension registers it
+automatically; other clients use the published `typegpu-runtime-inspector-mcp`
+package. See [`inspector/README.md`](inspector/README.md).
 
-## Configure it
+## Development
 
-The defaults are meant to be usable without configuration. Inspection runs on
-save, hovers use the standard preset, and inlays only show status.
-
-This is a good starting point for Zed:
-
-```jsonc
-{
-  "lsp": {
-    "typegpu-inspector": {
-      "initialization_options": {
-        "inspectOn": "save",
-        "hoverDetailLevel": "standard",
-        "inlayDetailLevel": "compact",
-        "schemaPackingSuggestions": true
-      }
-    }
-  }
-}
-```
-
-The same setup in VS Code is:
-
-```jsonc
-{
-  "typegpuInspector.inspectOn": "save",
-  "typegpuInspector.hoverDetailLevel": "standard",
-  "typegpuInspector.inlayDetailLevel": "compact",
-  "typegpuInspector.schemaPackingSuggestions": true
-}
-```
-
-Zed settings live under `lsp.typegpu-inspector.initialization_options`. VS Code
-uses the same names with the `typegpuInspector.` prefix. VS Code also exposes
-them in its normal settings UI.
-
-### Hover detail
-
-`compact` shows the complete core shape and little secondary evidence.
-
-`standard` is the default. It adds the facts that matter for the kind of thing
-being inspected and a small WGSL excerpt.
-
-`deep` adds diagnostics, assumptions, runtime metadata, declarations, and more
-raw evidence.
-
-Schemas, bindings, render targets, vertex attributes, and short resource
-descriptors are not shortened just because the hover preset is lower. The
-presets mostly control material that can grow without a natural bound.
-
-### Inlay detail
-
-`compact` shows status only.
-
-`summary` adds one useful fact.
-
-`detailed` adds up to two useful facts.
-
-Hover and inlay presets are independent. A deep hover with compact inlays is a
-perfectly normal setup.
-
-The old `detailLevel` setting is still accepted. `minimal`, `default`, and
-`verbose` map to the new presets, but new configurations should use the two
-separate settings.
-
-### When inspection runs
-
-`inspectOn` accepts `save`, `hover`, `save-and-hover`, or `off`.
-
-`save` is the default and usually feels best. `hover` delays work until it is
-needed. `save-and-hover` does both. `off` keeps the editor surfaces available
-but stops automatic runtime inspection.
-
-`warmUpOnOpen` defaults to `true`. It prepares Chromium and the module session
-when a TypeGPU file opens, which makes the first real inspection less annoying.
-
-### Schema layout
-
-`schemaLayoutHealth` controls size, data, padding, and padding map notes. It
-defaults to `true`.
-
-`schemaPackingSuggestions` controls the search for a smaller valid field
-order. It also defaults to `true`. A suggestion is only shown when a concrete
-ordering is proven to use fewer bytes. If it is `false`, the search is skipped
-but the normal layout information stays visible.
-
-Host shareability is reported for buffer data schemas. Schema fields are kept
-complete through the limits WGSL requires implementations to support: 1,023
-members in a structure and composite nesting depth 15. If an out of spec
-schema has to be cut off, the hover says so.
-
-### Surface switches
-
-These all default to `true`:
-
-```jsonc
-{
-  "hover": true,
-  "inlayHints": true,
-  "diagnostics": true,
-  "documentLinks": true,
-  "sourceMapping": true,
-  "schemaLayoutHealth": true,
-  "schemaPackingSuggestions": true
-}
-```
-
-`sourceMapping` is still heuristic. It tries to attach a WGSL compiler problem
-to the relevant TypeScript token. The diagnostic always keeps a link to the
-generated WGSL location as the reliable fallback.
-
-### Hover control
-
-The normal presets should be enough for most people. If they are not,
-`hoverPresentation` can hide, force, or reorder sections and set budgets for
-the parts that can become long.
-
-```jsonc
-{
-  "hoverPresentation": {
-    "sections": {
-      "runtime": "hide",
-      "bindings": "show"
-    },
-    "sectionOrder": [
-      "resource",
-      "schema",
-      "bindings",
-      "wgslPreview"
-    ],
-    "wgslPreviewLines": 6,
-    "collectionItems": 12,
-    "declarations": 24,
-    "compilerMessages": 10,
-    "inspectionNotes": 6,
-    "assumptions": 8
-  }
-}
-```
-
-The section names are `wgslPreview`, `shaderFacts`, `bindings`, `resource`,
-`schema`, `pipelineState`, `pipelineContext`, `declarations`,
-`compilerMessages`, `inspectionNotes`, `assumptions`, and `runtime`.
-
-A section value can be `auto`, `show`, or `hide`. You only need to put the
-sections you care about in `sectionOrder`. Everything else keeps its normal
-role specific position.
-
-### Runtime limits and unusual projects
-
-The remaining runtime settings and their defaults are:
-
-```jsonc
-{
-  "timeoutMs": 45000,
-  "maxWgslBytes": 2000000,
-  "strictNames": true,
-  "features": [],
-  "projectRoot": "",
-  "inspectorPackage": "bundled"
-}
-```
-
-`timeoutMs` is clamped between 1,000 and 600,000. Cold session setup has its
-own allowance and does not consume this timeout.
-
-`maxWgslBytes` is clamped between 16,384 and 64,000,000.
-
-`projectRoot` overrides workspace detection when the repository layout is
-unusual. Leave it empty unless resolution tells you otherwise.
-
-`inspectorPackage` should stay `bundled`. It can point at a plain npm package
-name, optionally with a version, when comparing inspector builds.
-
-Invalid settings are ignored and written to the language server log. Setting
-changes apply without restarting the server.
-
-## Install it for development
-
-Node.js 20 or newer and pnpm are required. Clone the repository, then run:
+Node.js 20 or newer and pnpm are required. Run scripts from the repository
+root; the root lockfile is authoritative.
 
 ```sh
 pnpm setup
 pnpm build
 ```
 
-The inspector uses Playwright Chromium. The package install normally handles
-that. This command checks Node, Chromium, and WebGPU when something looks off:
+Checks are `pnpm check`, `pnpm test`, `pnpm test:browser`, `pnpm test:e2e`, and
+`cargo check`; `pnpm validate` runs all of them.
+`node inspector/bin/typegpu-runtime-inspector-mcp.mjs doctor` checks Node, npx,
+and the Chromium/WebGPU launch.
 
-```sh
-node inspector/bin/typegpu-runtime-inspector-mcp.mjs doctor
-```
+In Zed, run `zed: install dev extension` and select the repository root. The
+dev extension uses `server/dist/server.cjs` from the checkout, so rerun
+`pnpm build` and restart the language server after changing it.
 
-### Zed
-
-Open the command palette, run `zed: install dev extension`, and select the
-repository root.
-
-The dev extension looks for `server/dist/server.cjs` in this checkout. During
-language server work I still prefer setting the path explicitly, so there is
-no doubt about which build Zed launched:
-
-```jsonc
-{
-  "lsp": {
-    "typegpu-inspector": {
-      "binary": {
-        "path": "node",
-        "arguments": [
-          "/absolute/path/to/ZedPlugin/server/dist/server.cjs",
-          "--stdio"
-        ]
-      }
-    }
-  }
-}
-```
-
-Run `pnpm build` after changing the server, then restart its language server or
-reload Zed.
-
-### VS Code
-
-Build a local VSIX:
+In VS Code, build and install a local VSIX. It embeds the language server, so
+rebuilding the server alone does not update an installed extension.
 
 ```sh
 pnpm --dir editors/vscode package
-```
-
-The command prints the generated file path. Install that file with:
-
-```sh
 code --install-extension editors/vscode/typegpu-inspector-*.vsix --force
 ```
 
-Reload VS Code after replacing the VSIX. The package contains the current
-language server build, so rebuilding the server alone does not update the
-already installed VS Code extension.
+`src` holds the Rust Zed extension, `server` the language server and editor
+presentation, `inspector` the Chromium runtime and MCP server, and
+`editors/vscode` the VS Code client.
 
-## Use it
+### Releases
 
-Open a TypeScript or JavaScript file that uses TypeGPU and save it. The first
-run can be slow because Chromium, Vite, and dependency optimization need to
-start. Later inspections reuse the warm session.
+All four packages move together. `pnpm bump <version>` rewrites the version in
+`Cargo.toml`, `extension.toml`, and the four `package.json` files; run
+`cargo check` to refresh `Cargo.lock`, then record the release in
+`CHANGELOG.md`. Other version strings are injected at build time.
 
-Hover a top level TypeGPU declaration. The inspector understands shader
-functions, compute and render pipelines, schemas, buffers, textures, texture
-views, samplers, query sets, bind group layouts, bind groups, vertex layouts,
-slots, accessors, GPU variables, and nested collections of those resources.
+Tags drive the release workflows: `inspector-v<version>` and
+`server-v<version>` publish the npm packages through trusted publishing, and
+`v<version>` builds the VSIX as a workflow artifact. The Marketplace upload is
+manual.
 
-What appears depends on the value. A schema gets field offsets, alignment,
-padding, and host shareability. A texture gets its dimensions, format, usage,
-mip count, and sample count. A pipeline gets generated WGSL, entry points,
-bindings, layouts, render state, and WebGPU validation. A helper gets the
-specializations the inspector could safely synthesize.
+## Authorship
 
-Compiler and runtime failures are published as editor diagnostics. Generated
-WGSL and the complete inspection report are linked from the hover. The source
-buffer only gets small inlay hints, and their density is configured separately
-from hover detail.
+A significant part of this codebase was written by Claude, Anthropic's Claude
+Fable 5 model, working through Claude Code. The maintainer directed the work,
+reviewed the changes, and tested them.
 
-The inspector can derive useful targets from declarations that are not
-exported. It can also follow common top level factories and resource
-collections without calling a factory a second time. If a factory needs
-arguments that cannot be inferred safely, it is identified but not invoked.
+## License
 
-During inspection the module runs on a fresh browser page. The Vite server,
-Chromium process, and browser context are reused for speed, but JavaScript
-globals and TypeGPU resources do not carry over between inspections. The
-inspector creates and validates resources and pipelines. It does not submit
-arbitrary application draw or dispatch work.
-
-## A few concrete examples
-
-These were generated by the current standard hover formatter. Local temporary
-file URLs are omitted, but the content and ordering are unchanged.
-
-For a compute entry point:
-
-```text
-TypeGPU · compute entrypoint updateParticles
-✓ WGSL validated
-
-Open generated WGSL · 6 lines · 284 B · Open full inspection report
-
-Generated WGSL
-struct Params { delta: f32, };
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read_write> particles: array<vec4f>;
-@compute @workgroup_size(64) fn updateParticles(@builtin(global_invocation_id) id: vec3u) {
-  particles[id.x].x += params.delta;
-}
-
-Shader facts
-Entrypoints: compute updateParticles
-Workgroup updateParticles: 64 × 1 × 1 = 64 invocations
-
-Bindings
-Binding  Name       Visibility  WGSL                         WebGPU
-@0:0     params     compute     uniform · Params             buffer · uniform
-@0:1     particles  compute     storage, read_write · array<vec4f>  buffer · storage
-```
-
-For a schema:
-
-```text
-TypeGPU · schema Particle
-✓ Resource inspected
-
-Open full inspection report
-
-Schema
-struct · 48 B size · 16-byte alignment
-Host-shareable: Yes
-
-Memory layout: 48 B allocated · 24 B data · 24 B padding (50%)
-Padding map: 12 B before position · 12 B tail
-Possible tighter order: position → age → mass · 48 B → 32 B · save 16 B
-
-Field     Offset  Type   Layout
-age       0       f32    4 B · align 4 B
-position  16      vec4f  16 B · align 16 B
-mass      32      f32    4 B · align 4 B
-```
-
-For a texture:
-
-```text
-TypeGPU · texture resource image
-✓ Resource inspected
-
-Open full inspection report
-
-Resource
-texture · usage: sampled + render
-
-Properties
-size: [1024, 1024]
-format: rgba8unorm
-dimension: 2d
-mipLevelCount: 1
-sampleCount: 1
-```
-
-For a compiler failure:
-
-```text
-TypeGPU · compute entrypoint broken
-✗ Inspection failed
-
-unknown identifier 'lightDirection'
-wgsl-compilation
-
-Open generated WGSL · 3 lines · 73 B · Open full inspection report
-
-Generated WGSL
-@compute @workgroup_size(1) fn broken() {
-  let light = lightDirection;
-}
-
-Shader facts
-Entrypoints: compute broken
-Workgroup broken: 1 × 1 × 1 = 1 invocation
-
-WGSL compiler messages
-error line 2:15: unknown identifier 'lightDirection'
-```
-
-## Honest limitations
-
-There are a few places where silence means "I do not know", not "everything
-is perfect".
-
-The browser is real, but the application around it is a generated harness. It
-handles common DOM lookups, assets, TypeGPU setup, and resource creation. It
-will not reproduce a complicated application shell, login flow, remote API,
-or every bit of startup code. Modules with unusual top level side effects can
-still fail before the interesting value is reached.
-
-The inspector creates and validates shaders, resources, layouts, and
-pipelines. It does not run arbitrary draw or dispatch work and it does not
-claim that a rendered frame looks correct. The default software WebGPU adapter
-is useful for semantics, not GPU performance or vendor specific driver
-behavior.
-
-Some shader helpers need concrete arguments before TypeGPU can resolve them.
-The inspector synthesizes values when the type gives it a safe answer and says
-when it did so. If an argument or factory input cannot be inferred safely, it
-does not guess. Synthesized render targets and vertex inputs are inspection
-defaults, not proof that they match the application.
-
-WGSL to TypeScript diagnostic mapping is heuristic. The generated WGSL
-location is kept as the reliable source when generated code has moved too far
-from the original token.
-
-Packing suggestions are exact for structures with up to 14 top level fields.
-Larger structures try one sensible order based on alignment and size. A shown
-suggestion is a real smaller layout, but no suggestion on a large structure
-does not prove that the current order is optimal. Custom layouts are left
-alone when the inspector cannot reproduce their offsets safely.
-
-## Agent access
-
-The same runtime is available as an MCP server. The Zed extension registers it
-as `typegpu-inspector` automatically. Other clients can use the published
-`typegpu-runtime-inspector-mcp` package. Setup details and tool documentation
-live in `inspector/README.md`.
-
-## Work on the repository
-
-The usual checks are:
-
-```sh
-pnpm check
-pnpm test
-pnpm test:browser
-pnpm test:e2e
-cargo check
-```
-
-`pnpm validate` runs all of them.
-
-The repository is small enough to navigate without much ceremony. `src`
-contains the Rust Zed extension. `server` contains discovery, the language
-server, and editor presentation. `inspector` contains the Chromium WebGPU
-runtime and MCP server. `editors/vscode` contains the VS Code client. `scripts`
-contains corpus and coverage tools.
-
-Releases move every package at once. `pnpm bump <version>` rewrites the
-version in `Cargo.toml`, `extension.toml`, and all four `package.json` files;
-run `cargo check` afterwards to refresh `Cargo.lock`, and record the release in
-`CHANGELOG.md`. Version strings in source are injected at build time from the
-owning package's `package.json`, so nothing else needs editing.
-
-The root lockfile is authoritative. Run repository scripts from the root.
+MIT. See [LICENSE](LICENSE).

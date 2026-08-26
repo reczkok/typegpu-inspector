@@ -108,9 +108,24 @@ describe('inspection surface', () => {
     const symbol = discovered.symbols[0]!;
     const hover = createHover(symbol, discovered, inspection, 1);
     const markdown = (hover.contents as { value: string }).value;
-    expect(markdown).toContain('Showing 2 synthesized specializations');
+    // The specializations themselves are the fact; the preamble explaining
+    // where they came from is provenance and belongs in deep.
+    expect(markdown).not.toContain('Showing 2');
+    expect(markdown).not.toContain('synthesized');
     expect(markdown).toContain('Context 1 of 2 · evolveVec(vec2f, vec2f)');
     expect(markdown).toContain('Context 2 of 2 · evolveVec(vec4f, vec4f)');
+
+    const deepHover = createHover(
+      symbol,
+      discovered,
+      inspection,
+      1,
+      new Set(),
+      { ...defaultSurfaceOptions, hoverDetailLevel: 'deep' },
+    );
+    expect((deepHover.contents as { value: string }).value).toContain(
+      'Showing 2 specializations inferred from finite parameter types.',
+    );
 
     const hints = createInlayHints(
       discovered,
@@ -138,7 +153,7 @@ describe('inspection surface', () => {
       1,
     );
     expect((boundedHover.contents as { value: string }).value).toContain(
-      'Showing the first 8 synthesized specializations (limit 8); ' +
+      'Showing the first 8 specializations (limit 8); ' +
         'additional finite combinations were omitted.',
     );
   });
@@ -1609,5 +1624,275 @@ describe('surface options and unreported tracking', () => {
     for (const diagnostic of unmapped) {
       expect(diagnostic.range).toEqual(symbol.range);
     }
+  });
+});
+
+describe('hover datasheet discipline', () => {
+  const bufferSource = `const counters = root.createBuffer(Counters).$usage('uniform');`;
+  const textureSource = `const albedo = root.createTexture(props).$usage('sampled', 'render');`;
+
+  async function inspectResource(
+    fileName: string,
+    source: string,
+    resource: Record<string, unknown>,
+  ) {
+    const discovered = discoverTypeGpuModule(`/workspace/${fileName}`, source);
+    const inspection = await materializeInspection(
+      '/workspace',
+      `/workspace/${fileName}`,
+      1,
+      discovered,
+      {
+        ok: true,
+        targets: [{
+          label: discovered.targets[0]!.label,
+          kind: 'resource',
+          ok: true,
+          resource: resource as never,
+        }],
+      },
+    );
+    return { discovered, inspection };
+  }
+
+  function hoverAt(
+    discovered: Parameters<typeof createHover>[0] extends never ? never : any,
+    inspection: any,
+    level: 'compact' | 'standard' | 'deep',
+    presentation?: Record<string, unknown>,
+  ): string {
+    const hover = createHover(
+      discovered.symbols[0]!,
+      discovered,
+      inspection,
+      1,
+      new Set(),
+      {
+        ...defaultSurfaceOptions,
+        hoverDetailLevel: level,
+        ...(presentation ? { hoverPresentation: presentation as never } : {}),
+      },
+    );
+    return (hover.contents as { value: string }).value;
+  }
+
+  it('decodes buffer usage bits into the resource line and hides the raw mask', async () => {
+    const { discovered, inspection } = await inspectResource(
+      'buffers.ts',
+      bufferSource,
+      {
+        resourceType: 'buffer',
+        sizeBytes: 48,
+        usages: ['uniform'],
+        properties: { flags: 76, destroyed: false, initialized: false },
+      },
+    );
+
+    const standard = hoverAt(discovered, inspection, 'standard');
+    expect(standard).toContain(
+      '`buffer` · 48 B size · `uniform` · `copy-src` · `copy-dst`',
+    );
+    expect(standard).not.toContain('flags');
+    expect(standard).not.toContain('76');
+    // A bare negative boolean is not a fact a shader author reads.
+    expect(standard).not.toContain('destroyed');
+    expect(standard).not.toContain('initialized');
+    expect(standard).not.toContain('**Properties**');
+
+    expect(hoverAt(discovered, inspection, 'compact')).not.toContain('flags');
+
+    const deep = hoverAt(discovered, inspection, 'deep');
+    expect(deep).toContain('**usage flags:** 0x4c (uniform | copy-src | copy-dst)');
+    expect(deep).toContain('**destroyed:** false');
+  });
+
+  it('decodes texture usage bits without repeating the TypeGPU usage names', async () => {
+    const { discovered, inspection } = await inspectResource(
+      'textures.ts',
+      textureSource,
+      {
+        resourceType: 'texture',
+        usages: ['sampled', 'render'],
+        properties: {
+          size: [512, 512],
+          format: 'rgba8unorm',
+          dimension: '2d',
+          mipLevelCount: 1,
+          sampleCount: 1,
+          viewFormats: [],
+          destroyed: false,
+          flags: 22,
+        },
+      },
+    );
+
+    const standard = hoverAt(discovered, inspection, 'standard');
+    // 22 = TEXTURE_BINDING | RENDER_ATTACHMENT | COPY_DST; the first two are
+    // already said by `sampled` and `render`.
+    expect(standard).toContain(
+      '`texture` · `sampled` · `render` · `copy-dst`',
+    );
+    expect(standard).not.toContain('texture-binding');
+    expect(standard).not.toContain('render-attachment');
+    expect(standard).toContain('**mipLevelCount:** 1');
+    expect(standard).toContain('**sampleCount:** 1');
+    // Empty and negative values state nothing.
+    expect(standard).not.toContain('viewFormats');
+    expect(standard).not.toContain('destroyed');
+
+    expect(hoverAt(discovered, inspection, 'deep')).toContain(
+      '**usage flags:** 0x16 (texture-binding | render-attachment | copy-dst)',
+    );
+  });
+
+  it('condenses the assumption ledger to one line at standard and keeps it full at deep', async () => {
+    const discovered = discoverTypeGpuModule(
+      '/workspace/pipeline.ts',
+      `const pipeline = root.createRenderPipeline({ vertex, fragment });`,
+    );
+    const inspection = await materializeInspection(
+      '/workspace',
+      '/workspace/pipeline.ts',
+      1,
+      discovered,
+      {
+        ok: true,
+        targets: [{
+          label: discovered.targets[0]!.label,
+          kind: 'render-pipeline',
+          ok: true,
+          wgsl: '@vertex fn main() -> @builtin(position) vec4f { return vec4f(); }',
+          diagnostics: [{
+            code: 'inspection-defaults-applied',
+            severity: 'note',
+            message: 'The editor inspector synthesized missing runtime inputs.',
+            hint: 'Synthesized vertex attributes. Synthesized fragment targets.',
+          }],
+          ledger: [
+            {
+              tier: 'target',
+              kind: 'vertex-attribs',
+              key: 'vertex-attribs:pipeline',
+              status: 'satisfied',
+              provider: 'synthesis',
+              provenance: 'Synthesized vertex attributes from the vertex layout.',
+            },
+            {
+              tier: 'target',
+              kind: 'fragment-targets',
+              key: 'fragment-targets:pipeline',
+              status: 'satisfied',
+              provider: 'synthesis',
+              provenance: 'Synthesized one bgra8unorm color target.',
+            },
+            {
+              tier: 'environment',
+              kind: 'device-session',
+              key: 'device-session:quiescent-run',
+              status: 'satisfied',
+              provider: 'synthesis',
+              provenance: 'Quiescent run: no application frame was executed.',
+            },
+          ],
+        }],
+      },
+    );
+
+    const compact = hoverAt(discovered, inspection, 'compact');
+    expect(compact).toContain('**✓ WGSL validated**');
+    expect(compact).not.toContain('Inspection assumptions');
+    expect(compact).not.toContain('Inspection notes');
+    expect(compact).not.toContain('Inspected with');
+
+    const standard = hoverAt(discovered, inspection, 'standard');
+    expect(standard).toContain(
+      '_Inspected with 2 synthesized inputs (vertex attribs, targets)' +
+        ' — see deep hover or the full report._',
+    );
+    expect(standard).not.toContain('Inspection assumptions');
+    expect(standard).not.toContain('Inspection notes');
+    // The editor's own quiescent default is never one of the user's assumptions.
+    expect(standard).not.toContain('Quiescent');
+    expect(standard).not.toContain('device-session');
+
+    const deep = hoverAt(discovered, inspection, 'deep');
+    expect(deep).toContain('**Inspection assumptions**');
+    expect(deep).toContain('`vertex-attribs`');
+    expect(deep).toContain('`fragment-targets`');
+    expect(deep).toContain('**Inspection notes**');
+    expect(deep).not.toContain('Inspected with 2 synthesized inputs');
+    // Disclosed once, as a runtime fact about how the pass ran.
+    expect(deep).toContain(
+      'Quiescent run:\u200b no application frame was executed.',
+    );
+    expect(deep).not.toContain('`device-session`');
+
+    const forced = hoverAt(discovered, inspection, 'standard', {
+      sections: { assumptions: 'show' },
+      sectionOrder: [],
+    });
+    expect(forced).toContain('**Inspection assumptions**');
+    expect(forced).toContain('`vertex-attribs`');
+    expect(forced).toContain('`fragment-targets`');
+    expect(forced).not.toContain('Inspected with 2 synthesized inputs');
+
+    // Assumptions never leak into inlays at any density.
+    for (const inlayDetailLevel of ['compact', 'summary', 'detailed'] as const) {
+      const hints = createInlayHints(
+        discovered,
+        inspection,
+        1,
+        { start: { line: 0, character: 0 }, end: { line: 20, character: 0 } },
+        new Set(),
+        { ...defaultSurfaceOptions, inlayDetailLevel },
+      );
+      expect(hints[0]?.label).not.toContain('assumption');
+      expect(hints[0]?.label).not.toContain('synthesi');
+      expect(hints[0]?.tooltip).not.toContain('assumption');
+      if (inlayDetailLevel === 'compact') expect(hints[0]?.label).toBe('✓');
+    }
+  });
+
+  it('reports unmet ledger requirements in the same single standard line', async () => {
+    const discovered = discoverTypeGpuModule(
+      '/workspace/slots.ts',
+      `const shaded = tgpu.fn([])(() => { 'use gpu'; });`,
+    );
+    const inspection = await materializeInspection(
+      '/workspace',
+      '/workspace/slots.ts',
+      1,
+      discovered,
+      {
+        ok: true,
+        targets: [{
+          label: discovered.targets[0]!.label,
+          kind: 'resolvable',
+          ok: true,
+          wgsl: 'fn shaded() {}',
+          ledger: [
+            {
+              tier: 'resource',
+              kind: 'slot-value',
+              key: 'slot-value:tint',
+              status: 'satisfied',
+              provider: 'module-scope',
+              provenance: 'Bound from module scope.',
+            },
+            {
+              tier: 'resource',
+              kind: 'argument-values',
+              key: 'argument-values:shaded',
+              status: 'unsatisfied',
+            },
+          ],
+        }],
+      },
+    );
+
+    expect(hoverAt(discovered, inspection, 'standard')).toContain(
+      '_Inspected with 1 synthesized input (slot values) and 1 unmet requirement' +
+        ' (arguments) — see deep hover or the full report._',
+    );
   });
 });

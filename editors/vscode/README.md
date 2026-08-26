@@ -1,67 +1,54 @@
 # TypeGPU Inspector for VS Code
 
-Deep TypeGPU shader inspection in the editor. The extension runs your TypeGPU
-modules through a real Chromium/WebGPU runtime and brings the results back to
-the TypeScript buffer:
+TypeGPU shader inspection in the editor. The extension runs the module you are
+editing in a headless Chromium with WebGPU and reports what TypeGPU produced
+back in the TypeScript buffer:
 
-- hovers with generated WGSL, exact memory layouts, bindings, and pipeline
-  state;
-- compact ✓/✗ inlay hints;
-- compiler and runtime diagnostics mapped back to your source;
-- links to the complete generated `.wgsl` documents.
+- hovers with generated WGSL, memory layouts, bindings, and pipeline state;
+- ✓/✗ inlay hints per declaration;
+- WGSL compiler and WebGPU validation diagnostics, mapped onto your source;
+- links to the generated `.wgsl` documents and the full inspection report.
 
-Opening a TypeGPU TypeScript file starts warming the inspection session in the
-background; the status bar shows "TypeGPU warming up" while that happens. The
-first run in a workspace can take a few minutes — it downloads the runtime
-inspector and Playwright Chromium once, then boots and caches a bundler
-session. Every later inspection reuses the warm session and finishes in
-seconds. Node.js 20+ is required.
+## First run
 
-## What it downloads and runs
+Opening a TypeGPU file starts warming the inspection session in the background;
+the status bar shows "TypeGPU warming up" while that happens. Before the first
+inspection the extension asks, in a modal dialog, whether it may download
+`typegpu-runtime-inspector-mcp` from npm and a Playwright Chromium build
+(about 170 MB to download, 550 MB on disk) into its global storage. It then
+executes the project's top-level TypeGPU module code inside that browser, so a
+module with import-time side effects performs them. The extension declares
+itself unsupported in Restricted Mode for the same reason.
 
-The extension asks once, before the first inspection, and then downloads into
-its own global storage directory:
+Nothing is sent anywhere: no telemetry, no analytics, and no network traffic
+beyond those two downloads and whatever the module requests. Deleting the
+download is safe. Answer "Not now" to skip inspection for the session, or set
+`typegpuInspector.inspectOn` to `off`.
 
-- `typegpu-runtime-inspector-mcp` — the runtime inspector, from npm;
-- a Playwright Chromium build (~150 MB) — the headless browser it runs in.
+The first inspection in a workspace can take a few minutes; later ones reuse
+the warm session and finish in seconds. Node.js 20 or newer is required.
 
-It then executes your project's **top-level TypeGPU module code** in that
-browser. That is what makes real pipelines, real memory layouts, and the
-actually generated WGSL available in the editor, and it also means a module
-with import-time side effects will perform them. For that reason the extension
-declares itself unsupported in Restricted Mode: trust the folder to enable it.
+## Settings and commands
 
-Nothing is sent anywhere — no telemetry, no analytics, no network traffic
-beyond those two downloads and whatever your own module requests. Results
-never leave your machine.
+Settings live under `typegpuInspector.*` and appear in the settings UI:
+inspection trigger, hover and inlay detail, timeouts, and one switch per editor
+surface. The
+[project README](https://github.com/reczkok/typegpu-inspector#configuration)
+documents them.
 
-The runtime lives in the extension's global storage:
+Under "TypeGPU Inspector:" the command palette offers Restart Server, Show
+Output Log, Run Environment Doctor, Select Hover Detail, and Select Inlay
+Detail. The status bar item opens the same detail pickers.
 
-- macOS: `~/Library/Application Support/Code/User/globalStorage/reczkok.typegpu-inspector/runtime`
-- Linux: `~/.config/Code/User/globalStorage/reczkok.typegpu-inspector/runtime`
-- Windows: `%APPDATA%\Code\User\globalStorage\reczkok.typegpu-inspector\runtime`
+## WGSL syntax
 
-Playwright's browsers are cached separately in `~/Library/Caches/ms-playwright`
-(macOS), `~/.cache/ms-playwright` (Linux), or `%LOCALAPPDATA%\ms-playwright`
-(Windows). Deleting either is safe — the next inspection re-downloads what it
-needs. Answer "Not now" to the first-run notice to skip runtime inspection for
-the session, or set `typegpuInspector.inspectOn` to `off` permanently.
+WGSL highlighting for hover previews and generated `.wgsl` files uses the
+grammar from [wgsl-analyzer](https://github.com/wgsl-analyzer/wgsl-analyzer),
+licensed MIT OR Apache-2.0. An installed WGSL extension still enhances the
+generated documents.
 
-The extension bundles WGSL syntax highlighting (grammar vendored from
-[wgsl-analyzer](https://github.com/wgsl-analyzer/wgsl-analyzer)) for hover
-previews and generated `.wgsl` files. It coexists with dedicated WGSL
-extensions — if you have one installed, its language server also enhances the
-generated shader documents.
+## Authorship
 
-All settings live under `typegpuInspector.*` — inspection trigger, timeouts,
-and per-surface feature toggles. See the
-[project repository](https://github.com/reczkok/typegpu-inspector) for full
-documentation.
-
-Hover depth and inlay density are configured independently. The defaults are a
-role-adaptive `standard` hover and status-only `compact` inlays; use the
-TypeGPU status-bar menu to select either one. Hovers keep complete schema
-fields, bindings, render targets, vertex attributes, and resource descriptors.
-Only unbounded material such as WGSL excerpts, collections, declarations,
-notes, and provenance is budgeted. A complete generated inspection report is
-linked near the top of every completed target hover.
+A significant part of this codebase was written by Claude, Anthropic's Claude
+Fable 5 model, working through Claude Code, with the maintainer directing,
+reviewing, and testing the work.

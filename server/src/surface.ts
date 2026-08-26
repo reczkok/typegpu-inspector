@@ -33,6 +33,7 @@ import type {
   InspectorResourceReport,
   InspectorSchemaReport,
   InspectorDiagnostic,
+  InspectorLedgerEntry,
   InspectorTargetReport,
 } from './protocol.js';
 import {
@@ -269,21 +270,28 @@ export function createHover(
   inspectingTargetIds: ReadonlySet<string> = new Set(),
   options: SurfaceOptions = defaultSurfaceOptions,
 ): Hover {
+  const level = effectiveHoverLevel(options);
   const lines: string[] = [
     `### TypeGPU · ${humanRole(symbol.role)} \`${escapeInline(symbol.name)}\``,
   ];
   if (symbol.specializationSynthesis) {
     const synthesis = symbol.specializationSynthesis;
-    lines.push(
-      '',
-      synthesis.truncated
-        ? `_Showing the first ${synthesis.emitted} synthesized specializations ` +
-          `(limit ${synthesis.limit}); additional finite combinations were omitted._`
-        : `_Showing ${plural(
-          synthesis.emitted,
-          'synthesized specialization',
-        )} inferred from finite parameter types._`,
-    );
+    // The specializations themselves are the fact; how they were derived is
+    // provenance. Only a truncated list still needs a preamble below deep,
+    // because then the hover is not showing every specialization that exists.
+    if (synthesis.truncated) {
+      lines.push(
+        '',
+        `_Showing the first ${synthesis.emitted} specializations ` +
+          `(limit ${synthesis.limit}); additional finite combinations were omitted._`,
+      );
+    } else if (level === 'deep') {
+      lines.push(
+        '',
+        `_Showing ${plural(synthesis.emitted, 'specialization')} inferred ` +
+          'from finite parameter types._',
+      );
+    }
   }
   const inspecting = symbol.targetIds.some((id) => inspectingTargetIds.has(id));
   if (inspecting) {
@@ -350,11 +358,15 @@ export function createHover(
     }
     appendTarget(lines, target, inspection.output, options);
   }
-  const level = effectiveHoverLevel(options);
   const hasRuntimeIssues = (inspection.output.warnings?.length ?? 0) > 0 ||
     (inspection.output.pageErrors?.length ?? 0) > 0;
   if (hoverSectionEnabled(options, 'runtime', level === 'deep' || hasRuntimeIssues)) {
-    appendRuntimeSummary(lines, inspection.output, level === 'deep');
+    appendRuntimeSummary(
+      lines,
+      inspection.output,
+      level === 'deep',
+      level === 'deep' ? editorDefaultLedgerEntries(materialized) : [],
+    );
   }
   return hover(lines, symbol.range, options.presentation);
 }
@@ -723,12 +735,19 @@ function presentationSettings(options: SurfaceOptions): HoverPresentationSetting
   return options.hoverPresentation ?? { sections: {}, sectionOrder: [] };
 }
 
+function hoverSectionMode(
+  options: SurfaceOptions,
+  id: HoverSectionId,
+): 'auto' | 'show' | 'hide' {
+  return presentationSettings(options).sections[id] ?? 'auto';
+}
+
 function hoverSectionEnabled(
   options: SurfaceOptions,
   id: HoverSectionId,
   auto: boolean,
 ): boolean {
-  const mode = presentationSettings(options).sections[id] ?? 'auto';
+  const mode = hoverSectionMode(options, id);
   return mode === 'show' || (mode === 'auto' && auto);
 }
 
@@ -911,6 +930,22 @@ function appendTarget(
   const failureBannerDiagnostic = report.ok
     ? undefined
     : appendFailure(lines, report);
+
+  // Provenance is disclosed, not broadcast. Standard gets one line saying
+  // that inputs were synthesized and where the detail lives; deep (and an
+  // explicit `assumptions: "show"`) get the per-entry ledger.
+  const assumptionsMode = hoverSectionMode(options, 'assumptions');
+  const assumptions = hoverAssumptions(report);
+  const listAssumptions = assumptionsMode !== 'hide' &&
+    (assumptionsMode === 'show' || level === 'deep');
+  if (
+    !listAssumptions &&
+    assumptionsMode !== 'hide' &&
+    level === 'standard' &&
+    assumptions.length > 0
+  ) {
+    lines.push('', assumptionSummaryLine(assumptions));
+  }
   appendArtifactLinks(lines, target);
 
   const blocks = new Map<HoverSectionId, string[]>();
@@ -966,9 +1001,13 @@ function appendTarget(
     addBlock('compilerMessages', (block) =>
       appendCompilerMessages(block, report, compilerMessageBudget(options, level)));
   }
+  // Setup notes describe how inspection was arranged, which is the same
+  // provenance the assumption line covers — they follow the same policy.
+  const listNotes = hoverSectionMode(options, 'inspectionNotes') === 'show' ||
+    level === 'deep';
   const remainingDiagnostics = (report.diagnostics ?? []).filter((diagnostic) =>
     diagnostic !== failureBannerDiagnostic &&
-    (level === 'deep' || isMaterialInspectionNote(diagnostic)));
+    (listNotes || !isInformationalDiagnostic(diagnostic)));
   if (
     remainingDiagnostics.length > 0 &&
     enabled('inspectionNotes', level !== 'compact')
@@ -976,11 +1015,14 @@ function appendTarget(
     addBlock('inspectionNotes', (block) =>
       appendInspectionNotes(block, remainingDiagnostics, noteBudget(options, level)));
   }
-  const ledger = (report.ledger ?? []).filter((entry) =>
-    level === 'deep' || entry.status === 'unsatisfied');
-  if (ledger.length > 0 && enabled('assumptions', level === 'deep')) {
+  if (listAssumptions && assumptions.length > 0) {
     addBlock('assumptions', (block) =>
-      appendAssumptions(block, ledger, assumptionBudget(options, level), level === 'deep'));
+      appendAssumptions(
+        block,
+        assumptions,
+        assumptionBudget(options, level),
+        level === 'deep',
+      ));
   }
   for (const id of orderedHoverSections(target, options)) {
     const block = blocks.get(id);
@@ -1182,6 +1224,81 @@ function appendInspectionNotes(
   if (diagnostics.length > limit) {
     lines.push(`_…and ${diagnostics.length - limit} more notes. Open the full inspection report for all._`);
   }
+}
+
+/**
+ * A quiescent run is the editor's own default rather than something the
+ * inspected code implied, so it never counts as an assumption in a hover. It
+ * is disclosed once, under runtime, in deep hovers and the full report.
+ */
+const EDITOR_DEFAULT_LEDGER_KEYS = new Set(['device-session:quiescent-run']);
+
+function hoverAssumptions(
+  report: InspectorTargetReport,
+): NonNullable<InspectorTargetReport['ledger']> {
+  return (report.ledger ?? []).filter((entry) =>
+    !EDITOR_DEFAULT_LEDGER_KEYS.has(entry.key));
+}
+
+function editorDefaultLedgerEntries(
+  targets: readonly MaterializedTarget[],
+): InspectorLedgerEntry[] {
+  return targets.flatMap((target) =>
+    (target.report.ledger ?? []).filter((entry) =>
+      EDITOR_DEFAULT_LEDGER_KEYS.has(entry.key)));
+}
+
+const LEDGER_KIND_LABELS: Record<string, string> = {
+  'slot-value': 'slot values',
+  'argument-values': 'arguments',
+  'vertex-attribs': 'vertex attribs',
+  'fragment-targets': 'targets',
+  'pipeline-descriptor': 'pipeline descriptor',
+  'dom-setup': 'DOM',
+  'media-stream': 'media stream',
+  'static-asset': 'static assets',
+  'module-load': 'module load',
+  'device-session': 'device session',
+  'dependency-resolution': 'dependencies',
+};
+
+const MAX_SUMMARIZED_LEDGER_KINDS = 3;
+
+/**
+ * One line, categories only: the reader needs to know that inputs were filled
+ * in for them and where the detail lives, not which values were chosen.
+ */
+function assumptionSummaryLine(
+  ledger: NonNullable<InspectorTargetReport['ledger']>,
+): string {
+  const satisfied = ledgerKindLabels(
+    ledger.filter((entry) => entry.status !== 'unsatisfied'),
+  );
+  const unsatisfied = ledgerKindLabels(
+    ledger.filter((entry) => entry.status === 'unsatisfied'),
+  );
+  const parts = [
+    satisfied.length > 0
+      ? `${plural(satisfied.length, 'synthesized input')} (${joinKindLabels(satisfied)})`
+      : undefined,
+    unsatisfied.length > 0
+      ? `${plural(unsatisfied.length, 'unmet requirement')} (${joinKindLabels(unsatisfied)})`
+      : undefined,
+  ].filter((part): part is string => part !== undefined);
+  return `_Inspected with ${parts.join(' and ')} — see deep hover or the full report._`;
+}
+
+function ledgerKindLabels(
+  entries: NonNullable<InspectorTargetReport['ledger']>,
+): string[] {
+  return uniqueStrings(entries.map((entry) =>
+    LEDGER_KIND_LABELS[entry.kind] ?? entry.kind.replaceAll('-', ' ')));
+}
+
+function joinKindLabels(labels: string[]): string {
+  return labels.length > MAX_SUMMARIZED_LEDGER_KINDS
+    ? `${labels.slice(0, MAX_SUMMARIZED_LEDGER_KINDS).join(', ')}, …`
+    : labels.join(', ');
 }
 
 function appendAssumptions(
@@ -1494,9 +1611,7 @@ function appendResourceReport(
     resource.alignmentBytes !== undefined
       ? `${resource.alignmentBytes}-byte alignment`
       : undefined,
-    resource.usages?.length
-      ? `usage: ${resource.usages.map((usage) => `\`${escapeInline(usage)}\``).join(' + ')}`
-      : undefined,
+    ...resourceUsageNames(resource).map((usage) => `\`${escapeInline(usage)}\``),
   ].filter(Boolean);
   if (!isStandaloneSchema) {
     section(lines, isCollection ? 'Resource bundle' : 'Resource');
@@ -1550,12 +1665,120 @@ function appendResourceReport(
     appendResourceBundle(lines, resource, collectionLimit);
   }
 
-  if (resource.properties && Object.keys(resource.properties).length > 0) {
+  const properties = visibleResourceProperties(resource, includeRawBindings);
+  if (properties.length > 0) {
     section(lines, 'Properties');
-    for (const [name, value] of Object.entries(resource.properties)) {
-      lines.push(`- **${escapeMarkdown(name)}:** ${valueText(value)}`);
+    for (const [name, value] of properties) {
+      lines.push(name === 'flags'
+        ? `- **usage flags:** ${formatUsageFlags(resource, value)}`
+        : `- **${escapeMarkdown(name)}:** ${valueText(value)}`);
     }
   }
+}
+
+type UsageFlagTable = ReadonlyArray<readonly [number, string]>;
+
+// WebGPU usage bitmasks, ordered so the binding roles read before the
+// transfer and mapping bits: what a resource *is* comes before how it can be
+// copied. 76 therefore decodes as uniform | copy-src | copy-dst.
+const GPU_BUFFER_USAGE_FLAGS: UsageFlagTable = [
+  [64, 'uniform'],
+  [128, 'storage'],
+  [32, 'vertex'],
+  [16, 'index'],
+  [256, 'indirect'],
+  [512, 'query-resolve'],
+  [4, 'copy-src'],
+  [8, 'copy-dst'],
+  [1, 'map-read'],
+  [2, 'map-write'],
+];
+
+const GPU_TEXTURE_USAGE_FLAGS: UsageFlagTable = [
+  [4, 'texture-binding'],
+  [8, 'storage-binding'],
+  [16, 'render-attachment'],
+  [1, 'copy-src'],
+  [2, 'copy-dst'],
+];
+
+/** TypeGPU's texture usage vocabulary names the same WebGPU bits. */
+const TYPEGPU_TEXTURE_USAGE_BITS: Record<string, string> = {
+  sampled: 'texture-binding',
+  storage: 'storage-binding',
+  render: 'render-attachment',
+};
+
+function usageFlagTable(resourceType: string): UsageFlagTable | undefined {
+  if (resourceType === 'buffer') return GPU_BUFFER_USAGE_FLAGS;
+  if (resourceType === 'texture') return GPU_TEXTURE_USAGE_FLAGS;
+  return undefined;
+}
+
+function decodeUsageFlags(resourceType: string, flags: unknown): string[] {
+  const table = usageFlagTable(resourceType);
+  if (!table || typeof flags !== 'number' || !Number.isInteger(flags)) return [];
+  return table
+    .filter(([bit]) => (flags & bit) !== 0)
+    .map(([, name]) => name);
+}
+
+/**
+ * What the resource can be used for, stated once. TypeGPU's own usage names
+ * come first; the raw WebGPU mask only contributes what they do not already
+ * say, so a sampled texture never also lists `texture-binding`.
+ */
+function resourceUsageNames(resource: InspectorResourceReport): string[] {
+  const declared = resource.usages ?? [];
+  const covered = new Set(declared.flatMap((usage) =>
+    resource.resourceType === 'texture' && TYPEGPU_TEXTURE_USAGE_BITS[usage]
+      ? [usage, TYPEGPU_TEXTURE_USAGE_BITS[usage]!]
+      : [usage]));
+  return [
+    ...declared,
+    ...decodeUsageFlags(resource.resourceType, resource.properties?.flags)
+      .filter((name) => !covered.has(name)),
+  ];
+}
+
+function formatUsageFlags(
+  resource: InspectorResourceReport,
+  flags: unknown,
+): string {
+  const decoded = decodeUsageFlags(resource.resourceType, flags);
+  if (typeof flags !== 'number' || decoded.length === 0) return valueText(flags);
+  return `0x${flags.toString(16)} (${decoded.join(' | ')})`;
+}
+
+/**
+ * Properties are the runtime facts a shader author reads, not a dump of the
+ * inspector's record. Below deep, drop what is already stated elsewhere (the
+ * decoded usage mask, a repeated resource type, a binding count the bindings
+ * table shows) and what states nothing at all (empty values, bare negatives).
+ * Deep keeps everything: there it is raw evidence.
+ */
+function visibleResourceProperties(
+  resource: InspectorResourceReport,
+  deep: boolean,
+): Array<[string, unknown]> {
+  const entries = Object.entries(resource.properties ?? {});
+  if (deep) return entries;
+  const bindingCount = resource.bindings?.length;
+  return entries.filter(([name, value]) => {
+    if (name === 'flags') return false;
+    if (name === 'hasDefault') return false;
+    if (name === 'resourceType' || name.endsWith('ResourceType')) return false;
+    if (name === 'entryCount' && value === bindingCount) return false;
+    if (value === false) return false;
+    return isPresentPropertyValue(value);
+  });
+}
+
+function isPresentPropertyValue(value: unknown): boolean {
+  if (value === undefined || value === null || value === '') return false;
+  if (Array.isArray(value)) return value.length > 0;
+  if (isRecord(value)) return Object.keys(value).length > 0;
+  return true;
 }
 
 function appendResourceBundle(
@@ -1867,6 +2090,7 @@ function appendRuntimeSummary(
   lines: string[],
   output: InspectorOutput,
   includeMetadata = true,
+  editorDefaults: readonly InspectorLedgerEntry[] = [],
 ): void {
   const summary = output.summary;
   const stats = output.stats;
@@ -1881,10 +2105,18 @@ function appendRuntimeSummary(
     ...(output.warnings ?? []),
     ...(output.pageErrors ?? []),
   ]).slice(0, MAX_RUNTIME_NOTES);
-  if (runtimeIssues.length > 0) {
+  // Editor-imposed defaults (the quiescent run) are runtime facts about how
+  // the pass was executed, not assumptions the inspected code implied.
+  const defaultNotes = uniqueStrings(
+    editorDefaults.map((entry) => entry.provenance),
+  );
+  if (runtimeIssues.length > 0 || defaultNotes.length > 0) {
     section(lines, 'Runtime notes');
     for (const issue of runtimeIssues) {
       lines.push(`- ${valueText(issue)}`);
+    }
+    for (const note of defaultNotes) {
+      lines.push(`- ${valueText(note)}`);
     }
   }
   const details = includeMetadata ? [
@@ -2070,7 +2302,7 @@ async function writeGeneratedReport(
       assumptions: Math.max(1, target.report.ledger?.length ?? 1),
     },
   });
-  appendRuntimeSummary(lines, output, true);
+  appendRuntimeSummary(lines, output, true, editorDefaultLedgerEntries([target]));
   await writeFile(outputPath, `${lines.join('\n')}\n`, 'utf8');
   return pathToFileURL(outputPath).toString();
 }
@@ -2088,14 +2320,6 @@ const INFORMATIONAL_TARGET_DIAGNOSTIC_CODES = new Set([
 function isInformationalDiagnostic(diagnostic: InspectorDiagnostic): boolean {
   if (diagnostic.severity !== undefined) return diagnostic.severity === 'note';
   return INFORMATIONAL_TARGET_DIAGNOSTIC_CODES.has(diagnostic.code);
-}
-
-/** Notes that change the meaning of a successful result belong in Standard. */
-function isMaterialInspectionNote(diagnostic: InspectorDiagnostic): boolean {
-  return !isInformationalDiagnostic(diagnostic) ||
-    diagnostic.code === 'inspection-defaults-applied' ||
-    diagnostic.code === 'pipeline-wrapper-unwrapped' ||
-    diagnostic.code === 'pipeline-validated-without-recorded-creation';
 }
 
 // The target cannot be inspected in isolation (unbound slot, needs a wrapper,

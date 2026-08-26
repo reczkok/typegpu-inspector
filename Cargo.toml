@@ -1,9 +1,9 @@
 [package]
 name = "typegpu-inspector"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 license = "MIT"
-description = "Zed extension for inspecting TypeGPU shaders"
+description = "Zed extension that inspects TypeGPU pipelines, resources, and generated WGSL"
 repository = "https://github.com/reczkok/typegpu-inspector"
 
 [lib]

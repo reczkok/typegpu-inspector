@@ -1,20 +1,22 @@
 # TypeGPU Inspector Language Server
 
-A stdio LSP server that runs TypeGPU modules through a real Chromium/WebGPU
-runtime and reports the results in the editor: hovers with generated WGSL and
-exact memory layouts, inlay hints, compiler diagnostics mapped back to
-TypeScript, and links to the complete generated `.wgsl` documents.
+The stdio language server behind the
+[TypeGPU Inspector](https://github.com/reczkok/typegpu-inspector) extensions for
+Zed and VS Code. It runs TypeGPU modules through a headless Chromium with
+WebGPU and reports hovers, inlay hints, diagnostics, and links to the generated
+`.wgsl` documents. The repository README documents its settings.
 
-The single-file `dist/server.cjs` bundle is self-contained. On first use it
-launches the runtime inspector; in standalone installs the inspector is
-fetched as `typegpu-runtime-inspector-mcp` via `npx`, which downloads
-Playwright Chromium once.
-
-This package is consumed by the
-[TypeGPU Inspector](https://github.com/reczkok/typegpu-inspector) editor
-extensions for Zed and VS Code. Settings and behavior are documented in that
-repository.
+Editors launch the single-file `dist/server.cjs` bundle:
 
 ```sh
 typegpu-inspector-language-server --stdio
 ```
+
+On first use it starts the runtime inspector, installing
+`typegpu-runtime-inspector-mcp` when the checkout does not provide it. Two
+environment variables steer that:
+
+| Variable | Effect |
+| --- | --- |
+| `TYPEGPU_INSPECTOR_RUNTIME_DIR` | Absolute directory to install and launch the inspector from. Without it, standalone installs use `npx`. |
+| `TYPEGPU_INSPECTOR_NODE` | Absolute path to a Node.js binary whose installation includes npm, used when `npm` is not on `PATH`. |

@@ -167,7 +167,7 @@ function importsTypeGpu(document: TextDocument): boolean {
 /**
  * The runtime notice, shown once per installation before anything is
  * downloaded or executed. Modal on purpose: the extension is about to fetch
- * ~150 MB and run the user's own module code, which is not a toast-sized fact.
+ * ~550 MB and run the user's own module code, which is not a toast-sized fact.
  */
 async function ensureRuntimeConsent(context: ExtensionContext): Promise<boolean> {
   if (runtimeDeclinedForSession) return false;
@@ -181,7 +181,7 @@ async function ensureRuntimeConsent(context: ExtensionContext): Promise<boolean>
         detail: [
           'To report exact pipelines, layouts, and generated WGSL, this extension:',
           '',
-          `• downloads the typegpu-runtime-inspector-mcp package and a Playwright Chromium (~150 MB) into ${context.globalStorageUri.fsPath};`,
+          `• downloads the typegpu-runtime-inspector-mcp package and a Playwright Chromium (about 170 MB to download, 550 MB on disk) into ${context.globalStorageUri.fsPath};`,
           '• executes this project\'s top-level TypeGPU module code inside that headless browser whenever you save or hover.',
           '',
           'Nothing is sent anywhere and no telemetry is collected. You can delete the download at any time.',

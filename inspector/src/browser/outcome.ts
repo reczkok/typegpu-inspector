@@ -56,6 +56,9 @@ export function inferTargetOutcome(input: {
 function hasInspectionAssumptions(entries: LedgerEntry[] | undefined): boolean {
   return (entries ?? []).some((entry) =>
     entry.status === 'satisfied' &&
+    // Environment-tier entries (quiescent run, device session) describe the
+    // harness, not a value substituted into this target.
+    entry.tier !== 'environment' &&
     (
       entry.provider === 'synthesis' ||
       (

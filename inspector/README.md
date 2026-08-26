@@ -1,172 +1,77 @@
 # TypeGPU Runtime Inspector MCP
 
-Local stdio MCP server for validating TypeGPU code in Chromium with WebGPU.
+A local stdio MCP server that validates TypeGPU code in Chromium with WebGPU.
+It loads a module through Vite, creates a browser `GPUDevice`, and reports
+generated WGSL, shader compilation messages, WebGPU validation errors, bind
+group layout stats, console and page errors, and recorded GPU calls.
 
-It loads TypeGPU inspection modules through Vite, creates a browser `GPUDevice`,
-and reports generated WGSL, shader compilation messages, WebGPU validation
-errors, bind group layout stats, console/page errors, and recorded GPU calls.
+Inspections reuse a bounded Vite/Chromium session per workspace and
+configuration. Every request still gets a fresh page and JavaScript realm.
 
-Agent-facing inspections reuse a bounded workspace/configuration session for
-Vite and Chromium. Every request still opens a fresh page/JavaScript realm.
-Source and dependency edits are selectively invalidated, concurrent requests
-for one session are serialized, and an unhealthy session falls back once to a
-fully isolated inspection.
+## Setup
 
-## Quick Setup
-
-Use `npx` from the client you want to configure:
+Run from the client you want to configure:
 
 ```sh
 npx typegpu-runtime-inspector-mcp@latest setup codex
 npx typegpu-runtime-inspector-mcp@latest setup claude
 npx typegpu-runtime-inspector-mcp@latest setup opencode
 npx typegpu-runtime-inspector-mcp@latest setup zed
-```
-
-`setup zed` adds a `context_servers` entry for the Zed agent with a
-comment-preserving edit of `~/.config/zed/settings.json`. Users of the TypeGPU
-Inspector Zed extension do not need it: the extension registers the same MCP
-server automatically.
-
-Configure every supported client found on `PATH`:
-
-```sh
 npx typegpu-runtime-inspector-mcp@latest setup all
 ```
 
-The setup command registers a local MCP server named `typegpu_inspector` and
-pins it to the package version that performed setup, for example:
+`setup all` configures every supported client found on `PATH`. Each command
+registers a server named `typegpu_inspector`, pinned to the package version
+that performed the setup. `setup zed` adds a `context_servers` entry to Zed's
+`settings.json` without disturbing comments; the TypeGPU Inspector Zed
+extension registers the same server on its own.
 
-```sh
-npx typegpu-runtime-inspector-mcp@<version>
-```
-
-Existing `typegpu_inspector` entries are left unchanged unless `--upgrade` or
-`--force` is provided.
-
-To update a setup created by an older version, run setup again with `--upgrade`:
-
-```sh
-npx typegpu-runtime-inspector-mcp@latest setup codex --upgrade
-npx typegpu-runtime-inspector-mcp@latest setup all --upgrade
-```
-
-Then restart the MCP client and check the local environment with:
+An existing `typegpu_inspector` entry is left alone. `--upgrade` replaces
+entries that already reference this npm package; `--force` replaces one running
+a different command. Restart the client afterwards, then check the environment:
 
 ```sh
 npx typegpu-runtime-inspector-mcp@latest doctor
 ```
 
-`--upgrade` only replaces entries that already reference this npm package. If a
-client has a custom `typegpu_inspector` command, use `--force` to replace it
-intentionally.
+`doctor` checks Node, npx, and the Chromium/WebGPU launch.
 
-Requirements:
+Requirements: Node.js 20 or newer, filesystem access to the inspected project,
+and Playwright Chromium with WebGPU. `playwright-chromium` is a runtime
+dependency; if install lifecycle scripts were skipped, reinstall with them
+enabled and rerun `doctor`.
 
-- Node.js 20 or newer
-- Local filesystem access to the inspected project
-- Playwright Chromium with WebGPU support
+To configure a client by hand, register `npx
+typegpu-runtime-inspector-mcp@<version>` as a stdio command named
+`typegpu_inspector`.
 
-`playwright-chromium` is a runtime dependency of this package. If lifecycle
-scripts were skipped during install, enable them and reinstall, then run
-`doctor` again.
+## Tools
 
-## Manual Client Config
-
-Codex (`~/.codex/config.toml`):
-
-```toml
-[mcp_servers.typegpu_inspector]
-command = "npx"
-args = ["typegpu-runtime-inspector-mcp@<version>"]
-```
-
-Codex CLI:
-
-```sh
-codex mcp add typegpu_inspector -- npx typegpu-runtime-inspector-mcp@<version>
-```
-
-Claude Code:
-
-```sh
-claude mcp add --transport stdio --scope user typegpu_inspector -- npx typegpu-runtime-inspector-mcp@<version>
-```
-
-OpenCode:
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "typegpu_inspector": {
-      "type": "local",
-      "command": ["npx", "typegpu-runtime-inspector-mcp@<version>"],
-      "enabled": true
-    }
-  }
-}
-```
-
-## MCP Tools
-
-Default discovery exposes three agent-facing tools:
-
-- `inspect_typegpu`: run a browser/WebGPU inspection from a probe, inspection
-  module, or exported symbols.
-- `list_typegpu_exports`: scan one module and suggest symbol targets for
-  `inspect_typegpu`.
-- `resolve_typegpu_context`: explain inferred roots, dependency sources,
-  warnings, and next actions without launching a browser.
+| Tool | Use |
+| --- | --- |
+| `inspect_typegpu` | Run a browser/WebGPU inspection from a probe, an inspection module, or exported symbols. |
+| `list_typegpu_exports` | Scan one module and suggest symbol targets. Returns `exports`, `likelyTypegpuExports`, `suggestedSymbolTargets`. |
+| `resolve_typegpu_context` | Explain inferred roots, dependency sources, warnings, and next actions without launching a browser. |
 
 ### `inspect_typegpu`
 
-Preferred tool for agents. Accepted target variants:
+`target.kind` selects one of three sources:
 
-- `probe`: function body for quick inline probes.
-- `module`: path to an inspection module that exports `inspect`.
-- `symbols`: exported symbols from an existing module, usually after
-  `list_typegpu_exports`.
+- `probe` — `body` of `async inspect({ root, device, tgpu, d, std, common })`,
+  returning a target or an array of them. `virtualPath` fixes where relative
+  imports resolve from.
+- `module` — `path` to a module exporting `inspect` (`exportName` overrides the
+  name).
+- `symbols` — `modulePath` plus `targets`, selectors into the module's exports.
+  `setupBody` runs before target creation; `includePrivate` also exposes
+  top-level locals.
 
-The MCP infers project/package/workspace roots, local TypeGPU dependencies, and
-Vite config. Add `project.root`, `project.dependencyAliases`,
-`target.virtualPath`, or `environment` fields only when warnings or diagnostics
-ask for them.
-
-In TypeGPU monorepos, package resolution can still fall back to the MCP package
-when the current package does not expose a `node_modules/typegpu` workspace
-link. Check `dependencySummary.hasBundledTypegpuFallback` and `warnings`. Retry
-with `project.root` anchored to the workspace root and a package-root alias
-through `project.dependencyAliases` instead of aliasing individual subpaths:
-
-```json
-{
-  "project": {
-    "root": ".",
-    "dependencyAliases": {
-      "typegpu": "packages/typegpu/src"
-    }
-  }
-}
-```
-
-That one alias covers `typegpu`, `typegpu/data`, `typegpu/std`, and
-`typegpu/common`. For inline probes that import project files, set
-`target.virtualPath` inside the inspected package so relative imports resolve
-from the same location as the source being tested.
-
-Quick probe:
-
-```json
-{
-  "target": {
-    "kind": "probe",
-    "body": "const main = tgpu.computeFn({ workgroupSize: [1] })(() => { 'use gpu'; }); return { label: 'main', kind: 'compute-pipeline', value: main };"
-  }
-}
-```
-
-Existing exported symbols:
+A target's `kind` is `compute-pipeline`, `render-pipeline`, `resolvable`, or
+`resource`. `resource` produces structural reports for schemas, buffers,
+textures and views, samplers, query sets, bind group layouts and groups, vertex
+layouts, slots, accessors, and GPU variables. Compute targets may return an
+entrypoint directly; use `create: () => root.create…` when construction must
+happen during target attribution, which is the usual case for render pipelines.
 
 ```json
 {
@@ -178,335 +83,101 @@ Existing exported symbols:
 }
 ```
 
-Inspection modules export `inspect` by default:
+Roots, local TypeGPU dependencies, and Vite config are inferred. Add
+`project.root`, `project.dependencyAliases`, `target.virtualPath`, or
+`environment` fields only when warnings or diagnostics ask for them. In a
+TypeGPU monorepo, prefer one package-root alias
+(`{ "typegpu": "packages/typegpu/src" }`) over aliasing `typegpu/data`,
+`typegpu/std`, and `typegpu/common` separately.
 
-```ts
-export async function inspect({ root, device, tgpu, d, std, common }) {
-  const main = tgpu.computeFn({ workgroupSize: [1] })(() => {
-    'use gpu';
-  });
+Unresolved slots, accessors, and helper arguments go through a provider chain:
+explicit `with`/`probeBindings`/`probeArguments` entries, then bindings the
+application itself made, then values borrowed or synthesized from module and
+import scope, then synthesized descriptor parts. Every decision lands in the
+target's `ledger`. `environment.autoBind: false` surfaces raw failures
+instead.
 
-  return {
-    label: 'main',
-    kind: 'compute-pipeline',
-    value: main,
-  };
-}
-```
+### Environment
 
-Use `target.kind: "module"` for these files:
+| Field | Default | Effect |
+| --- | --- | --- |
+| `quiescent` | `true` | Stubs `requestAnimationFrame`, `ResizeObserver`, `queue.submit`, and pipeline dispatch/draw before import. |
+| `documentHtml` | — | Assigned to `document.body` before import. |
+| `browserSetup` | — | Browser JavaScript run after the quiescent prologue and before import. |
+| `staticAssetRoutes` | `[]` | `{ urlPrefix, directory }` routes served by the Vite server. |
+| `features` | `[]` | WebGPU features requested from the adapter. |
+| `strictNames` | `true` | Deterministic TypeGPU generated names. |
+| `autoBind` | `true` | Satisfy missing slot and accessor bindings. |
 
-```json
-{
-  "target": {
-    "kind": "module",
-    "path": "src/inspect-particle-step.ts"
-  }
-}
-```
+A browser module that starts a frame loop at import time would otherwise draw
+into the inspector's validation scopes and lose the device, so `quiescent`
+defaults to `true` and is recorded as a `device-session:quiescent-run` ledger
+entry. A passing target is therefore static validation evidence, not proof that
+the application renders. Set it to `false` when the run must observe real frame
+or submit behaviour, such as a warm-up dispatch that initializes a pipeline.
 
-The context contains:
+### Output
 
-- `root`: TypeGPU root backed by the inspector browser device.
-- `device`: recorded `GPUDevice` proxy.
-- `tgpu`, `d`, `std`, `common`: TypeGPU imports resolved for the inspected
-  project.
+| Field | Default | Effect |
+| --- | --- | --- |
+| `verbosity` | `"summary"` | `"summary"`, `"normal"`, or `"full"`. |
+| `includeWgsl` | `"full"` only | Canonical WGSL per target. |
+| `includeCalls` | `"full"` only | Recorded GPU calls. |
+| `includeCallWgsl` | `false` | Repeat WGSL inside `createShaderModule` descriptors. |
+| `maxWgslBytes` | — | Truncate each WGSL string to this many UTF-8 bytes. |
+| `diagnosticsOnly` | `false` | Return diagnostics, target status, console messages, page errors. |
+| `includeLegacyInspection` | `false` | Repeat the formatted report under `inspection`. |
+| `timeoutMs` | `15000` | Wall clock for one inspection, Vite startup included. |
 
-Return a target or an array of targets:
+Responses carry `summary`, `targets`, `dependencySummary`, `warnings`, and
+`nextActions` at the top level. Local absolute paths are replaced with
+`<projectRoot>`, `<packageRoot>`, `<workspaceRoot>`, and `<mcpPackage>`. A
+failed target carries `failureCategory`: `source`, `shader-compiler`,
+`webgpu-validation`, `environment`, `timeout`, or `harness`. Browser stack
+frames appear only at `"full"`.
 
-```ts
-{
-  label?: string;
-  kind?: 'compute-pipeline' | 'render-pipeline' | 'resolvable' | 'resource';
-  value?: unknown;
-  create?: () => unknown;
-  unwrap?: boolean;
-}
-```
+`body`, `setupBody`, and `browserSetup` are source snippets. Pass real newline
+characters; double-escaped text such as `\nconst x = 1` is parsed as literal
+source and fails.
 
-Plain returned values are treated as `{ value }`. Compute pipeline targets may
-return a TypeGPU compute entrypoint; the inspector creates the pipeline. Use
-`create` when construction should happen during target attribution, especially
-for render pipelines and descriptor-heavy probes.
+### Diagnostic codes
 
-`resource` targets produce bounded structural reports for TypeGPU schemas,
-buffers and shorthand bindings, textures/views, ordinary/comparison samplers,
-query sets, bind-group layouts, bind groups, vertex layouts, slots/accessors,
-and GPU variables. When a resource also resolves as WGSL, the report includes
-both its structure and generated declaration.
+Blocked: `slot-binding-required`, `wrapper-required`,
+`reference-wrapper-required`, `selector-not-resolved`, `module-import-failed`,
+`canvas-dom-setup-required`, `browser-capability-unavailable`,
+`webgpu-device-lost`.
 
-Editor-generated symbol targets can include `probeArguments` to call shellless
-helpers with schema-derived zero values. Common schemas accept either the
-concise `d.f32`/`d.vec2f` form or the explicit
-`ctx.d.f32`/`ctx.d.vec2f` form. `probeBindings` can additionally bind
-constructible accessors to inspection-only zero values. Struct schemas work
-recursively, including selectors such as `module.HitInfo` derived from
-`d.Infer<typeof HitInfo>` or `d.InferGPU<typeof HitInfo>`.
+Unsupported: `not-shader-resolvable`, `plain-object-not-inspectable`,
+`cpu-function-not-inspectable`, `three-node-not-inspectable`,
+`value-not-inspectable`, `unsupported-internal-resource`,
+`pipeline-resource-shape`, `raw-webgpu-pipeline-unsupported`,
+`typegpu-<stage>-function-not-resolvable`, `typegpu-value-not-resolvable`.
 
-**The requirement engine.** Inspection is modeled as requirement
-satisfaction: when a target cannot resolve standalone, typed requirements
-(currently `slot-value` and `argument-values`) are discovered from the
-target's shape or extracted from the failure, then satisfied by an ordered
-provider chain:
+Notes rather than failures: `slot-bindings-auto-applied`,
+`inspection-defaults-applied`, `structural-resource-only`,
+`direct-symbol-inspection`, `webgpu-validation-unavailable`,
+`pipeline-validated-without-recorded-creation`, `pipeline-wrapper-unwrapped`.
 
-1. *user-explicit* — `with`, `probeBindings`, `probeArguments` entries;
-2. *recorded-app-bindings* — values the application itself bound: a typegpu
-   recording shim observes every `root.with(...)`, pipeline creation, and
-   `createUniform` during module import and setup;
-3. *module scope* / *import scope* — bindings borrowed from bound functions
-   and pipelines, or placeholder values synthesized from matching accessors'
-   schemas, found among the module's exports, its runtime imports' exports,
-   setup values, and sibling targets. Synthesized placeholders are recursively
-   non-degenerate without relying on field names: scalars/vectors use ones,
-   matrices use identity, and structs/fixed arrays apply the same policy to
-   their members. This avoids comptime division-by-zero/NaN traps while keeping
-   the assumption explicit in the ledger; mutable accessors remain borrow-only;
-4. *synthesis* — descriptor parts (vertex attribs, fragment targets).
+Partial results: `module-device-resource`, `resource-wgsl-unavailable`.
 
-Every decision lands in the target's `ledger` (provenance records with
-provider attribution); satisfied failure-discovered entries also surface as
-the `slot-bindings-auto-applied` note and shape-discovered ones as
-`inspection-defaults-applied`. Unsatisfiable requirements fail with a
-diagnostic naming exactly what was missing and where the engine looked.
-`autoBind: false` disables satisfaction to surface raw failures. Already
-created compute pipelines cannot be retro-bound (TypeGPU keeps their
-bindings private), but pipelines the recording shim saw being created can be
-recreated with engine provisions when needed.
+Other failures: `inspection-timeout`, `webgpu-validation-timeout`,
+`result-serialization-failed`, `typegpu-random-resolution-failed`.
 
-For helpers that mix ordinary data with GPU resources, `probeArgumentPlan`
-preserves argument order and can defer concrete selectors until shader
-resolution:
-
-```json
-{
-  "selector": "sampleTexture",
-  "kind": "resolvable",
-  "probeArgumentPlan": [
-    { "schema": "ctx.d.vec2f" },
-    { "value": "module.linearSampler.$" }
-  ]
-}
-```
-
-`schema` entries construct zero values. `value` entries read existing module,
-setup, or context values inside the generated shader callback, which is
-required for resources whose `.$` handles are only legal during code
-generation. `probeArguments` remains the concise form when every argument is a
-constructible schema.
-
-Editor discovery can also point symbol targets at values an application
-factory already created, such as `pipelines.gpu-optimized` or a destructured
-`pipeline`. This preserves the application’s concrete return shape without
-calling host factories twice. Pre-created pipelines are resolved and compiled
-for WGSL, bindings, declarations, size, and compilation diagnostics; when the
-pipeline belongs to the module’s own GPU device, exact target-owned
-`createPipeline` call statistics are intentionally reported as unavailable.
-Local compute, vertex, and fragment symbols referenced by those concrete
-pipelines share the same target, so stage inspection preserves authored
-accessor/slot bindings. Resource targets may also be arrays or plain nested
-records; resource-bearing fields are reported with stable names while
-non-resource metadata is ignored.
-
-```ts
-return {
-  label: 'render',
-  kind: 'render-pipeline',
-  create: () =>
-    root.createRenderPipeline({
-      vertex: common.fullScreenTriangle,
-      fragment,
-      targets: { format: 'bgra8unorm' },
-    }),
-};
-```
-
-If `kind` is omitted on a `create` target, the inspector infers it from the
-created TypeGPU pipeline when possible.
-
-### `list_typegpu_exports`
-
-Statically scans a module and returns:
-
-- `exports`: all exported symbols found.
-- `likelyTypegpuExports`: exports that look like TypeGPU symbols.
-- `suggestedSymbolTargets`: ready-to-copy `inspect_typegpu.target.targets`
-  entries when possible.
-
-```json
-{
-  "modulePath": "src/shaders.ts"
-}
-```
-
-### `resolve_typegpu_context`
-
-Returns sanitized `resolvedContext`, `dependencySummary`, `warnings`, and
-`nextActions` for a target path. Agent-facing outputs replace local absolute
-paths with labels such as `<projectRoot>`, `<packageRoot>`, `<workspaceRoot>`,
-and `<mcpPackage>`.
-
-```json
-{
-  "targetPath": "apps/demo/src/shaders.ts"
-}
-```
-
-## Browser Setup And Assets
-
-Use these fields when the inspected module expects DOM nodes, globals, static
-assets, or non-standard import paths:
-
-```json
-{
-  "target": {
-    "kind": "module",
-    "path": "src/examples/image-processing/blur/index.ts"
-  },
-  "environment": {
-    "documentHtml": "<canvas width=\"512\" height=\"512\"></canvas>",
-    "browserSetup": "window.__TEST_MODE__ = true;",
-    "staticAssetRoutes": [
-      { "urlPrefix": "/TypeGPU", "directory": "public" },
-      { "urlPrefix": "/", "directory": "public" }
-    ]
-  }
-}
-```
-
-Fields:
-
-- `documentHtml`: assigned to `document.body.innerHTML` before import.
-- `browserSetup`: browser JavaScript executed before import with `root`,
-  `device`, `tgpu`, `d`, `std`, and `common` parameters. It runs *after* the
-  quiescent prologue, so it can deliberately restore any stub it needs back.
-- `quiescent`: defaults to `true`. See below.
-- `staticAssetRoutes`: serves files from local directories through the inspector
-  Vite server.
-- `features`: WebGPU features to request from the adapter.
-- `strictNames`: deterministic TypeGPU generated names. Defaults to `true`.
-- `viteConfigPath`: optional project Vite config. Low-level calls resolve it
-  relative to `cwd`; agent-facing project hints resolve relative paths from the
-  target package first, then project/workspace roots.
-
-### Quiescent Runs
-
-Browser-oriented modules commonly start a `requestAnimationFrame` loop at import
-time. Under inspection that loop draws to a canvas and submits work while the
-inspector's per-target WebGPU validation scopes are open, which loses the device
-(`webgpu-device-lost`) and blocks *every* target of the module.
-
-So `quiescent` defaults to `true`: before the module is imported, the inspector
-stubs `requestAnimationFrame`, `cancelAnimationFrame`, `ResizeObserver`,
-`queue.submit`, and the compute/guarded-compute/render pipeline
-dispatch/draw/init methods. Synchronous resource construction still runs, and
-the inspector's own pipeline creation and validation are unaffected.
-
-Because no application frame executes, a passing target is **static validation
-evidence, not proof that the app renders**. Every quiescent run records this in
-the report ledger as `device-session:quiescent-run`.
-
-Set `quiescent: false` when the run must observe real frame or submit behaviour
-— for example when probe setup itself needs a pipeline to actually initialize on
-the device (`perlin2d.staticCache`, warm-up dispatches).
-
-## Output
-
-`inspect_typegpu` mirrors the most useful result fields at the top level:
-
-- `summary`: compact target, pipeline, console, and compilation counts.
-- `targets`: per-target status, diagnostics, pipeline creation, and optional WGSL.
-- `dependencySummary`: compact `typegpu/*` source/version routing and bundled
-  fallback flags. Use `resolve_typegpu_context` for per-specifier paths.
-- `warnings`: sanitized context/dependency warnings.
-- `nextActions`: concrete retry hints.
-- `inspection`: deprecated duplicate of the formatted report, returned only
-  when `output.includeLegacyInspection` is `true`.
-
-Agent-facing outputs sanitize local absolute paths into labels such as
-`<projectRoot>`, `<packageRoot>`, `<workspaceRoot>`, and `<mcpPackage>`.
-
-Default output is compact. Controls:
-
-- `verbosity`: `"summary"` (default), `"normal"`, or `"full"`.
-- `includeWgsl`: include canonical WGSL in targets. Defaults to `true` only for
-  `"full"`.
-- `includeCallWgsl`: also repeat WGSL in shader-module call descriptors.
-  Defaults to `false`; use target WGSL unless debugging the raw call log.
-- `includeCalls`: include recorded GPU calls. Defaults to `true` only for
-  `"full"`.
-- `maxWgslBytes`: truncate each included WGSL string to this many UTF-8 bytes.
-- `diagnosticsOnly`: return diagnostics, target status, console messages, and
-  page errors.
-- `includeLegacyInspection`: repeat the formatted report under `inspection` for
-  older MCP consumers. Defaults to `false`.
-
-Failed targets include a machine-readable `failureCategory`: `source`,
-`shader-compiler`, `webgpu-validation`, `environment`, `timeout`, or `harness`.
-Summary and normal output omit browser stack frames; full output retains them.
-
-`inspectBody`, `inlineCode`, `setupBody`, and `browserSetup` are JavaScript or
-TypeScript source snippets. Pass actual newline characters in these fields when
-you need multiple lines; double-escaped text such as `\\nconst x = 1` is parsed
-as literal source and will fail.
-
-```json
-{
-  "target": {
-    "kind": "probe",
-    "body": "return { label: 'main', kind: 'resolvable', value: helper };"
-  },
-  "output": {
-    "verbosity": "normal",
-    "includeWgsl": true,
-    "maxWgslBytes": 4000
-  }
-}
-```
-
-Common diagnostic codes:
-
-- `plain-object-not-inspectable`
-- `wrapper-required`
-- `slot-binding-required`
-- `slot-bindings-auto-applied` (note, not a failure)
-- `selector-not-resolved`
-- `webgpu-validation-timeout`
-- `pipeline-resource-shape`
-- `pipeline-validated-without-recorded-creation`
-- `structural-resource-only` (note: object methods were not pipeline-validated)
-- `raw-webgpu-pipeline-unsupported`
-- `typegpu-fragment-function-not-resolvable`
-- `module-import-failed`
-- `canvas-dom-setup-required`
-- `direct-symbol-inspection`
-- `typegpu-random-resolution-failed`
-
-## Local Development
+## Development
 
 ```sh
 pnpm install
 pnpm start
-```
-
-Checks:
-
-```sh
 pnpm typecheck
 pnpm test
 pnpm test:browser
 ```
 
-An opt-in acceptance survey runs real TypeGPU docs examples through the
-inspector (cross-module accessor auto-binding regression check):
+Browser tests need Playwright Chromium with WebGPU; install it with
+`pnpm exec playwright install chromium`. An opt-in survey runs real TypeGPU
+docs examples through the inspector:
 
 ```sh
 TYPEGPU_DOCS_ROOT=/path/to/TypeGPU TYPEGPU_MCP_RUN_BROWSER_TESTS=1 \
   pnpm vitest run test/docs-survey.test.ts
-```
-
-Browser tests require Playwright Chromium with WebGPU support. If Chromium is
-missing, run:
-
-```sh
-pnpm exec playwright install chromium
 ```
