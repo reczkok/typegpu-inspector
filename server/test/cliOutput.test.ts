@@ -6,6 +6,7 @@ import {
   formatCheckGithub,
   formatCheckJson,
   formatCheckText,
+  formatDiagnosticLines,
   summarizeCheck,
   toCliDiagnostics,
   type CliFileResult,
@@ -134,6 +135,27 @@ describe('CLI output', () => {
         '✖ 1 error, 1 warning, 1 hint · 2 targets (1 ok, 1 failed) in 1 file · 1.2s',
       ].join('\n') + '\n',
     );
+  });
+
+  it('folds a note at the generated location into the wgsl line and drops blank message lines', () => {
+    const [diagnostic] = toCliDiagnostics('/workspace/src/main.ts', [{
+      ...compilerError,
+      message: "no matching call to 'dot(vec3<f32>, vec2<f32>)'\n\n1 candidate function:\n • 'dot(vecN<T>, vecN<T>) -> T'",
+      relatedInformation: [{
+        location: {
+          uri: 'file:///tmp/typegpu-inspector/a/b/main__shade.wgsl',
+          range: { start: { line: 39, character: 8 }, end: { line: 39, character: 30 } },
+        },
+        message: 'in fn projectPointOnLine',
+      }],
+    }], cwd);
+    expect(formatDiagnosticLines(diagnostic!, { color: false, verbose: false })).toEqual([
+      "src/main.ts:98:5: error: no matching call to 'dot(vec3<f32>, vec2<f32>)' [wgsl-compilation]",
+      '',
+      '    1 candidate function:',
+      "     • 'dot(vecN<T>, vecN<T>) -> T'",
+      '    wgsl: /tmp/typegpu-inspector/a/b/main__shade.wgsl:40:9 (in fn projectPointOnLine)',
+    ]);
   });
 
   it('renders a bare summary for a clean run', () => {

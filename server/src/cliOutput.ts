@@ -205,15 +205,22 @@ export function formatDiagnosticLines(diagnostic: CliDiagnostic, style: TextStyl
   const [head = '', ...tail] = diagnostic.message.split('\n');
   const code = diagnostic.code ? c.dim(` [${diagnostic.code}]`) : '';
   lines.push(`${where}: ${severityText(c, diagnostic.severity)}: ${head}${code}`);
-  for (const line of tail) lines.push(`    ${line}`);
+  for (const line of tail) lines.push(indent(line, 4));
+  const generated = diagnostic.generatedWgsl;
+  // A note that only names the generated location folds into the wgsl line.
+  const generatedNotes: string[] = [];
   for (const related of diagnostic.related) {
+    if (generated && sameLocation(related, generated)) {
+      generatedNotes.push(related.message);
+      continue;
+    }
     const [first = '', ...more] = related.message.split('\n');
     lines.push(`    ${related.path}:${related.line}:${related.column}: ${c.dim('note')}: ${first}`);
-    for (const line of more) lines.push(`        ${line}`);
+    for (const line of more) lines.push(indent(line, 8));
   }
-  if (diagnostic.generatedWgsl) {
-    const generated = diagnostic.generatedWgsl;
-    lines.push(`    ${c.dim('wgsl')}: ${generated.path}:${generated.line}:${generated.column}`);
+  if (generated) {
+    const note = generatedNotes.length > 0 ? c.dim(` (${generatedNotes.join('; ')})`) : '';
+    lines.push(`    ${c.dim('wgsl')}: ${generated.path}:${generated.line}:${generated.column}${note}`);
   }
   return lines;
 }
@@ -310,6 +317,14 @@ function escapeData(value: string): string {
 
 function escapeProperty(value: string): string {
   return escapeData(value).replace(/:/g, '%3A').replace(/,/g, '%2C');
+}
+
+function indent(line: string, columns: number): string {
+  return line.trim() === '' ? '' : `${' '.repeat(columns)}${line}`;
+}
+
+function sameLocation(a: CliLocation, b: CliLocation): boolean {
+  return a.path === b.path && a.line === b.line && a.column === b.column;
 }
 
 export function plural(count: number, singular: string, pluralForm = `${singular}s`): string {

@@ -127,7 +127,7 @@ describe('CLI', () => {
     expect(text).toMatch(
       /^test\/fixtures\/wgsl-compilation-error\.ts:5:\d+: error: badWgsl: unresolved value definitely_missing_symbol \[wgsl-compilation\]$/m,
     );
-    expect(text).toMatch(/^    wgsl: .*wgsl-compilation-error__badWgsl\.wgsl:2:10$/m);
+    expect(text).toMatch(/^    wgsl: .*wgsl-compilation-error__badWgsl\.wgsl:2:10 \(in fn badWgsl\)$/m);
     expect(text).toMatch(/✖ .*1 target \(0 ok, 1 failed\) in 1 file/);
     expect(h.closed()).toBe(true);
   });
