@@ -655,13 +655,7 @@ export function createDiagnostics(
         },
       };
       diagnostics.push(diagnostic);
-      mappedEntries.push({
-        diagnostic,
-        coverageKey: `wgsl:${message.message}`,
-        ...(mapping?.relatedSource && !mapping.relatedSource.uri
-          ? { statement: mapping.relatedSource.range, targetLabel: target.target.label }
-          : {}),
-      });
+      mappedEntries.push(mappedEntry(diagnostic, `wgsl:${message.message}`, mapping, target, fallbackSymbol));
       if (severity !== DiagnosticSeverity.Information) anchor = diagnostic;
     }
 
@@ -728,17 +722,12 @@ export function createDiagnostics(
         },
       };
       diagnostics.push(diagnostic);
-      mappedEntries.push({
-        diagnostic,
-        coverageKey: 'resolution',
-        ...(failureMapping?.relatedSource && !failureMapping.relatedSource.uri
-          ? { statement: failureMapping.relatedSource.range, targetLabel: target.target.label }
-          : {}),
-      });
+      mappedEntries.push(mappedEntry(diagnostic, 'resolution', failureMapping, target, fallbackSymbol));
     }
   }
   settleCallSiteDiagnostics(mappedEntries, sourceUri);
-  return deduplicateDiagnostics(diagnostics);
+  const dropped = collapseFanOut(mappedEntries, sourceUri);
+  return deduplicateDiagnostics(diagnostics.filter((diagnostic) => !dropped.has(diagnostic)));
 }
 
 type MappedDiagnosticEntry = {
@@ -747,8 +736,108 @@ type MappedDiagnosticEntry = {
   coverageKey: string;
   /** The authored statement in another symbol of this file, when the diagnostic sits on its call site. */
   statement?: Range;
-  targetLabel?: string;
+  targetLabel: string;
+  targetRange: Range;
+  /** The statement the diagnostic is about, in whichever file. */
+  finding?: { range: Range; uri?: string };
+  /** Whether the target declares the statement itself. */
+  ownsStatement: boolean;
+  anchor: 'statement' | 'call-site' | 'declaration';
+  confidence?: 'high' | 'medium' | 'none';
+  /** Helpers between the anchored call and the statement. */
+  viaDepth: number;
 };
+
+function mappedEntry(
+  diagnostic: Diagnostic,
+  coverageKey: string,
+  mapping: WgslDiagnosticMapping | undefined,
+  target: { target: { label: string; symbolNames: string[] } },
+  fallbackSymbol: DiscoveredSymbol,
+): MappedDiagnosticEntry {
+  const relatedSource = mapping?.relatedSource;
+  return {
+    diagnostic,
+    coverageKey,
+    ...(relatedSource && !relatedSource.uri ? { statement: relatedSource.range } : {}),
+    targetLabel: target.target.label,
+    targetRange: fallbackSymbol.range,
+    ...(mapping?.authoredStatement ? { finding: mapping.authoredStatement } : {}),
+    ownsStatement: mapping?.sourceSymbol !== undefined &&
+      target.target.symbolNames.includes(mapping.sourceSymbol),
+    anchor: mapping?.sourceRange === undefined
+      ? 'declaration'
+      : mapping.strategy === 'statement-call-site'
+      ? 'call-site'
+      : 'statement',
+    ...(mapping ? { confidence: mapping.confidence } : {}),
+    viaDepth: relatedSource?.via?.length ?? 0,
+  };
+}
+
+/**
+ * One finding, one diagnostic. Every target that inlines a helper reports
+ * the helper's problem; after settling, the best-anchored report stays —
+ * on the statement, else a direct call site, else the call site nearest to
+ * the statement through other helpers, else the target's declaration — and
+ * the others become `also affects` related entries on it. Returns the
+ * diagnostics that were folded away.
+ */
+function collapseFanOut(
+  entries: MappedDiagnosticEntry[],
+  sourceUri: string,
+): Set<Diagnostic> {
+  const groups = new Map<string, MappedDiagnosticEntry[]>();
+  for (const entry of entries) {
+    if (!entry.finding) continue;
+    const { range, uri } = entry.finding;
+    const key = `${entry.coverageKey}|${uri ?? ''}|${range.start.line}:${range.start.character}-${range.end.line}:${range.end.character}`;
+    groups.set(key, [...(groups.get(key) ?? []), entry]);
+  }
+  const dropped = new Set<Diagnostic>();
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    const ranked = group
+      .map((entry, index) => ({ entry, rank: anchorRank(entry), index }))
+      .sort((left, right) =>
+        left.rank - right.rank ||
+        Number(right.entry.ownsStatement) - Number(left.entry.ownsStatement) ||
+        left.index - right.index
+      );
+    const best = ranked[0]!.rank;
+    const kept: MappedDiagnosticEntry[] = [];
+    const folded: MappedDiagnosticEntry[] = [];
+    for (const { entry, rank } of ranked) {
+      const duplicate = kept.some((keeper) =>
+        rangeEquals(keeper.diagnostic.range, entry.diagnostic.range)
+      );
+      if (rank === best && !duplicate) kept.push(entry);
+      else folded.push(entry);
+    }
+    const primary = kept[0]!.diagnostic;
+    const affected = folded.map((entry) => entry.targetLabel);
+    primary.relatedInformation = [
+      ...(primary.relatedInformation ?? []),
+      ...folded.map((entry) => ({
+        location: { uri: sourceUri, range: entry.targetRange },
+        message: `also affects ${entry.targetLabel}`,
+      })),
+    ];
+    primary.data = { ...(primary.data as object), affectedTargets: affected };
+    for (const entry of folded) dropped.add(entry.diagnostic);
+  }
+  return dropped;
+}
+
+const DECLARATION_ANCHOR_RANK = 1000;
+
+function anchorRank(entry: MappedDiagnosticEntry): number {
+  const finding = entry.finding!;
+  if (!finding.uri && rangeWithin(entry.diagnostic.range, finding.range)) return 0;
+  if (entry.anchor === 'statement') return 0;
+  if (entry.anchor === 'call-site') return 1 + entry.viaDepth;
+  return DECLARATION_ANCHOR_RANK;
+}
 
 /** The helper statement behind a call-site diagnostic; names the file when it is another one. */
 function relatedSourceInformation(
@@ -757,9 +846,10 @@ function relatedSourceInformation(
 ): DiagnosticRelatedInformation {
   const uri = relatedSource.uri ?? sourceUri;
   const where = relatedSource.uri ? ` (${basename(fileURLToPath(relatedSource.uri))})` : '';
+  const via = relatedSource.via?.length ? ` via ${relatedSource.via.join(' → ')}` : '';
   return {
     location: { uri, range: relatedSource.range },
-    message: `in ${relatedSource.sourceSymbol}${where}`,
+    message: `in ${relatedSource.sourceSymbol}${where}${via}`,
   };
 }
 

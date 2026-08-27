@@ -21,7 +21,12 @@ and released together. The format follows
   server follows the document's imports (relative paths, `.js`-for-`.ts`
   specifiers, and `tsconfig` path aliases; packages are skipped), and a
   diagnostic inside such a helper sits on the call site with the helper's
-  statement, in its own file, as related information. Compiler notes join
+  statement, in its own file, as related information; when the target
+  reaches the helper only through other helpers, the anchor is the call
+  nearest to it (`in evaluateLight (pbr.ts) via shade`). One finding is
+  reported once: every target that inlines a broken helper reports it, and
+  the best-anchored report keeps the squiggle while the others become
+  `also affects <target>` related entries. Compiler notes join
   the error or warning they explain as related information instead of
   appearing as diagnostics of their own. Older TypeGPU versions keep the
   token heuristics.

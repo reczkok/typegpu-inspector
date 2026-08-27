@@ -2260,23 +2260,21 @@ describe('statement-map diagnostics', () => {
       },
     );
     const diagnostics = createDiagnostics('file:///workspace/boids.ts', discovered, inspection);
-    expect(diagnostics).toHaveLength(2);
-
-    const helper = diagnostics.find((diagnostic) => String(diagnostic.message).startsWith('stepBoid'))!;
+    // One finding: the helper's own report keeps the statement; the entry
+    // point that inlines it is listed on it instead of squiggling its call.
+    expect(diagnostics).toHaveLength(1);
+    const [helper] = diagnostics;
+    expect(String(helper!.message)).toMatch(/^stepBoid/);
     // The quoted snippet narrows the column within the mapped statement.
-    expect(helper.range).toEqual(sourceRangeOnLine(16, 'vel = vel + d.vec3f'));
-    expect(helper.relatedInformation).toBeUndefined();
-    expect(helper.data).toMatchObject({ mapping: { strategy: 'statement', confidence: 'high' } });
-
-    const entry = diagnostics.find((diagnostic) => String(diagnostic.message).startsWith('mainCompute'))!;
-    expect(entry.range).toEqual(sourceRangeOnLine(30, 'stepBoid'));
-    expect(entry.relatedInformation).toEqual([{
-      location: {
-        uri: 'file:///workspace/boids.ts',
-        range: sourceRangeOnLine(16, 'vel = vel + d.vec3f(0.1);'),
-      },
-      message: 'in stepBoid',
+    expect(helper!.range).toEqual(sourceRangeOnLine(16, 'vel = vel + d.vec3f'));
+    expect(helper!.relatedInformation).toEqual([{
+      location: { uri: 'file:///workspace/boids.ts', range: sourceRangeOnLine(22, 'mainCompute') },
+      message: 'also affects mainCompute',
     }]);
+    expect(helper!.data).toMatchObject({
+      mapping: { strategy: 'statement', confidence: 'high' },
+      affectedTargets: ['mainCompute'],
+    });
   });
 
   it('keeps TypeGPU fix suggestions out of the resolution trace', async () => {
@@ -2359,7 +2357,7 @@ describe('statement-map diagnostics', () => {
     });
   });
 
-  it('keeps a compiler message on the call site when the helper reports it itself', async () => {
+  it('folds a caller\'s compiler message into the helper\'s own report of the statement', async () => {
     const inspection = await materializeInspection(
       '/workspace',
       '/workspace/boids.ts',
@@ -2374,18 +2372,15 @@ describe('statement-map diagnostics', () => {
       },
     );
     const diagnostics = createDiagnostics('file:///workspace/boids.ts', discovered, inspection);
-    expect(diagnostics).toHaveLength(2);
-    const entry = diagnostics.find((diagnostic) => String(diagnostic.message).startsWith('mainCompute'))!;
-    expect(entry.range).toEqual(sourceRangeOnLine(30, 'stepBoid'));
-    expect(entry.relatedInformation?.map((info) => info.message)).toEqual([
-      'in stepBoid',
+    expect(diagnostics).toHaveLength(1);
+    const [helper] = diagnostics;
+    expect(String(helper!.message)).toMatch(/^stepBoid/);
+    expect(helper!.range).toEqual(sourceRangeOnLine(16, 'vel = vel + d.vec3f(0.1);'));
+    expect(helper!.relatedInformation?.map((info) => info.message)).toEqual([
       'in fn stepBoid',
+      'also affects mainCompute',
     ]);
-    expect(entry.relatedInformation?.[0]?.location.range).toEqual(
-      sourceRangeOnLine(16, 'vel = vel + d.vec3f(0.1);'),
-    );
-    const helper = diagnostics.find((diagnostic) => String(diagnostic.message).startsWith('stepBoid'))!;
-    expect(helper.range).toEqual(sourceRangeOnLine(16, 'vel = vel + d.vec3f(0.1);'));
+    expect(helper!.relatedInformation?.[1]?.location.range).toEqual(sourceRangeOnLine(22, 'mainCompute'));
   });
 
   it('folds compiler notes into the error they explain', async () => {
@@ -2536,8 +2531,101 @@ describe('cross-file statement-map diagnostics', () => {
       defaultSurfaceOptions,
       crossFileExternalSymbols,
     );
-    expect(diagnostic!.range).toEqual(rangeOnLine(crossFileEntrySource, 16, 'mainCompute'));
-    expect(diagnostic!.relatedInformation?.[0]?.location.uri).toBe(crossFileHelperUri);
-    expect(diagnostic!.message).not.toContain('generated WGSL line');
+    // mainCompute reaches rotateXY through stepBoid: the anchor is that call.
+    expect(diagnostic!.range).toEqual(rangeOnLine(crossFileEntrySource, 24, 'stepBoid'));
+    expect(diagnostic!.relatedInformation?.[0]).toMatchObject({
+      location: { uri: crossFileHelperUri },
+      message: 'in rotateXY (math.ts) via stepBoid',
+    });
+    expect(diagnostic!.message).toContain('(approximate source location)');
+  });
+
+  it('reports one finding when several targets inline the same broken helper', async () => {
+    const inspection = await materializeInspection(
+      '/workspace',
+      '/workspace/boids.ts',
+      1,
+      crossFileEntry,
+      {
+        ok: false,
+        targets: ['mainCompute', 'stepBoid'].map((name) => ({
+          label: targetOf(name).label,
+          kind: 'resolvable',
+          ok: false,
+          wgsl: statementMapWgsl,
+          statementMap,
+          compilationMessages: [helperMessage],
+          callIds: [1],
+        })),
+      },
+    );
+    const diagnostics = createDiagnostics(
+      crossFileEntryUri,
+      crossFileEntry,
+      inspection,
+      defaultSurfaceOptions,
+      crossFileExternalSymbols,
+    );
+    expect(diagnostics).toHaveLength(1);
+    const [diagnostic] = diagnostics;
+    expect(String(diagnostic!.message)).toMatch(/^stepBoid/);
+    expect(diagnostic!.range).toEqual(rangeOnLine(crossFileEntrySource, 13, 'rot'));
+    expect(diagnostic!.relatedInformation?.map((info) => info.message)).toEqual([
+      'in rotateXY (math.ts)',
+      'in fn rotateXY',
+      'also affects mainCompute',
+    ]);
+    expect(diagnostic!.relatedInformation?.[2]?.location).toEqual({
+      uri: crossFileEntryUri,
+      range: rangeOnLine(crossFileEntrySource, 16, 'mainCompute'),
+    });
+    expect(diagnostic!.data).toMatchObject({ affectedTargets: ['mainCompute'] });
+  });
+
+  it('keeps the call nearest to the broken helper when targets reach it through chains', async () => {
+    const source = [
+      "import { tgpu, d } from 'typegpu';",
+      "import { rotateXY } from './math.ts';",
+      "const spin = (v: d.v3f) => { 'use gpu'; return rotateXY(v, 0.5); };",
+      "export const near = tgpu.fn([d.u32])((i) => { 'use gpu'; const v = spin(d.vec3f(1)); });",
+      "export const far = tgpu.fn([d.u32])((i) => { 'use gpu'; near(i); });",
+    ].join('\n');
+    const module = discoverTypeGpuModule('/workspace/chain.ts', source);
+    const target = (name: string) => module.targets.find((t) => t.symbolNames.includes(name))!;
+    const externals = crossFileExternalSymbols.map((symbol) => ({ ...symbol, callName: 'rotateXY' }));
+    const inspection = await materializeInspection(
+      '/workspace',
+      '/workspace/chain.ts',
+      1,
+      module,
+      {
+        ok: false,
+        targets: ['far', 'near'].map((name) => ({
+          label: target(name).label,
+          kind: 'resolvable',
+          ok: false,
+          wgsl: statementMapWgsl,
+          statementMap,
+          compilationMessages: [helperMessage],
+          callIds: [1],
+        })),
+      },
+    );
+    const diagnostics = createDiagnostics(
+      'file:///workspace/chain.ts',
+      module,
+      inspection,
+      defaultSurfaceOptions,
+      externals,
+    );
+    expect(diagnostics).toHaveLength(1);
+    const [diagnostic] = diagnostics;
+    expect(String(diagnostic!.message)).toMatch(/^near/);
+    expect(diagnostic!.range).toEqual(rangeOnLine(source, 3, 'spin'));
+    expect(diagnostic!.relatedInformation?.map((info) => info.message)).toEqual([
+      'in rotateXY (math.ts) via spin',
+      'in fn rotateXY',
+      'also affects far',
+    ]);
   });
 });

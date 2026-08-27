@@ -21,7 +21,8 @@ grammar is enough.
   0.12 or newer the runtime records which statement produced each generated
   line, so the position is exact; older versions fall back to token matching.
   A helper imported from another file reports at its call site, with the
-  helper's statement linked as related information.
+  helper's statement linked as related information. A problem that several
+  targets inherit from one helper is reported once, listing the others.
 - Links to the generated `.wgsl` file and the full report. In VS Code, a
   generated-WGSL document and an inspection report open beside the editor and
   follow the cursor.

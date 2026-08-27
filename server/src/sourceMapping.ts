@@ -46,6 +46,17 @@ export type WgslDiagnosticMapping = {
     range: Range;
     sourceSymbol: string;
     uri?: string;
+    /** Helpers between the target's call site and the statement, nearest first. */
+    via?: string[];
+  };
+  /**
+   * The authored statement (or declaration) a statement-mapped diagnostic
+   * is about, wherever the diagnostic itself is anchored. Diagnostics from
+   * different targets that share a statement report one finding.
+   */
+  authoredStatement?: {
+    range: Range;
+    uri?: string;
   };
 };
 
@@ -295,6 +306,8 @@ export function mapResolutionFailure(
     statement ? statement.headRange : hit.symbol.range,
     undefined,
     targetSymbols,
+    symbols,
+    externalSymbols,
   );
 }
 
@@ -329,7 +342,7 @@ function mapThroughStatementMap(
 
   if (!entry) {
     return {
-      ...finishStatementMapping(hit, symbol.range, undefined, targetSymbols),
+      ...finishStatementMapping(hit, symbol.range, undefined, targetSymbols, symbols, externalSymbols),
       ...(generatedDeclaration ? { generatedDeclaration } : {}),
     };
   }
@@ -364,7 +377,14 @@ function mapThroughStatementMap(
     }
   }
   return {
-    ...finishStatementMapping(hit, pinned?.range ?? authored, pinned?.confidence, targetSymbols),
+    ...finishStatementMapping(
+      hit,
+      pinned?.range ?? authored,
+      pinned?.confidence,
+      targetSymbols,
+      symbols,
+      externalSymbols,
+    ),
     ...(generatedToken ? { generatedToken } : {}),
     ...(generatedDeclaration ? { generatedDeclaration } : {}),
   };
@@ -376,15 +396,22 @@ function mapThroughStatementMap(
  * unique call site in the target, carrying the statement as related source,
  * so the helper's own diagnostic stays the one that pins the line. A
  * statement in another file can only be related source: it anchors on the
- * unique call site, or on the target itself when there is none.
+ * unique call site, else on the nearest call site in the target that
+ * reaches the helper through other helpers, else on the target itself.
  */
 function finishStatementMapping(
   hit: AuthoredStatementHit,
   authored: Range,
   pinnedConfidence: 'high' | 'medium' | undefined,
   targetSymbols: DiscoveredSymbol[],
+  symbols: DiscoveredSymbol[],
+  externalSymbols: ExternalShaderSymbol[],
 ): WgslDiagnosticMapping {
   const strategy: WgslMappingStrategy = pinnedConfidence ? 'statement-token' : 'statement';
+  const authoredStatement = {
+    range: hit.statement?.range ?? hit.symbol.range,
+    ...(hit.uri ? { uri: hit.uri } : {}),
+  };
   const relatedSource = {
     range: authored,
     sourceSymbol: hit.symbol.name,
@@ -396,6 +423,7 @@ function finishStatementMapping(
       strategy,
       sourceRange: authored,
       sourceSymbol: hit.symbol.name,
+      authoredStatement,
     };
   }
   const callSites = sourceTokenMatches(targetSymbols, hit.callName);
@@ -406,6 +434,7 @@ function finishStatementMapping(
       sourceRange: callSites[0]!.token.range,
       sourceSymbol: hit.symbol.name,
       relatedSource,
+      authoredStatement,
     };
   }
   if (!hit.uri) {
@@ -414,6 +443,18 @@ function finishStatementMapping(
       strategy,
       sourceRange: authored,
       sourceSymbol: hit.symbol.name,
+      authoredStatement,
+    };
+  }
+  const reached = reachingCallSite(hit, targetSymbols, symbols, externalSymbols);
+  if (reached) {
+    return {
+      confidence: 'medium',
+      strategy: 'statement-call-site',
+      sourceRange: reached.range,
+      sourceSymbol: hit.symbol.name,
+      relatedSource: { ...relatedSource, via: reached.via },
+      authoredStatement,
     };
   }
   return {
@@ -421,7 +462,73 @@ function finishStatementMapping(
     strategy: 'statement-call-site',
     sourceSymbol: hit.symbol.name,
     relatedSource,
+    authoredStatement,
   };
+}
+
+const MAX_REACH_DEPTH = 4;
+
+type CallGraphNode = {
+  symbol: DiscoveredSymbol;
+  /** Names the node is called by: its declaration name and any entry-file alias. */
+  names: string[];
+};
+
+/**
+ * The unique call site in the target of a helper that (transitively) calls
+ * `hit`'s symbol, searched breadth first over the file's symbols and the
+ * imported helpers. Edges are by name, so the anchor is a heuristic; the
+ * related statement stays exact.
+ */
+function reachingCallSite(
+  hit: AuthoredStatementHit,
+  targetSymbols: DiscoveredSymbol[],
+  symbols: DiscoveredSymbol[],
+  externalSymbols: ExternalShaderSymbol[],
+): { range: Range; via: string[] } | undefined {
+  const nodes: CallGraphNode[] = [
+    ...symbols
+      .filter((symbol) => (symbol.shaderSourceTokens?.length ?? 0) > 0)
+      .map((symbol) => ({ symbol, names: uniqueNames([symbol.runtimeName, symbol.name]) })),
+    ...externalSymbols.map((external) => ({
+      symbol: external.symbol,
+      names: uniqueNames([external.callName, external.symbol.runtimeName, external.symbol.name]),
+    })),
+  ];
+  const visited = new Set<DiscoveredSymbol>([hit.symbol]);
+  let frontier: { node: CallGraphNode; via: string[] }[] = [
+    { node: { symbol: hit.symbol, names: [hit.callName] }, via: [] },
+  ];
+  for (let depth = 0; depth < MAX_REACH_DEPTH && frontier.length > 0; depth += 1) {
+    const next: { node: CallGraphNode; via: string[] }[] = [];
+    for (const current of frontier) {
+      for (const node of nodes) {
+        if (visited.has(node.symbol) || targetSymbols.includes(node.symbol)) continue;
+        if (!calls(node.symbol, current.node.names)) continue;
+        visited.add(node.symbol);
+        next.push({ node, via: [node.symbol.name, ...current.via] });
+      }
+    }
+    const callSites = next.flatMap((candidate) =>
+      candidate.node.names.flatMap((name) =>
+        sourceTokenMatches(targetSymbols, name).map((match) => ({ match, via: candidate.via }))
+      )
+    );
+    if (callSites.length === 1) {
+      return { range: callSites[0]!.match.token.range, via: callSites[0]!.via };
+    }
+    if (callSites.length > 1) return undefined;
+    frontier = next;
+  }
+  return undefined;
+}
+
+function calls(symbol: DiscoveredSymbol, names: string[]): boolean {
+  return (symbol.shaderSourceTokens ?? []).some((token) => names.includes(token.text));
+}
+
+function uniqueNames(names: (string | undefined)[]): string[] {
+  return [...new Set(names.filter((name): name is string => Boolean(name)))];
 }
 
 /**

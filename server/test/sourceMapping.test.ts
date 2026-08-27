@@ -762,7 +762,7 @@ describe('cross-file statement-map source mapping', () => {
     expect(mapping.relatedSource?.range).toEqual(rangeOnLine(crossFileHelperSource, 4, 'angle'));
   });
 
-  it('keeps the related statement when the target never calls the helper directly', () => {
+  it('anchors on the call site that reaches the helper through another helper', () => {
     const mapping = mapWgslDiagnostic(
       statementMapWgsl,
       helperReturn,
@@ -776,6 +776,25 @@ describe('cross-file statement-map source mapping', () => {
       strategy: 'statement-call-site',
       sourceSymbol: 'rotateXY',
     });
+    expect(mapping.sourceRange).toEqual(rangeOnLine(crossFileEntrySource, 24, 'stepBoid'));
+    expect(mapping.relatedSource).toMatchObject({ uri: crossFileHelperUri, via: ['stepBoid'] });
+    expect(mapping.authoredStatement).toEqual({
+      uri: crossFileHelperUri,
+      range: rangeOnLine(crossFileHelperSource, 6, 'return d.vec3f(p.x * c - p.y * s, p.x * s + p.y * c, p.z);'),
+    });
+  });
+
+  it('anchors on the target itself when no call site reaches the helper', () => {
+    const external = crossFileExternalSymbols.map((symbol) => ({ ...symbol, callName: 'elsewhere' }));
+    const mapping = mapWgslDiagnostic(
+      statementMapWgsl,
+      helperReturn,
+      targetOf('mainCompute'),
+      crossFileEntry.symbols,
+      statementMap,
+      external,
+    );
+    expect(mapping).toMatchObject({ confidence: 'medium', strategy: 'statement-call-site' });
     expect(mapping.sourceRange).toBeUndefined();
     expect(mapping.relatedSource?.uri).toBe(crossFileHelperUri);
   });
