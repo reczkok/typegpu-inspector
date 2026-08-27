@@ -130,6 +130,22 @@ impl zed::Extension for TypeGpuInspectorExtension {
                 LANGUAGE_SERVER_ENTRY,
             )?;
             args[0] = server.to_string_lossy().into_owned();
+
+            // The server launches the runtime installed beside it, which keeps
+            // inspections off the network; without one it falls back to npx,
+            // so a failed install here degrades rather than blocks.
+            let inspector = resolve_entry(
+                Some(language_server_id),
+                DEV_INSPECTOR_ENTRY,
+                INSPECTOR_PACKAGE,
+                INSPECTOR_ENTRY,
+            );
+            if inspector.is_err() {
+                report(
+                    Some(language_server_id),
+                    LanguageServerInstallationStatus::None,
+                );
+            }
         }
 
         Ok(Command { command, args, env })

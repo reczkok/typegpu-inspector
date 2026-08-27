@@ -45,7 +45,57 @@ describe('runtime inspector launch', () => {
     expect(launch.args).toEqual([bin]);
     expect(launch.env?.ELECTRON_RUN_AS_NODE).toBe('1');
   });
+
+  it('launches a version-matched runtime installed beside the server without npx', async () => {
+    const workDir = await mkdtemp(join(tmpdir(), 'typegpu-zed-work-'));
+    temporaryDirectories.push(workDir);
+    const bin = await writeRuntimePackage(workDir, __TYPEGPU_INSPECTOR_VERSION__);
+
+    const launch = await resolveInspectorLaunch('bundled', siblingServerEntry(workDir));
+
+    expect(launch.command).toBe(process.execPath);
+    expect(launch.args).toEqual([bin]);
+    expect(launch.env?.ELECTRON_RUN_AS_NODE).toBe('1');
+  });
+
+  it('falls back to npx when the sibling runtime version does not match', async () => {
+    const workDir = await mkdtemp(join(tmpdir(), 'typegpu-zed-work-'));
+    temporaryDirectories.push(workDir);
+    await writeRuntimePackage(workDir, '0.0.0-stale');
+
+    const launch = await resolveInspectorLaunch('bundled', siblingServerEntry(workDir));
+
+    expect(launch.command).toBe('npx');
+    expect(launch.args).toEqual([
+      '-y',
+      `typegpu-runtime-inspector-mcp@${__TYPEGPU_INSPECTOR_VERSION__}`,
+    ]);
+  });
 });
+
+/** Where Zed's npm install puts the server bundle under its work directory. */
+function siblingServerEntry(workDir: string): string {
+  return join(
+    workDir,
+    'node_modules',
+    'typegpu-inspector-language-server',
+    'dist',
+    'server.cjs',
+  );
+}
+
+/** Writes a stub `typegpu-runtime-inspector-mcp` under `root/node_modules`. */
+async function writeRuntimePackage(root: string, version: string): Promise<string> {
+  const packageRoot = join(root, 'node_modules', 'typegpu-runtime-inspector-mcp');
+  const bin = join(packageRoot, 'bin', 'typegpu-runtime-inspector-mcp.mjs');
+  await mkdir(join(packageRoot, 'bin'), { recursive: true });
+  await writeFile(
+    join(packageRoot, 'package.json'),
+    JSON.stringify({ name: 'typegpu-runtime-inspector-mcp', version }),
+  );
+  await writeFile(bin, '#!/usr/bin/env node\n');
+  return bin;
+}
 
 async function makeExecutable(directory: string, name: string): Promise<string> {
   const file = join(directory, name);

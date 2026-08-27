@@ -283,6 +283,7 @@ const PACKAGE_SPEC_PATTERN =
 
 export async function resolveInspectorLaunch(
   inspectorPackage: string,
+  serverEntry: string = process.argv[1] ?? process.cwd(),
 ): Promise<{ command: string; args: string[]; env?: Record<string, string> }> {
   if (inspectorPackage !== 'bundled') {
     if (!PACKAGE_SPEC_PATTERN.test(inspectorPackage)) {
@@ -296,7 +297,6 @@ export async function resolveInspectorLaunch(
     };
   }
 
-  const serverEntry = process.argv[1] ?? process.cwd();
   const inspectorRoot = resolve(dirname(serverEntry), '..', '..', 'inspector');
   const bin = resolve(
     inspectorRoot,
@@ -313,9 +313,19 @@ export async function resolveInspectorLaunch(
         env: { ...getDefaultEnvironment(), ELECTRON_RUN_AS_NODE: '1' },
       };
     }
+    // Zed installs the runtime package next to this server, so launch that
+    // copy and stay off the network.
+    const siblingBin = await findSiblingRuntime(dirname(serverEntry));
+    if (siblingBin) {
+      return {
+        command: process.execPath,
+        args: [siblingBin],
+        env: { ...getDefaultEnvironment(), ELECTRON_RUN_AS_NODE: '1' },
+      };
+    }
     // Standalone npm-published server builds have no monorepo checkout next
     // to server.cjs; launch the published runtime instead. npx caches the
-    // package, and its Playwright Chromium download happens once.
+    // package but still contacts the registry on every launch.
     return {
       command: 'npx',
       args: ['-y', FALLBACK_INSPECTOR_SPEC],
@@ -377,6 +387,27 @@ async function installInspectorRuntime(runtimeDir: string): Promise<string> {
     return bin;
   } finally {
     await releaseLock();
+  }
+}
+
+/**
+ * Finds a version-matched `typegpu-runtime-inspector-mcp` in the
+ * `node_modules` trees enclosing `directory`; the package's exports map
+ * hides its bin from `require.resolve`, so walk the tree by hand.
+ */
+async function findSiblingRuntime(directory: string): Promise<string | undefined> {
+  let current = resolve(directory);
+  while (true) {
+    const packageRoot = join(
+      current,
+      'node_modules',
+      'typegpu-runtime-inspector-mcp',
+    );
+    const bin = join(packageRoot, 'bin', 'typegpu-runtime-inspector-mcp.mjs');
+    if (await installedRuntimeMatches(packageRoot, bin)) return bin;
+    const parent = dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
   }
 }
 

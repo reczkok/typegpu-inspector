@@ -46,6 +46,17 @@ and released together. The format follows
   sites listed on an `also in` line; the JSON carries them as `alsoIn` and
   the finding's statement as `finding`.
 
+### Fixed
+
+- Zed inspections no longer need the network after the first install. The
+  language server launched the runtime through `npx`, which contacts the npm
+  registry on every start even when the package is cached, so an inspection
+  failed offline. The server now runs the `typegpu-runtime-inspector-mcp`
+  copy installed beside it when the versions match, and the Zed extension
+  installs that copy when the language server starts instead of only when
+  the agent's context server does. `npx` remains the fallback when neither a
+  monorepo checkout nor a sibling install exists.
+
 ## [0.7.0] - 2026-08-27
 
 ### Added

@@ -104,9 +104,10 @@ Invalid values are dropped and logged. Changes apply without a restart, except
 
 ## What it downloads and runs
 
-The first inspection downloads `typegpu-runtime-inspector-mcp` from npm and a
+The extension downloads `typegpu-runtime-inspector-mcp` from npm (Zed when
+the language server starts, VS Code before the first inspection) and a
 Playwright Chromium build (about 170 MB to download, 550 MB on disk), once
-per machine. It then runs the project's top-level TypeGPU module code inside
+per machine. After that, inspection works offline. It then runs the project's top-level TypeGPU module code inside
 that browser, so a module with import-time side effects performs them. VS Code
 asks once, in a dialog, before the first download.
 
