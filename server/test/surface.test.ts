@@ -2269,10 +2269,7 @@ describe('statement-map diagnostics', () => {
     expect(String(helper!.message)).toMatch(/^stepBoid/);
     // The quoted snippet narrows the column within the mapped statement.
     expect(helper!.range).toEqual(sourceRangeOnLine(16, 'vel = vel + d.vec3f'));
-    expect(helper!.relatedInformation).toEqual([{
-      location: { uri: 'file:///workspace/boids.ts', range: sourceRangeOnLine(22, 'mainCompute') },
-      message: 'also affects mainCompute',
-    }]);
+    expect(helper!.relatedInformation).toBeUndefined();
     expect(helper!.data).toMatchObject({
       mapping: { strategy: 'statement', confidence: 'high' },
       affectedTargets: ['mainCompute'],
@@ -2378,11 +2375,8 @@ describe('statement-map diagnostics', () => {
     const [helper] = diagnostics;
     expect(String(helper!.message)).toMatch(/^stepBoid/);
     expect(helper!.range).toEqual(sourceRangeOnLine(16, 'vel = vel + d.vec3f(0.1);'));
-    expect(helper!.relatedInformation?.map((info) => info.message)).toEqual([
-      'in fn stepBoid',
-      'also affects mainCompute',
-    ]);
-    expect(helper!.relatedInformation?.[1]?.location.range).toEqual(sourceRangeOnLine(22, 'mainCompute'));
+    expect(helper!.relatedInformation?.map((info) => info.message)).toEqual(['in fn stepBoid']);
+    expect(helper!.data).toMatchObject({ affectedTargets: ['mainCompute'] });
   });
 
   it('folds compiler notes into the error they explain', async () => {
@@ -2498,7 +2492,7 @@ describe('cross-file statement-map diagnostics', () => {
         uri: crossFileHelperUri,
         range: rangeOnLine(crossFileHelperSource, 6, 'return d.vec3f(p.x * c - p.y * s, p.x * s + p.y * c, p.z);'),
       },
-      message: 'in rotateXY (math.ts:7)',
+      message: 'in rotateXY',
     });
     const note = diagnostic!.relatedInformation?.find((info) => info.message === 'parameter p declared here');
     expect(note?.location.uri).toBe(crossFileHelperUri);
@@ -2546,7 +2540,7 @@ describe('cross-file statement-map diagnostics', () => {
     const markdown = (hover!.contents as { value: string }).value;
     expect(markdown).toContain('**stepBoid: no matching overload for operator -**');
     expect(markdown).toContain('in `rotateXY` — [math.ts:7](file:///workspace/math.ts#L7,3)');
-    expect(markdown).toContain('Also affects `mainCompute`.');
+    expect(markdown).toContain('Also affects 1 target: `mainCompute`.');
     expect(createFindingHover(diagnostics, { line: 5, character: 2 })).toBeUndefined();
 
     const merged = appendHover({ contents: { kind: 'markdown', value: '### symbol' } }, hover);
@@ -2584,7 +2578,7 @@ describe('cross-file statement-map diagnostics', () => {
     expect(diagnostic!.range).toEqual(rangeOnLine(crossFileEntrySource, 24, 'stepBoid'));
     expect(diagnostic!.relatedInformation?.[0]).toMatchObject({
       location: { uri: crossFileHelperUri },
-      message: 'in rotateXY (math.ts:7) via stepBoid',
+      message: 'in rotateXY via stepBoid',
     });
     expect(diagnostic!.message).toContain(
       '(approximate source location) — in rotateXY (math.ts:7) via stepBoid',
@@ -2622,14 +2616,9 @@ describe('cross-file statement-map diagnostics', () => {
     expect(String(diagnostic!.message)).toMatch(/^stepBoid/);
     expect(diagnostic!.range).toEqual(rangeOnLine(crossFileEntrySource, 13, 'rot'));
     expect(diagnostic!.relatedInformation?.map((info) => info.message)).toEqual([
-      'in rotateXY (math.ts:7)',
+      'in rotateXY',
       'in fn rotateXY',
-      'also affects mainCompute',
     ]);
-    expect(diagnostic!.relatedInformation?.[2]?.location).toEqual({
-      uri: crossFileEntryUri,
-      range: rangeOnLine(crossFileEntrySource, 16, 'mainCompute'),
-    });
     expect(diagnostic!.data).toMatchObject({ affectedTargets: ['mainCompute'] });
   });
 
@@ -2674,9 +2663,9 @@ describe('cross-file statement-map diagnostics', () => {
     expect(String(diagnostic!.message)).toMatch(/^near/);
     expect(diagnostic!.range).toEqual(rangeOnLine(source, 3, 'spin'));
     expect(diagnostic!.relatedInformation?.map((info) => info.message)).toEqual([
-      'in rotateXY (math.ts:7) via spin',
+      'in rotateXY via spin',
       'in fn rotateXY',
-      'also affects far',
     ]);
+    expect(diagnostic!.data).toMatchObject({ affectedTargets: ['far'] });
   });
 });

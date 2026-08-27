@@ -733,7 +733,7 @@ export function createDiagnostics(
     }
   }
   settleCallSiteDiagnostics(mappedEntries, sourceUri);
-  const dropped = collapseFanOut(mappedEntries, sourceUri);
+  const dropped = collapseFanOut(mappedEntries);
   return deduplicateDiagnostics(diagnostics.filter((diagnostic) => !dropped.has(diagnostic)));
 }
 
@@ -787,13 +787,12 @@ function mappedEntry(
  * the helper's problem; after settling, the best-anchored report stays —
  * on the statement, else a direct call site, else the call site nearest to
  * the statement through other helpers, else the target's declaration — and
- * the others become `also affects` related entries on it. Returns the
- * diagnostics that were folded away.
+ * the targets of the others are recorded on it (`data.affectedTargets`, shown
+ * in the finding hover). They get no related entries: their own inlay hints
+ * and hovers already say they failed, and Zed would turn such entries into
+ * hint markers on every one of them. Returns the diagnostics folded away.
  */
-function collapseFanOut(
-  entries: MappedDiagnosticEntry[],
-  sourceUri: string,
-): Set<Diagnostic> {
+function collapseFanOut(entries: MappedDiagnosticEntry[]): Set<Diagnostic> {
   const groups = new Map<string, MappedDiagnosticEntry[]>();
   for (const entry of entries) {
     if (!entry.finding) continue;
@@ -822,15 +821,10 @@ function collapseFanOut(
       else folded.push(entry);
     }
     const primary = kept[0]!.diagnostic;
-    const affected = folded.map((entry) => entry.targetLabel);
-    primary.relatedInformation = [
-      ...(primary.relatedInformation ?? []),
-      ...folded.map((entry) => ({
-        location: { uri: sourceUri, range: entry.targetRange },
-        message: `also affects ${entry.targetLabel}`,
-      })),
-    ];
-    primary.data = { ...(primary.data as object), affectedTargets: affected };
+    primary.data = {
+      ...(primary.data as object),
+      affectedTargets: folded.map((entry) => entry.targetLabel),
+    };
     for (const entry of folded) dropped.add(entry.diagnostic);
   }
   return dropped;
@@ -848,14 +842,14 @@ function anchorRank(entry: MappedDiagnosticEntry): number {
 
 type RelatedSource = NonNullable<WgslDiagnosticMapping['relatedSource']>;
 
-/** The helper statement behind a call-site diagnostic; names the file when it is another one. */
+/** The helper statement behind a call-site diagnostic; the editor shows the location itself. */
 function relatedSourceInformation(
   relatedSource: RelatedSource,
   sourceUri: string,
 ): DiagnosticRelatedInformation {
   return {
     location: { uri: relatedSource.uri ?? sourceUri, range: relatedSource.range },
-    message: describeRelatedSource(relatedSource),
+    message: `in ${relatedSource.sourceSymbol}${viaSuffix(relatedSource)}`,
   };
 }
 
@@ -864,8 +858,11 @@ function describeRelatedSource(relatedSource: RelatedSource): string {
   const where = relatedSource.uri
     ? ` (${basename(fileURLToPath(relatedSource.uri))}:${relatedSource.range.start.line + 1})`
     : '';
-  const via = relatedSource.via?.length ? ` via ${relatedSource.via.join(' → ')}` : '';
-  return `in ${relatedSource.sourceSymbol}${where}${via}`;
+  return `in ${relatedSource.sourceSymbol}${where}${viaSuffix(relatedSource)}`;
+}
+
+function viaSuffix(relatedSource: RelatedSource): string {
+  return relatedSource.via?.length ? ` via ${relatedSource.via.join(' → ')}` : '';
 }
 
 /**
@@ -910,17 +907,22 @@ export function createFindingHover(
     };
     const relatedSource = data.relatedSource;
     const message = String(diagnostic.message).replace(crossFileSuffix(relatedSource), '');
-    const via = relatedSource.via?.length ? ` via ${relatedSource.via.join(' → ')}` : '';
     if (lines.length > 0) lines.push('');
     lines.push(
       `**${escapeInline(message)}**`,
       '',
       `in \`${escapeInline(relatedSource.sourceSymbol)}\` — ${
         locationLink(relatedSource.uri, relatedSource.range)
-      }${escapeInline(via)}`,
+      }${escapeInline(viaSuffix(relatedSource))}`,
     );
-    if (data.affectedTargets?.length) {
-      lines.push('', `Also affects ${data.affectedTargets.map((name) => `\`${escapeInline(name)}\``).join(', ')}.`);
+    const affected = data.affectedTargets ?? [];
+    if (affected.length > 0) {
+      lines.push(
+        '',
+        `Also affects ${plural(affected.length, 'target')}: ${
+          affected.map((name) => `\`${escapeInline(name)}\``).join(', ')
+        }.`,
+      );
     }
   }
   return { contents: { kind: MarkupKind.Markdown, value: lines.join('\n') } };

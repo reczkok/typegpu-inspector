@@ -25,8 +25,8 @@ and released together. The format follows
   reaches the helper only through other helpers, the anchor is the call
   nearest to it (`in evaluateLight (pbr.ts) via shade`). One finding is
   reported once: every target that inlines a broken helper reports it, and
-  the best-anchored report keeps the squiggle while the others become
-  `also affects <target>` related entries. A statement in another file is
+  the best-anchored report keeps the squiggle and its hover lists the other
+  targets. A statement in another file is
   also named in the message (`— in shade (pbr.ts:98) via evaluateLight`),
   and hovering the diagnostic shows a link to it, since not every editor
   renders related information that points into another file. Compiler notes join
