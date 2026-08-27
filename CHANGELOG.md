@@ -6,7 +6,7 @@ and released together. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.0] - 2026-08-27
 
 ### Added
 
@@ -136,6 +136,7 @@ First public release: VS Code Marketplace, and Zed as a dev extension.
 Internal iterations: hover and inlay surface work, discovery and diagnostics
 tuning, packaging experiments. Not published to any store.
 
+[0.7.0]: https://github.com/reczkok/typegpu-inspector/releases/tag/v0.7.0
 [0.6.1]: https://github.com/reczkok/typegpu-inspector/releases/tag/v0.6.1
 [0.6.0]: https://github.com/reczkok/typegpu-inspector/releases/tag/v0.6.0
 [0.5.0]: https://github.com/reczkok/typegpu-inspector/releases/tag/v0.5.0

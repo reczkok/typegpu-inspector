@@ -1,6 +1,6 @@
 id = "typegpu-inspector"
 name = "TypeGPU Inspector"
-version = "0.6.1"
+version = "0.7.0"
 schema_version = 1
 authors = ["Konrad Reczko"]
 description = "Inspect TypeGPU pipelines, resources, memory layouts, and generated WGSL in the editor."
