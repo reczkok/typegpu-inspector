@@ -5,6 +5,7 @@ import {
   type InspectionTarget,
 } from '../src/discovery.js';
 import type { InspectorStatementMap } from '../src/protocol.js';
+import type { ExternalShaderSymbol } from '../src/moduleGraph.js';
 import { mapResolutionFailure, mapWgslDiagnostic } from '../src/sourceMapping.js';
 import {
   offsetOnLine,
@@ -782,6 +783,70 @@ describe('cross-file statement-map source mapping', () => {
       uri: crossFileHelperUri,
       range: rangeOnLine(crossFileHelperSource, 6, 'return d.vec3f(p.x * c - p.y * s, p.x * s + p.y * c, p.z);'),
     });
+  });
+
+  it('reaches the helper through an aliased call in a third file', () => {
+    const stepsSource = [
+      "import { tgpu, d } from 'typegpu';",
+      "import { rotateXY as rot } from './math.ts';",
+      'export const stepBoid = tgpu.fn([d.u32])((index) => {',
+      "  'use gpu';",
+      '  layout.$.boids[index].pos = rot(d.vec3f(1), 0.01);',
+      '});',
+    ].join('\n');
+    const entrySource = [
+      "import { tgpu, d } from 'typegpu';",
+      "import { stepBoid as step } from './steps.ts';",
+      'export const mainCompute = tgpu.computeFn({',
+      '  in: { gid: d.builtin.globalInvocationId },',
+      '  workgroupSize: [64],',
+      '})(({ gid }) => {',
+      "  'use gpu';",
+      '  step(gid.x);',
+      '});',
+    ].join('\n');
+    const steps = discoverTypeGpuModule('/workspace/steps.ts', stepsSource);
+    const entry = discoverTypeGpuModule('/workspace/boids.ts', entrySource);
+    const stepBoid = steps.symbols.find((symbol) => symbol.name === 'stepBoid')!;
+    const rotateXY = crossFileExternalSymbols[0]!;
+    const withAliases: ExternalShaderSymbol[] = [
+      {
+        symbol: rotateXY.symbol,
+        fileName: rotateXY.fileName,
+        uri: rotateXY.uri,
+        localNames: { '/workspace/steps.ts': 'rot' },
+      },
+      {
+        symbol: stepBoid,
+        fileName: '/workspace/steps.ts',
+        uri: 'file:///workspace/steps.ts',
+        callName: 'step',
+        localNames: { '/workspace/boids.ts': 'step' },
+      },
+    ];
+    const target = entry.targets.find((candidate) => candidate.symbolNames.includes('mainCompute'))!;
+    const mapping = mapWgslDiagnostic(
+      statementMapWgsl,
+      helperReturn,
+      target,
+      entry.symbols,
+      statementMap,
+      withAliases,
+    );
+    expect(mapping).toMatchObject({ confidence: 'medium', strategy: 'statement-call-site' });
+    expect(mapping.sourceRange).toEqual(rangeOnLine(entrySource, 7, 'step'));
+    expect(mapping.relatedSource).toMatchObject({ uri: crossFileHelperUri, via: ['stepBoid'] });
+
+    const withoutAliases = withAliases.map((external) => ({ ...external, localNames: {} }));
+    const unreached = mapWgslDiagnostic(
+      statementMapWgsl,
+      helperReturn,
+      target,
+      entry.symbols,
+      statementMap,
+      withoutAliases,
+    );
+    expect(unreached.sourceRange).toBeUndefined();
   });
 
   it('anchors on the target itself when no call site reaches the helper', () => {

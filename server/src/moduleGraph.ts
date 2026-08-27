@@ -19,6 +19,8 @@ export type ExternalShaderSymbol = {
   uri: string;
   /** Identifier the entry module refers to it by, when it imports it directly. */
   callName?: string;
+  /** Identifier each importing module (by file name) refers to it by; re-exports are followed. */
+  localNames?: Record<string, string>;
 };
 
 export type ModuleGraphOptions = {
@@ -30,6 +32,7 @@ export type ModuleGraphOptions = {
 
 const DEFAULT_MAX_MODULES = 64;
 const DEFAULT_MAX_DEPTH = 4;
+const MAX_REEXPORT_DEPTH = 8;
 const MODULE_CACHE_LIMIT = 256;
 const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs']);
 
@@ -39,9 +42,13 @@ const moduleCache = new Map<string, CachedModule>();
 type CachedOptions = { modifiedAt: number; options: ts.CompilerOptions };
 const optionsCache = new Map<string, CachedOptions>();
 
+type GraphModule = { fileName: string; module: DiscoveredModule; depth: number };
+type ExportOrigin = { fileName: string; name: string };
+
 /**
  * Walks the import graph from `entry` (breadth first, bounded) and returns
- * every shader function declared in the imported modules.
+ * every shader function declared in the imported modules, with the name
+ * each module of the graph calls it by.
  */
 export function collectImportedShaderSymbols(
   entryFileName: string,
@@ -50,42 +57,87 @@ export function collectImportedShaderSymbols(
 ): ExternalShaderSymbol[] {
   const maxModules = options.maxModules ?? DEFAULT_MAX_MODULES;
   const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH;
-  const visited = new Set<string>([entryFileName]);
-  const queue: { fileName: string; module: DiscoveredModule; depth: number }[] = [
-    { fileName: entryFileName, module: entry, depth: 0 },
-  ];
-  const directAliases = new Map<string, Map<string, string>>();
-  const symbols: ExternalShaderSymbol[] = [];
+  const resolved = new Map<string, string | undefined>();
+  const resolve = (specifier: string, fromFileName: string): string | undefined => {
+    const key = `${fromFileName}\n${specifier}`;
+    if (!resolved.has(key)) resolved.set(key, resolveImport(specifier, fromFileName));
+    return resolved.get(key);
+  };
 
-  while (queue.length > 0 && visited.size <= maxModules) {
+  const modules = new Map<string, GraphModule>();
+  const visited = new Set<string>([entryFileName]);
+  const root: GraphModule = { fileName: entryFileName, module: entry, depth: 0 };
+  modules.set(entryFileName, root);
+  const queue: GraphModule[] = [root];
+  while (queue.length > 0) {
     const current = queue.shift()!;
     if (current.depth >= maxDepth) continue;
     for (const edge of current.module.imports) {
-      const resolved = resolveImport(edge.specifier, current.fileName);
-      if (!resolved) continue;
-      if (current.depth === 0 && edge.bindings) {
-        const aliases = directAliases.get(resolved) ?? new Map<string, string>();
-        for (const binding of edge.bindings) aliases.set(binding.imported, binding.local);
-        directAliases.set(resolved, aliases);
-      }
-      if (visited.has(resolved)) continue;
+      const fileName = resolve(edge.specifier, current.fileName);
+      if (!fileName || visited.has(fileName)) continue;
       if (visited.size >= maxModules) break;
-      visited.add(resolved);
-      const module = loadModule(resolved, options.readText);
+      visited.add(fileName);
+      const module = loadModule(fileName, options.readText);
       if (!module) continue;
-      const uri = pathToFileURL(resolved).href;
-      const aliases = directAliases.get(resolved);
-      for (const symbol of module.symbols) {
-        if ((symbol.shaderBodies?.length ?? 0) === 0) continue;
-        const callName = aliases?.get(symbol.name);
-        symbols.push({
-          symbol,
-          fileName: resolved,
-          uri,
-          ...(callName ? { callName } : {}),
-        });
+      const graphModule = { fileName, module, depth: current.depth + 1 };
+      modules.set(fileName, graphModule);
+      queue.push(graphModule);
+    }
+  }
+
+  // Follows `export … from` chains to the module that declares `name`.
+  const originOf = (fileName: string, name: string, depth: number): ExportOrigin | undefined => {
+    const graphModule = modules.get(fileName);
+    if (!graphModule) return { fileName, name };
+    if (graphModule.module.symbols.some((symbol) => symbol.name === name)) {
+      return { fileName, name };
+    }
+    if (depth >= MAX_REEXPORT_DEPTH) return undefined;
+    for (const edge of graphModule.module.imports) {
+      if (!edge.reexport) continue;
+      const target = resolve(edge.specifier, fileName);
+      if (!target) continue;
+      if (edge.bindings) {
+        const binding = edge.bindings.find((candidate) => candidate.local === name);
+        if (binding) return originOf(target, binding.imported, depth + 1);
+        continue;
       }
-      queue.push({ fileName: resolved, module, depth: current.depth + 1 });
+      const origin = originOf(target, name, depth + 1);
+      if (origin) return origin;
+    }
+    return undefined;
+  };
+
+  const localNames = new Map<string, Record<string, string>>();
+  for (const importer of modules.values()) {
+    for (const edge of importer.module.imports) {
+      if (edge.reexport || !edge.bindings) continue;
+      const target = resolve(edge.specifier, importer.fileName);
+      if (!target) continue;
+      for (const binding of edge.bindings) {
+        const origin = originOf(target, binding.imported, 0);
+        if (!origin) continue;
+        const key = `${origin.fileName}\n${origin.name}`;
+        localNames.set(key, { ...localNames.get(key), [importer.fileName]: binding.local });
+      }
+    }
+  }
+
+  const symbols: ExternalShaderSymbol[] = [];
+  for (const { fileName, module } of modules.values()) {
+    if (fileName === entryFileName) continue;
+    const uri = pathToFileURL(fileName).href;
+    for (const symbol of module.symbols) {
+      if ((symbol.shaderBodies?.length ?? 0) === 0) continue;
+      const names = localNames.get(`${fileName}\n${symbol.name}`) ?? {};
+      const callName = names[entryFileName];
+      symbols.push({
+        symbol,
+        fileName,
+        uri,
+        ...(callName ? { callName } : {}),
+        localNames: names,
+      });
     }
   }
   return symbols;

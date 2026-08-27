@@ -31,12 +31,20 @@ describe('collectImportedShaderSymbols', () => {
       "import * as lib from '@shaders/lib';",
       "import type { Only } from './helpers/types-only.ts';",
       "import { plain } from './helpers/plain.ts';",
+      "import { viaBarrel as vb, starred } from './helpers/index.ts';",
       'export const main = tgpu.computeFn({ workgroupSize: [1] })(() => {',
       "  'use gpu';",
-      '  a(); helperB(); lib.libFn();',
+      '  a(); helperB(); lib.libFn(); vb(); starred();',
       '});',
     ].join('\n'),
-    'src/helpers/a.ts': `${shaderFn('helperA')}\nimport { deep } from './deep.ts';\n`,
+    'src/helpers/a.ts': `${shaderFn('helperA')}\nimport { deep as deepFn } from './deep.ts';\n`,
+    'src/helpers/index.ts': [
+      "export { barrelled as viaBarrel } from './barrelled.ts';",
+      "export * from './starred.ts';",
+      '',
+    ].join('\n'),
+    'src/helpers/barrelled.ts': shaderFn('barrelled'),
+    'src/helpers/starred.ts': shaderFn('starred'),
     'src/helpers/b.ts': shaderFn('helperB'),
     'src/helpers/deep.ts': shaderFn('deep'),
     'src/helpers/types-only.ts': shaderFn('typesOnly'),
@@ -80,12 +88,27 @@ describe('collectImportedShaderSymbols', () => {
       }))
       .sort((left, right) => left.name.localeCompare(right.name));
     expect(summary).toEqual([
+      { name: 'barrelled', uri: pathToFileURL(join(root, 'src/helpers/barrelled.ts')).href, callName: 'vb' },
       { name: 'deep', uri: pathToFileURL(join(root, 'src/helpers/deep.ts')).href, callName: undefined },
       { name: 'helperA', uri: pathToFileURL(join(root, 'src/helpers/a.ts')).href, callName: 'a' },
       { name: 'helperB', uri: pathToFileURL(join(root, 'src/helpers/b.ts')).href, callName: 'helperB' },
       { name: 'libFn', uri: pathToFileURL(join(root, 'shaders/lib.ts')).href, callName: undefined },
+      { name: 'starred', uri: pathToFileURL(join(root, 'src/helpers/starred.ts')).href, callName: 'starred' },
     ]);
     expect(symbols.every((external) => (external.symbol.shaderBodies?.length ?? 0) > 0)).toBe(true);
+  });
+
+  it('records the name each importing module uses, following re-exports', () => {
+    const entryFile = join(root, 'src/entry.ts');
+    const entry = discoverTypeGpuModule(entryFile, files['src/entry.ts']!);
+    const symbols = collectImportedShaderSymbols(entryFile, entry);
+    const localNames = (name: string) =>
+      symbols.find((external) => external.symbol.name === name)!.localNames;
+    expect(localNames('helperA')).toEqual({ [entryFile]: 'a' });
+    expect(localNames('deep')).toEqual({ [join(root, 'src/helpers/a.ts')]: 'deepFn' });
+    expect(localNames('barrelled')).toEqual({ [entryFile]: 'vb' });
+    expect(localNames('starred')).toEqual({ [entryFile]: 'starred' });
+    expect(localNames('libFn')).toEqual({});
   });
 
   it('prefers editor text over disk and honours the module cap', () => {

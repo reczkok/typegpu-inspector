@@ -157,6 +157,8 @@ export type ModuleImport = {
   specifier: string;
   /** Imported name → local alias for named forms; absent for `import *` / `export *`. */
   bindings?: ModuleImportBinding[];
+  /** `export … from`: the names are this module's exports, not its bindings. */
+  reexport?: true;
 };
 
 export type ModuleImportBinding = {
@@ -2441,7 +2443,7 @@ function collectModuleImports(sourceFile: ts.SourceFile): ModuleImport[] {
     ) {
       const specifier = statement.moduleSpecifier.text;
       if (!statement.exportClause || ts.isNamespaceExport(statement.exportClause)) {
-        imports.push({ specifier });
+        imports.push({ specifier, reexport: true });
         continue;
       }
       const bindings = statement.exportClause.elements
@@ -2450,7 +2452,7 @@ function collectModuleImports(sourceFile: ts.SourceFile): ModuleImport[] {
           imported: (element.propertyName ?? element.name).text,
           local: element.name.text,
         }));
-      if (bindings.length > 0) imports.push({ specifier, bindings });
+      if (bindings.length > 0) imports.push({ specifier, bindings, reexport: true });
     }
   }
   return imports;

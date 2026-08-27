@@ -811,13 +811,15 @@ function collapseFanOut(entries: MappedDiagnosticEntry[]): Set<Diagnostic> {
         left.index - right.index
       );
     const best = ranked[0]!.rank;
+    // Declarations say nothing about where the finding is reached; one is enough.
+    const single = best === DECLARATION_ANCHOR_RANK;
     const kept: MappedDiagnosticEntry[] = [];
     const folded: MappedDiagnosticEntry[] = [];
     for (const { entry, rank } of ranked) {
       const duplicate = kept.some((keeper) =>
         rangeEquals(keeper.diagnostic.range, entry.diagnostic.range)
       );
-      if (rank === best && !duplicate) kept.push(entry);
+      if (rank === best && !duplicate && !(single && kept.length > 0)) kept.push(entry);
       else folded.push(entry);
     }
     const primary = kept[0]!.diagnostic;

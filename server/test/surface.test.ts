@@ -2668,4 +2668,40 @@ describe('cross-file statement-map diagnostics', () => {
     ]);
     expect(diagnostic!.data).toMatchObject({ affectedTargets: ['far'] });
   });
+
+  it('reports a finding once when no target reaches the helper', async () => {
+    const externals = crossFileExternalSymbols.map((symbol) => ({ ...symbol, callName: 'elsewhere' }));
+    const target = (name: string) =>
+      crossFileEntry.targets.find((candidate) => candidate.symbolNames.includes(name))!;
+    const inspection = await materializeInspection(
+      '/workspace',
+      '/workspace/boids.ts',
+      1,
+      crossFileEntry,
+      {
+        ok: false,
+        targets: ['mainCompute', 'stepBoid'].map((name) => ({
+          label: target(name).label,
+          kind: 'resolvable',
+          ok: false,
+          wgsl: statementMapWgsl,
+          statementMap,
+          compilationMessages: [helperMessage],
+          callIds: [1],
+        })),
+      },
+    );
+    const diagnostics = createDiagnostics(
+      crossFileEntryUri,
+      crossFileEntry,
+      inspection,
+      defaultSurfaceOptions,
+      externals,
+    );
+    expect(diagnostics).toHaveLength(1);
+    const [diagnostic] = diagnostics;
+    expect(String(diagnostic!.message)).toMatch(/^stepBoid/);
+    expect(diagnostic!.range).toEqual(rangeOnLine(crossFileEntrySource, 3, 'stepBoid'));
+    expect(diagnostic!.data).toMatchObject({ affectedTargets: ['mainCompute'] });
+  });
 });

@@ -1035,8 +1035,8 @@ describe('module imports', () => {
       },
       { specifier: '@shaders/lib' },
       { specifier: './default.ts', bindings: [{ imported: 'default', local: 'defaultFn' }] },
-      { specifier: './reexport.ts', bindings: [{ imported: 'reexported', local: 'pub' }] },
-      { specifier: './star.ts' },
+      { specifier: './reexport.ts', bindings: [{ imported: 'reexported', local: 'pub' }], reexport: true },
+      { specifier: './star.ts', reexport: true },
     ]);
   });
 });

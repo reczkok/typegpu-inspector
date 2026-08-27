@@ -470,8 +470,8 @@ const MAX_REACH_DEPTH = 4;
 
 type CallGraphNode = {
   symbol: DiscoveredSymbol;
-  /** Names the node is called by: its declaration name and any entry-file alias. */
-  names: string[];
+  /** Set when the symbol is declared in another file. */
+  external?: ExternalShaderSymbol;
 };
 
 /**
@@ -489,28 +489,24 @@ function reachingCallSite(
   const nodes: CallGraphNode[] = [
     ...symbols
       .filter((symbol) => (symbol.shaderSourceTokens?.length ?? 0) > 0)
-      .map((symbol) => ({ symbol, names: uniqueNames([symbol.runtimeName, symbol.name]) })),
-    ...externalSymbols.map((external) => ({
-      symbol: external.symbol,
-      names: uniqueNames([external.callName, external.symbol.runtimeName, external.symbol.name]),
-    })),
+      .map((symbol) => ({ symbol })),
+    ...externalSymbols.map((external) => ({ symbol: external.symbol, external })),
   ];
+  const origin = nodes.find((node) => node.symbol === hit.symbol) ?? { symbol: hit.symbol };
   const visited = new Set<DiscoveredSymbol>([hit.symbol]);
-  let frontier: { node: CallGraphNode; via: string[] }[] = [
-    { node: { symbol: hit.symbol, names: [hit.callName] }, via: [] },
-  ];
+  let frontier: { node: CallGraphNode; via: string[] }[] = [{ node: origin, via: [] }];
   for (let depth = 0; depth < MAX_REACH_DEPTH && frontier.length > 0; depth += 1) {
     const next: { node: CallGraphNode; via: string[] }[] = [];
     for (const current of frontier) {
       for (const node of nodes) {
         if (visited.has(node.symbol) || targetSymbols.includes(node.symbol)) continue;
-        if (!calls(node.symbol, current.node.names)) continue;
+        if (!calls(node.symbol, calleeNames(current.node, node.external?.fileName))) continue;
         visited.add(node.symbol);
         next.push({ node, via: [node.symbol.name, ...current.via] });
       }
     }
     const callSites = next.flatMap((candidate) =>
-      candidate.node.names.flatMap((name) =>
+      calleeNames(candidate.node, undefined).flatMap((name) =>
         sourceTokenMatches(targetSymbols, name).map((match) => ({ match, via: candidate.via }))
       )
     );
@@ -521,6 +517,17 @@ function reachingCallSite(
     frontier = next;
   }
   return undefined;
+}
+
+/** Identifiers code in `callerFile` (the inspected file when undefined) calls `node` by. */
+function calleeNames(node: CallGraphNode, callerFile: string | undefined): string[] {
+  const { symbol, external } = node;
+  const local = external === undefined
+    ? undefined
+    : callerFile === undefined
+    ? external.callName
+    : external.localNames?.[callerFile];
+  return uniqueNames([local, symbol.runtimeName, symbol.name]);
 }
 
 function calls(symbol: DiscoveredSymbol, names: string[]): boolean {
