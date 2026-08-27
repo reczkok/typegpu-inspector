@@ -6,6 +6,30 @@ and released together. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- A command line interface in the language server package, exposed as the
+  `typegpu-inspector` binary and as `typegpu-inspector-language-server`
+  without a transport flag. `check [paths...]` discovers the TypeGPU modules
+  under files, directories, or globs, inspects them through the runtime, and
+  prints the editor's diagnostics compiler-style (`path:line:col: severity:
+  message [code]`, related statements as notes, a link into the generated
+  WGSL) followed by a summary; it exits 1 on errors or failed targets and 2 on
+  usage or environment failures. `--format json` prints the full result,
+  `--format github` adds workflow annotations, `--severity` and
+  `--warnings-as-errors` tune what counts, `--verbose` lists every target,
+  and `--watch` re-checks a changed module and the modules that import it
+  while the browser session stays warm. `wgsl <file>` prints a target's
+  generated WGSL with the compiler's messages, `report <file>` prints the
+  full Markdown report, and `targets [paths...]` lists what a check would
+  inspect without running anything. Runtime settings (`--project-root`,
+  `--timeout-ms`, `--feature`, `--no-strict-names`,
+  `--no-source-mapping`, `--inspector-package`) mirror the editor
+  settings. Progress goes to stderr, colors follow the terminal and
+  `NO_COLOR`, and `--quiet` silences everything but results.
+
 ## [0.7.0] - 2026-08-27
 
 ### Added

@@ -140,6 +140,46 @@ directory. Playwright caches browsers separately in
   get one candidate ordered by alignment and size, so the absence of a
   suggestion does not mean the order is optimal.
 
+## Command line
+
+The language server package is also a CLI, for shells, CI, and agents that
+run in a terminal. It uses the same discovery, runtime, and source mapping as
+the editor, so it prints exactly the diagnostics the editor shows:
+
+```sh
+npx -p typegpu-inspector-language-server typegpu-inspector check src
+```
+
+```
+src/pbr.ts:98:5: error: shade: uniformity … — in shade (pbr.ts:98) via evaluateLight [wgsl-compilation]
+    src/lighting.ts:12:3: note: the statement that produced the line
+    wgsl: /tmp/typegpu-inspector/…/pbr__shade.wgsl:40:9
+
+✖ 1 error · 7 targets (6 ok, 1 failed) in 3 files · 1.4s
+```
+
+| Command | Does |
+| --- | --- |
+| `check [paths...]` | Inspects every module under the files, directories, or globs (default `.`) and prints one line per diagnostic, then a summary. Exit 1 on errors or failed targets. |
+| `wgsl <file>...` | Prints the generated WGSL of each target with the compiler's messages. |
+| `report <file>...` | Prints the full inspection report as Markdown: the hover at its deepest level. |
+| `targets [paths...]` | Lists what a check would inspect, from source alone. Nothing runs. |
+
+`check` takes `--format text|json|github` (`github` adds workflow
+annotations), `--severity error|warning|info|hint`, `--warnings-as-errors`,
+`--verbose` for per-target status, and `--watch`, which re-checks a changed
+module and the modules that import it while keeping the browser session warm.
+`wgsl` and `report` take `--target <name>` (a label or symbol name,
+repeatable) and `--json`. The runtime settings from the table above are flags
+on all three: `--project-root`, `--timeout-ms`, `--feature`,
+`--no-strict-names`, `--no-source-mapping`, `--inspector-package`. Run
+`typegpu-inspector help <command>` for the rest.
+
+Colors follow the terminal and `NO_COLOR`; progress goes to stderr and
+`--quiet` silences it. Exit codes: 0 no errors, 1 errors or failed targets,
+2 usage or environment failure. Installed as a dev dependency, the binary is
+`typegpu-inspector` in `package.json` scripts.
+
 ## Agent access
 
 The same runtime is a stdio MCP server. The Zed extension registers it; other
@@ -148,7 +188,9 @@ clients use the `typegpu-runtime-inspector-mcp` package. See
 
 Agents running inside the editor get the same information from diagnostics: a
 file an agent writes while it is open is inspected as if saved, and the
-results land in the problems panel.
+results land in the problems panel. Agents in a terminal get it from
+`typegpu-inspector check` (see [Command line](#command-line)), which prints
+only the diagnostics and needs no target list and no MCP setup.
 
 ## Development
 

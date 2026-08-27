@@ -12,6 +12,23 @@ Editors launch the single-file `dist/server.cjs` bundle:
 typegpu-inspector-language-server --stdio
 ```
 
+Without a transport flag the same bundle is a command line tool, also
+exposed as the `typegpu-inspector` binary:
+
+```sh
+typegpu-inspector check src            # diagnostics, exit 1 on errors
+typegpu-inspector check src --watch    # re-check on save, browser stays warm
+typegpu-inspector wgsl src/blur.ts -t blurCompute
+typegpu-inspector report src/blur.ts
+typegpu-inspector targets src          # what a check would inspect; nothing runs
+```
+
+`check` prints `path:line:col: severity: message [code]` lines with the
+related statements as notes and a link into the generated WGSL, then a summary;
+`--format json` and `--format github` serve scripts and workflow
+annotations. Run `typegpu-inspector help <command>` for every option. The
+repository README documents the commands.
+
 On first use it starts the runtime inspector, installing
 `typegpu-runtime-inspector-mcp` when the checkout does not provide it. Two
 environment variables steer that:
