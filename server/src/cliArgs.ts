@@ -55,7 +55,13 @@ export type TargetsCommand = GlobalOptions & {
   json: boolean;
 };
 
-export type CliCommand = CheckCommand | WgslCommand | ReportCommand | TargetsCommand;
+export type InteractiveCommand = GlobalOptions & {
+  command: 'interactive';
+  paths: string[];
+  runtime: RuntimeOptions;
+};
+
+export type CliCommand = CheckCommand | WgslCommand | ReportCommand | TargetsCommand | InteractiveCommand;
 
 /** Help and version print on their own and carry an exit code instead of a command. */
 export type ParsedCliArgs =
@@ -106,7 +112,8 @@ function buildProgram(io: ParseIo, version: string, emit: (command: CliCommand) 
     .option('--no-color', 'Force colors off')
     .addHelpText(
       'after',
-      '\nExit codes: 0 no errors, 1 errors or failed targets, 2 usage or environment failure.',
+      '\nRun without a command in a terminal to start an interactive session.\n' +
+        'Exit codes: 0 no errors, 1 errors or failed targets, 2 usage or environment failure.',
     )
     .exitOverride()
     .configureOutput({
@@ -209,6 +216,20 @@ function buildProgram(io: ParseIo, version: string, emit: (command: CliCommand) 
       json: options.json ?? false,
       runtime: runtimeOptions(options),
     });
+  });
+
+  withRuntimeOptions(
+    program
+      .command('interactive')
+      .alias('i')
+      .description(
+        'Start a session in the terminal: pick targets, check, read WGSL and reports, watch, ' +
+          'all on one warm browser',
+      )
+      .argument('[paths...]', 'Files, directories, or globs to work in', ['.']),
+  ).action((paths: string[], _options: unknown, command: Command) => {
+    const options = command.optsWithGlobals<GlobalCliOptions & RuntimeCliOptions>();
+    emit({ ...globalOptions(options), command: 'interactive', paths, runtime: runtimeOptions(options) });
   });
 
   program

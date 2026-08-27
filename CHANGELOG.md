@@ -28,7 +28,16 @@ and released together. The format follows
   `--timeout-ms`, `--feature`, `--no-strict-names`,
   `--no-source-mapping`, `--inspector-package`) mirror the editor
   settings. Progress goes to stderr, colors follow the terminal and
-  `NO_COLOR`, and `--quiet` silences everything but results.
+  `NO_COLOR`, and `--quiet` silences everything but results. Running the CLI
+  without a command on a terminal starts an interactive session on one warm
+  browser: check everything, review the targets that failed, search targets
+  by name or file, read a target's generated WGSL or its report, open the
+  generated file in `$VISUAL`/`$EDITOR`, and watch for changes;
+  `interactive [paths...]` and its `i` alias start it explicitly. Results
+  are remembered per module until its source changes, so reading WGSL after
+  a check is instant. Reports render as terminal text rather than raw
+  Markdown, and long lines wrap at spaces inside the guide so paths stay
+  intact.
 
 ## [0.7.0] - 2026-08-27
 

@@ -119,6 +119,26 @@ describe('CLI arguments', () => {
     });
   });
 
+  it('parses an interactive session with runtime overrides', async () => {
+    const { result } = await parse([
+      'interactive',
+      'src',
+      'examples/*.ts',
+      '--timeout-ms',
+      '60000',
+      '--no-source-mapping',
+    ]);
+    expect(result).toMatchObject({
+      ok: true,
+      command: {
+        command: 'interactive',
+        paths: ['src', 'examples/*.ts'],
+        quiet: false,
+        runtime: { timeoutMs: 60000, sourceMapping: false },
+      },
+    });
+  });
+
   it('requires a file for wgsl', async () => {
     const { result, stderr } = await parse(['wgsl']);
     expect(result).toEqual({ ok: false, exitCode: 2 });

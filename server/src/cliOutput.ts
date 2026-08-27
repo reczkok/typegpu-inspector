@@ -255,7 +255,11 @@ export function formatCheckText(result: CheckResult, style: TextStyle): string {
   return `${lines.join('\n')}\n`;
 }
 
-export function formatSummaryLine(result: CheckResult, style: TextStyle): string {
+export function formatSummaryLine(
+  result: CheckResult,
+  style: TextStyle,
+  options: { mark?: boolean } = {},
+): string {
   const c = colors(style.color);
   const { summary } = result;
   const counts: string[] = [];
@@ -268,13 +272,13 @@ export function formatSummaryLine(result: CheckResult, style: TextStyle): string
     : summary.failed === 0
     ? `${plural(summary.targets, 'target')} ok`
     : `${plural(summary.targets, 'target')} (${summary.passed} ok, ${summary.failed} failed)`;
-  const mark = result.ok ? c.green('✔') : c.red('✖');
+  const mark = options.mark === false ? '' : result.ok ? `${c.green('✔')} ` : `${c.red('✖')} `;
   const parts = [
     ...(counts.length > 0 ? [counts.join(', ')] : []),
     `${targets} in ${plural(summary.files, 'file')}`,
     formatDuration(summary.elapsedMs),
   ];
-  return `${mark} ${parts.join(' · ')}`;
+  return `${mark}${parts.join(' · ')}`;
 }
 
 /** GitHub Actions workflow commands, then the plain text output for the log. */

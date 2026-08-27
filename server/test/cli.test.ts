@@ -2,8 +2,15 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { stripVTControlCharacters } from 'node:util';
 import { describe, expect, it } from 'vitest';
 import { runCli, type CliIo, type RuntimeLike } from '../src/cli.js';
+import {
+  CANCELLED,
+  wrapInteractiveMessage,
+  type Cancelled,
+  type InteractiveUi,
+} from '../src/cliInteractive.js';
 import type { InspectionTarget } from '../src/discovery.js';
 import type { InspectorOutput, InspectorTargetReport } from '../src/protocol.js';
 
@@ -87,6 +94,7 @@ function harness(report: Reporter, overrides: Partial<CliIo> = {}): Harness {
       stderr: (text) => {
         err += text;
       },
+      stdinIsTTY: false,
       stdoutIsTTY: false,
       createRuntime: () => runtime,
       ...overrides,
@@ -98,7 +106,129 @@ function harness(report: Reporter, overrides: Partial<CliIo> = {}): Harness {
   };
 }
 
+function scriptedUi(actions: Array<string | Cancelled>): { ui: InteractiveUi; transcript: string[] } {
+  const transcript: string[] = [];
+  const next = (
+    message: string,
+    options: readonly { value: string; disabled?: boolean }[],
+  ): string | Cancelled => {
+    const action = actions.shift();
+    if (action === undefined) throw new Error(`No scripted answer for ${message}`);
+    if (action === CANCELLED) {
+      transcript.push(`${message}: cancelled`);
+      return action;
+    }
+    const option = options.find((candidate) => candidate.value === action);
+    if (!option || option.disabled) throw new Error(`Scripted answer ${action} is unavailable for ${message}`);
+    transcript.push(`${message}: ${action}`);
+    return action;
+  };
+  return {
+    transcript,
+    ui: {
+      intro: (title) => transcript.push(`intro: ${title}`),
+      outro: (message) => transcript.push(`outro: ${message}`),
+      cancel: (message) => transcript.push(`cancel: ${message}`),
+      select: async (message, options) => next(message, options),
+      autocomplete: async (message, options, _placeholder, initialInput) => {
+        const option = options.find((candidate) => !candidate.disabled);
+        if (!option) throw new Error(`No autocomplete option for ${message}`);
+        transcript.push(`${message}${initialInput ? ` [${initialInput}]` : ''}: ${stripVTControlCharacters(option.label)} (${stripVTControlCharacters(option.hint ?? '')})`);
+        return option.value;
+      },
+      spinner: () => ({
+        start: (text) => transcript.push(`spinner: ${text}`),
+        message: (text) => transcript.push(`spinner: ${text}`),
+        stop: (text, ok = true) => transcript.push(`${ok ? 'success' : 'failure'}: ${text}`),
+        clear: () => transcript.push('spinner cleared'),
+      }),
+      message: (text, kind = 'plain') =>
+        transcript.push(`${kind}: ${Array.isArray(text) ? text.join('\n') : text}`),
+      waitForKey: async () => 'key',
+      openInEditor: async (path) => {
+        transcript.push(`editor: ${path}`);
+      },
+    },
+  };
+}
+
 describe('CLI', () => {
+  it('wraps long interactive output inside the Clack guide', () => {
+    const message =
+      "index.ts:222:5: error: blendSprite: Ternary operator '(uv.x > 0.5) ? sampleSprite(uv) : " +
+      "sampleSprite(uv)' is invalid. Use std.select or an if/else statement. [target-resolution]";
+    const wrapped = wrapInteractiveMessage(message, 60);
+    const lines = wrapped.split('\n');
+
+    expect(lines.length).toBeGreaterThan(1);
+    expect(lines.every((line) => line.length <= 57)).toBe(true);
+    expect(lines.join(' ')).toContain('Use std.select or an if/else statement.');
+
+    const colored = wrapInteractiveMessage(`\x1b[31m${message}\x1b[39m`, 60).split('\n');
+    expect(colored.every((line) => stripVTControlCharacters(line).length <= 57)).toBe(true);
+  });
+
+  it('starts the interactive session on a bare TTY and reuses an inspection', async () => {
+    const scripted = scriptedUi(['check', 'target', 'wgsl', 'back', 'quit']);
+    const h = harness(passingReport, {
+      stdinIsTTY: true,
+      stdoutIsTTY: true,
+      createInteractiveUi: async () => scripted.ui,
+    });
+
+    expect(await runCli([], h.io)).toBe(0);
+    expect(h.calls).toEqual([{ modulePath: brokenFixture, labels: ['badWgsl'] }]);
+    expect(scripted.transcript).toContain('What next?: check');
+    expect(scripted.transcript).toContain('What next?: target');
+    expect(scripted.transcript.some((line) => line.includes('1 target ok in 1 file'))).toBe(true);
+    expect(scripted.transcript.some((line) => line.includes('return 1f;'))).toBe(true);
+    expect(scripted.transcript.at(-1)).toBe('outro: Done.');
+    expect(h.closed()).toBe(true);
+  });
+
+  it('offers a failed-target review after a check finds failures', async () => {
+    const scripted = scriptedUi(['check', 'failed', 'report', 'back', 'quit']);
+    const h = harness(failingReport, {
+      stdinIsTTY: true,
+      stdoutIsTTY: true,
+      createInteractiveUi: async () => scripted.ui,
+    });
+
+    expect(await runCli(['interactive', 'test/fixtures'], h.io)).toBe(0);
+    expect(h.calls).toHaveLength(1);
+    expect(scripted.transcript).toContain('What next?: failed');
+    expect(scripted.transcript).toContain(
+      'Which target? [failed]: badWgsl  test/fixtures/wgsl-compilation-error.ts:4 (resolvable · failed)',
+    );
+    const failure = scripted.transcript.find((line) => line.startsWith('failure: '));
+    expect(stripVTControlCharacters(failure ?? '')).toMatch(/^failure: 1 error · 1 target \(0 ok, 1 failed\) in 1 file · \d+ms$/);
+    const report = scripted.transcript.map(stripVTControlCharacters).find((line) => line.startsWith('plain: TypeGPU'));
+    expect(report).toBeDefined();
+    expect(report).not.toContain('**');
+    expect(report).not.toContain('](file://');
+  });
+
+  it('rejects an explicit interactive session without a terminal', async () => {
+    const h = harness(passingReport);
+    expect(await runCli(['interactive'], h.io)).toBe(2);
+    expect(h.stderr()).toContain('interactive session needs a terminal');
+    expect(h.calls).toHaveLength(0);
+  });
+
+  it('treats cancelling an interactive prompt as an interruption', async () => {
+    const scripted = scriptedUi([CANCELLED]);
+    const h = harness(passingReport, {
+      stdinIsTTY: true,
+      stdoutIsTTY: true,
+      createInteractiveUi: async () => scripted.ui,
+    });
+
+    expect(await runCli(['interactive', 'test/fixtures/wgsl-compilation-error.ts'], h.io)).toBe(130);
+    expect(scripted.transcript.at(-1)).toBe('cancel: Interrupted.');
+    expect(h.calls).toHaveLength(0);
+    expect(h.closed()).toBe(true);
+  });
+
   it('lists targets from source without a runtime', async () => {
     const h = harness(failingReport, {
       createRuntime: () => {

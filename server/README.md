@@ -16,12 +16,18 @@ Without a transport flag the same bundle is a command line tool, also
 exposed as the `typegpu-inspector` binary:
 
 ```sh
+typegpu-inspector                              # interactive session on a terminal
+typegpu-inspector interactive src              # same, scoped to src (alias: i)
 typegpu-inspector check src            # diagnostics, exit 1 on errors
 typegpu-inspector check src --watch    # re-check on save, browser stays warm
 typegpu-inspector wgsl src/blur.ts -t blurCompute
 typegpu-inspector report src/blur.ts
 typegpu-inspector targets src          # what a check would inspect; nothing runs
 ```
+
+The interactive session keeps one browser warm while you fuzzy-search targets,
+check them, read generated WGSL or reports, open generated files in
+`$VISUAL`/`$EDITOR`, and watch for changes.
 
 `check` prints `path:line:col: severity: message [code]` lines with the
 related statements as notes and a link into the generated WGSL, then a summary;

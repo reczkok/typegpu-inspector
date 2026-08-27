@@ -160,16 +160,25 @@ src/pbr.ts:98:5: error: shade: uniformity … — in shade (pbr.ts:98) via evalu
 
 | Command | Does |
 | --- | --- |
+| `interactive [paths...]` | Opens a terminal session with a fuzzy target picker, checks, generated WGSL, reports, editor integration, and watch mode on one warm browser. Alias: `i`. |
 | `check [paths...]` | Inspects every module under the files, directories, or globs (default `.`) and prints one line per diagnostic, then a summary. Exit 1 on errors or failed targets. |
 | `wgsl <file>...` | Prints the generated WGSL of each target with the compiler's messages. |
 | `report <file>...` | Prints the full inspection report as Markdown: the hover at its deepest level. |
 | `targets [paths...]` | Lists what a check would inspect, from source alone. Nothing runs. |
 
+Run `typegpu-inspector` without a command in a terminal to enter the
+interactive session for the current directory. Check everything and review
+the targets that failed, or pick a target by name or file and check it, read
+its generated WGSL or full report, open the generated file with
+`$VISUAL`/`$EDITOR`, or keep watching changes — all without restarting
+Chromium, and with each module's result remembered until its source changes.
+
 `check` takes `--format text|json|github` (`github` adds workflow
 annotations), `--severity error|warning|info|hint`, `--warnings-as-errors`,
 `--verbose` for per-target status, and `--watch`, which re-checks a changed
 module and the modules that import it while keeping the browser session warm.
-`wgsl` and `report` take `--target <name>` (a label or symbol name,
+`interactive`, `wgsl`, and `report` share the runtime flags. `wgsl` and
+`report` take `--target <name>` (a label or symbol name,
 repeatable) and `--json`. The runtime settings from the table above are flags
 on all three: `--project-root`, `--timeout-ms`, `--feature`,
 `--no-strict-names`, `--no-source-mapping`, `--inspector-package`. Run

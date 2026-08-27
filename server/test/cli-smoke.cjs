@@ -46,6 +46,14 @@ assert(diagnostic.line >= 4, `diagnostic line was ${diagnostic.line}`);
 const usage = run(['check', '--format', 'yaml']);
 assert(usage.code === 2, `usage error exited ${usage.code}, expected 2`);
 
+const interactive = run(['interactive']);
+assert(interactive.code === 2, `non-TTY interactive session exited ${interactive.code}, expected 2`);
+assert(
+  interactive.stderr.includes('interactive session needs a terminal'),
+  'non-TTY interactive session did not explain the terminal requirement',
+  interactive.stderr,
+);
+
 process.stdout.write(`${JSON.stringify({
   ok: true,
   targets: listed.targets.length,
