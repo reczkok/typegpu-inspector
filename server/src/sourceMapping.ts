@@ -6,6 +6,7 @@ import type {
   ShaderSourceToken,
   ShaderStatement,
 } from './discovery.js';
+import type { ExternalShaderSymbol } from './moduleGraph.js';
 import type {
   CompilerMessage,
   InspectorStatementMap,
@@ -37,13 +38,14 @@ export type WgslDiagnosticMapping = {
   sourceSymbol?: string;
   generatedToken?: string;
   /**
-   * The authored statement when it lives in another symbol of the same file
-   * (a helper inlined into this target's WGSL); `sourceRange` then points at
-   * the call site.
+   * The authored statement when it lives in another symbol (a helper inlined
+   * into this target's WGSL); `sourceRange` then points at the call site.
+   * `uri` is set when the helper is declared in another file.
    */
   relatedSource?: {
     range: Range;
     sourceSymbol: string;
+    uri?: string;
   };
 };
 
@@ -55,6 +57,10 @@ type AuthoredStatementHit = {
   inTarget: boolean;
   /** Undefined when the generated line is the function header or a closing brace. */
   statement?: ShaderStatement;
+  /** Set when the symbol is declared in another file. */
+  uri?: string;
+  /** The identifier the target calls the symbol by. */
+  callName: string;
 };
 
 type GeneratedDeclaration = {
@@ -100,6 +106,7 @@ export function mapWgslDiagnostic(
   target: InspectionTarget,
   symbols: DiscoveredSymbol[],
   statementMap?: InspectorStatementMap,
+  externalSymbols: ExternalShaderSymbol[] = [],
 ): WgslDiagnosticMapping {
   const generatedRange = compilerGeneratedRange(wgsl, message);
   const messageOffset = compilerOffset(wgsl, message);
@@ -131,6 +138,7 @@ export function mapWgslDiagnostic(
       statementMap,
       targetSymbols,
       symbols,
+      externalSymbols,
       association,
     );
     if (mapped) {
@@ -261,21 +269,30 @@ export function mapResolutionFailure(
   failure: NonNullable<InspectorStatementMap['failure']>,
   target: InspectionTarget,
   symbols: DiscoveredSymbol[],
+  externalSymbols: ExternalShaderSymbol[] = [],
 ): WgslDiagnosticMapping | undefined {
   const targetSymbols = symbols.filter((symbol) =>
     target.symbolNames.includes(symbol.name) || symbol.targetIds.includes(target.id)
   );
-  const symbol = authoredFunctionSymbol(failure.fn, targetSymbols, symbols);
-  if (!symbol) return undefined;
-  const body = selectBody(symbol.shaderBodies ?? [], failure.path.length > 0 ? [failure.path] : []);
+  const generatedPaths = failure.path.length > 0 ? [failure.path] : [];
+  const hit = locateAuthoredFunction(
+    failure.fn,
+    generatedPaths,
+    targetSymbols,
+    symbols,
+    externalSymbols,
+  );
+  if (!hit) return undefined;
+  const body = selectBody(hit.symbol.shaderBodies ?? [], generatedPaths);
   if (!body) return undefined;
   const statement = failure.path.length > 0
     ? body.statements.find((candidate) => samePath(candidate.path, failure.path))
     : undefined;
   if (failure.path.length > 0 && !statement) return undefined;
+  if (statement) hit.statement = statement;
   return finishStatementMapping(
-    { symbol, inTarget: targetSymbols.includes(symbol), ...(statement ? { statement } : {}) },
-    statement ? statement.headRange : symbol.range,
+    hit,
+    statement ? statement.headRange : hit.symbol.range,
     undefined,
     targetSymbols,
   );
@@ -288,6 +305,7 @@ function mapThroughStatementMap(
   statementMap: InspectorStatementMap,
   targetSymbols: DiscoveredSymbol[],
   symbols: DiscoveredSymbol[],
+  externalSymbols: ExternalShaderSymbol[],
   association: SymbolAssociation,
 ): WgslDiagnosticMapping | undefined {
   const lineStarts = precomputeForWgsl(wgsl).lineStarts;
@@ -295,14 +313,20 @@ function mapThroughStatementMap(
   const fn = statementMapFunctionAtLine(statementMap, line);
   if (!fn) return undefined;
   const entry = deepestEntryAtLine(fn, line);
-  const symbol = authoredFunctionSymbol(fn.name, targetSymbols, symbols) ??
-    associatedBodySymbol(association);
-  if (!symbol) return undefined;
-  const body = selectBody(symbol.shaderBodies ?? [], fn.statements.map((candidate) => candidate.path));
+  const generatedPaths = fn.statements.map((candidate) => candidate.path);
+  const hit = locateAuthoredFunction(
+    fn.name,
+    generatedPaths,
+    targetSymbols,
+    symbols,
+    externalSymbols,
+  ) ?? associatedBodyHit(association, targetSymbols);
+  if (!hit) return undefined;
+  const symbol = hit.symbol;
+  const body = selectBody(symbol.shaderBodies ?? [], generatedPaths);
   if (!body) return undefined;
   const generatedDeclaration = statementMapDeclaration(wgsl, fn, lineStarts);
 
-  const hit: AuthoredStatementHit = { symbol, inTarget: targetSymbols.includes(symbol) };
   if (!entry) {
     return {
       ...finishStatementMapping(hit, symbol.range, undefined, targetSymbols),
@@ -350,7 +374,9 @@ function mapThroughStatementMap(
  * A statement inside this target's own symbol maps directly. One inside
  * another symbol of the file (a helper inlined into the WGSL) maps to its
  * unique call site in the target, carrying the statement as related source,
- * so the helper's own diagnostic stays the one that pins the line.
+ * so the helper's own diagnostic stays the one that pins the line. A
+ * statement in another file can only be related source: it anchors on the
+ * unique call site, or on the target itself when there is none.
  */
 function finishStatementMapping(
   hit: AuthoredStatementHit,
@@ -359,48 +385,108 @@ function finishStatementMapping(
   targetSymbols: DiscoveredSymbol[],
 ): WgslDiagnosticMapping {
   const strategy: WgslMappingStrategy = pinnedConfidence ? 'statement-token' : 'statement';
-  const direct: WgslDiagnosticMapping = {
-    confidence: pinnedConfidence ?? 'high',
-    strategy,
-    sourceRange: authored,
+  const relatedSource = {
+    range: authored,
     sourceSymbol: hit.symbol.name,
+    ...(hit.uri ? { uri: hit.uri } : {}),
   };
-  if (hit.inTarget) return direct;
-  const callSites = sourceTokenMatches(
-    targetSymbols,
-    hit.symbol.runtimeName ?? hit.symbol.name,
-  );
-  if (callSites.length !== 1) return direct;
+  if (hit.inTarget) {
+    return {
+      confidence: pinnedConfidence ?? 'high',
+      strategy,
+      sourceRange: authored,
+      sourceSymbol: hit.symbol.name,
+    };
+  }
+  const callSites = sourceTokenMatches(targetSymbols, hit.callName);
+  if (callSites.length === 1) {
+    return {
+      confidence: 'high',
+      strategy: 'statement-call-site',
+      sourceRange: callSites[0]!.token.range,
+      sourceSymbol: hit.symbol.name,
+      relatedSource,
+    };
+  }
+  if (!hit.uri) {
+    return {
+      confidence: pinnedConfidence ?? 'high',
+      strategy,
+      sourceRange: authored,
+      sourceSymbol: hit.symbol.name,
+    };
+  }
   return {
-    confidence: 'high',
+    confidence: 'medium',
     strategy: 'statement-call-site',
-    sourceRange: callSites[0]!.token.range,
     sourceSymbol: hit.symbol.name,
-    relatedSource: { range: authored, sourceSymbol: hit.symbol.name },
+    relatedSource,
   };
 }
 
-function authoredFunctionSymbol(
+/**
+ * The authored function behind a generated name: a symbol of this file
+ * first (preferring the target's own), else a helper imported from another
+ * file. Same-named imports are told apart by which body covers every
+ * generated statement path.
+ */
+function locateAuthoredFunction(
   generatedName: string,
+  generatedPaths: StatementPathSegment[][],
   targetSymbols: DiscoveredSymbol[],
   symbols: DiscoveredSymbol[],
-): DiscoveredSymbol | undefined {
+  externalSymbols: ExternalShaderSymbol[],
+): AuthoredStatementHit | undefined {
   const byName = symbols.filter((symbol) =>
     (symbol.shaderBodies?.length ?? 0) > 0 &&
     generatedDeclarationMatchesSymbol(generatedName, symbol)
   );
   const inTarget = byName.filter((symbol) => targetSymbols.includes(symbol));
   const candidates = inTarget.length > 0 ? inTarget : byName;
-  return candidates.length === 1 ? candidates[0] : undefined;
+  if (candidates.length === 1) {
+    const symbol = candidates[0]!;
+    return {
+      symbol,
+      inTarget: targetSymbols.includes(symbol),
+      callName: symbol.runtimeName ?? symbol.name,
+    };
+  }
+  if (candidates.length > 1) return undefined;
+
+  const external = externalSymbols.filter((candidate) =>
+    generatedDeclarationMatchesSymbol(generatedName, candidate.symbol)
+  );
+  const covering = external.length > 1
+    ? external.filter((candidate) =>
+      selectBody(candidate.symbol.shaderBodies ?? [], generatedPaths) !== undefined
+    )
+    : external;
+  if (covering.length !== 1) return undefined;
+  const found = covering[0]!;
+  return {
+    symbol: found.symbol,
+    inTarget: false,
+    uri: found.uri,
+    callName: found.callName ?? found.symbol.runtimeName ?? found.symbol.name,
+  };
 }
 
 /** Anonymous generated entrypoints (`item`, `fn`) associate by shader stage. */
-function associatedBodySymbol(association: SymbolAssociation): DiscoveredSymbol | undefined {
+function associatedBodyHit(
+  association: SymbolAssociation,
+  targetSymbols: DiscoveredSymbol[],
+): AuthoredStatementHit | undefined {
   if (association.confidence === 'none') return undefined;
   const candidates = association.symbols.filter((symbol) =>
     (symbol.shaderBodies?.length ?? 0) > 0
   );
-  return candidates.length === 1 ? candidates[0] : undefined;
+  if (candidates.length !== 1) return undefined;
+  const symbol = candidates[0]!;
+  return {
+    symbol,
+    inTarget: targetSymbols.includes(symbol),
+    callName: symbol.runtimeName ?? symbol.name,
+  };
 }
 
 /** The body whose statements cover every generated path; the only body when there is one. */

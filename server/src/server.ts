@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   createConnection,
   DidChangeConfigurationNotification,
@@ -28,6 +28,7 @@ import {
   type WgslResponse,
 } from './editorRequests.js';
 import { RuntimeInspectorClient } from './mcpInspector.js';
+import { collectImportedShaderSymbols, type ExternalShaderSymbol } from './moduleGraph.js';
 import {
   InspectionScheduler,
   type InspectionPriority,
@@ -178,6 +179,7 @@ function refreshAllSurfaces(): void {
           state.discovered,
           state.inspection,
           surfaceOptions(),
+          externalShaderSymbolsFor(document, state.discovered),
         )
         : [],
     );
@@ -271,6 +273,23 @@ connection.onDidChangeWatchedFiles(({ changes }) => {
     if (document) scheduleExternalSave(document.uri);
   }
 });
+
+/**
+ * Shader helpers declared in the files this document imports, so diagnostics
+ * inside an inlined helper can point at its authored statement. Open editors
+ * win over disk so an unsaved helper still maps.
+ */
+function externalShaderSymbolsFor(
+  document: TextDocument,
+  discovered: DiscoveredModule,
+): ExternalShaderSymbol[] {
+  if (!settings.sourceMapping || discovered.imports.length === 0) return [];
+  const fileName = fileNameFromUri(document.uri);
+  if (!fileName) return [];
+  return collectImportedShaderSymbols(fileName, discovered, {
+    readText: (path) => openDocumentForFile(pathToFileURL(path).href)?.getText(),
+  });
+}
 
 /** Watcher URIs may be encoded differently from the editor's; match on path. */
 function openDocumentForFile(uri: string): TextDocument | undefined {
@@ -632,6 +651,7 @@ async function inspectDocument(
             current.discovered,
             merged,
             surfaceOptions(),
+            externalShaderSymbolsFor(liveDocument, current.discovered),
           )
           : [],
       );

@@ -152,9 +152,23 @@ type FactoryResultBinding = FactoryOutput & {
   resultName: string;
 };
 
+/** A static import or re-export edge to another module. */
+export type ModuleImport = {
+  specifier: string;
+  /** Imported name → local alias for named forms; absent for `import *` / `export *`. */
+  bindings?: ModuleImportBinding[];
+};
+
+export type ModuleImportBinding = {
+  imported: string;
+  local: string;
+};
+
 export type DiscoveredModule = {
   symbols: DiscoveredSymbol[];
   targets: InspectionTarget[];
+  /** Value imports and re-exports, for locating helpers declared in other files. */
+  imports: ModuleImport[];
 };
 
 export function discoverTypeGpuModule(
@@ -482,6 +496,7 @@ export function discoverTypeGpuModule(
   return {
     symbols: symbols.filter((symbol) => symbol.role !== 'unknown'),
     targets,
+    imports: collectModuleImports(sourceFile),
   };
 }
 
@@ -2391,6 +2406,54 @@ function containsNode(
     if (skipNestedFunctions && ts.isFunctionLike(child)) return undefined;
     return containsNode(child, predicate, skipNestedFunctions) || undefined;
   }) ?? false;
+}
+
+/** Value-level import and re-export edges in source order; type-only forms are skipped. */
+function collectModuleImports(sourceFile: ts.SourceFile): ModuleImport[] {
+  const imports: ModuleImport[] = [];
+  for (const statement of sourceFile.statements) {
+    if (ts.isImportDeclaration(statement)) {
+      if (!ts.isStringLiteral(statement.moduleSpecifier)) continue;
+      const clause = statement.importClause;
+      if (!clause || clause.phaseModifier === ts.SyntaxKind.TypeKeyword) continue;
+      const specifier = statement.moduleSpecifier.text;
+      const bindings: ModuleImportBinding[] = [];
+      if (clause.name) bindings.push({ imported: 'default', local: clause.name.text });
+      if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) {
+        imports.push({ specifier });
+        continue;
+      }
+      for (const element of clause.namedBindings?.elements ?? []) {
+        if (element.isTypeOnly) continue;
+        bindings.push({
+          imported: (element.propertyName ?? element.name).text,
+          local: element.name.text,
+        });
+      }
+      if (bindings.length > 0) imports.push({ specifier, bindings });
+      continue;
+    }
+    if (
+      ts.isExportDeclaration(statement) &&
+      statement.moduleSpecifier &&
+      ts.isStringLiteral(statement.moduleSpecifier) &&
+      !statement.isTypeOnly
+    ) {
+      const specifier = statement.moduleSpecifier.text;
+      if (!statement.exportClause || ts.isNamespaceExport(statement.exportClause)) {
+        imports.push({ specifier });
+        continue;
+      }
+      const bindings = statement.exportClause.elements
+        .filter((element) => !element.isTypeOnly)
+        .map((element) => ({
+          imported: (element.propertyName ?? element.name).text,
+          local: element.name.text,
+        }));
+      if (bindings.length > 0) imports.push({ specifier, bindings });
+    }
+  }
+  return imports;
 }
 
 function isExported(node: ts.Node): boolean {

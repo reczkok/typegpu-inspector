@@ -13,6 +13,14 @@ import {
   statementMapSource,
   statementMapWgsl,
 } from './fixtures/statementMapFixture.js';
+import {
+  crossFileEntry,
+  crossFileEntrySource,
+  crossFileExternalSymbols,
+  crossFileHelperSource,
+  crossFileHelperUri,
+  rangeOnLine,
+} from './fixtures/crossFileFixture.js';
 
 describe('WGSL diagnostic source mapping', () => {
   it('maps a uniquely selected generated identifier to its exact TS token', () => {
@@ -696,5 +704,133 @@ describe('statement-map source mapping', () => {
       .toBeUndefined();
     expect(mapResolutionFailure({ fn: 'stepBoid_1', path: [] }, targetOf('stepBoid'), discovered.symbols))
       .toMatchObject({ sourceRange: sourceRangeOnLine(9, 'stepBoid') });
+  });
+});
+
+describe('cross-file statement-map source mapping', () => {
+  const targetOf = (name: string) =>
+    crossFileEntry.targets.find((target) => target.symbolNames.includes(name))!;
+  const message = (line: number, needle: string, text: string) => {
+    const offset = offsetOnLine(statementMapWgsl, line, needle);
+    return {
+      type: 'error',
+      message: text,
+      offset,
+      length: needle.length,
+      lineNum: line + 1,
+      linePos: offset - statementMapWgsl.lastIndexOf('\n', offset - 1),
+    };
+  };
+  const helperReturn = message(
+    3,
+    '((p.x * c) - (p.y * s))',
+    'no matching overload for operator -',
+  );
+
+  it('anchors a statement of an imported helper on its aliased call site', () => {
+    const mapping = mapWgslDiagnostic(
+      statementMapWgsl,
+      helperReturn,
+      targetOf('stepBoid'),
+      crossFileEntry.symbols,
+      statementMap,
+      crossFileExternalSymbols,
+    );
+    expect(mapping).toMatchObject({
+      confidence: 'high',
+      strategy: 'statement-call-site',
+      sourceSymbol: 'rotateXY',
+    });
+    expect(mapping.sourceRange).toEqual(rangeOnLine(crossFileEntrySource, 13, 'rot'));
+    expect(mapping.relatedSource).toEqual({
+      uri: crossFileHelperUri,
+      sourceSymbol: 'rotateXY',
+      range: rangeOnLine(crossFileHelperSource, 6, 'return d.vec3f(p.x * c - p.y * s, p.x * s + p.y * c, p.z);'),
+    });
+  });
+
+  it('pins a unique token inside the imported statement', () => {
+    const mapping = mapWgslDiagnostic(
+      statementMapWgsl,
+      message(1, 'angle', "unresolved value 'angle'"),
+      targetOf('stepBoid'),
+      crossFileEntry.symbols,
+      statementMap,
+      crossFileExternalSymbols,
+    );
+    expect(mapping.strategy).toBe('statement-call-site');
+    expect(mapping.relatedSource?.range).toEqual(rangeOnLine(crossFileHelperSource, 4, 'angle'));
+  });
+
+  it('keeps the related statement when the target never calls the helper directly', () => {
+    const mapping = mapWgslDiagnostic(
+      statementMapWgsl,
+      helperReturn,
+      targetOf('mainCompute'),
+      crossFileEntry.symbols,
+      statementMap,
+      crossFileExternalSymbols,
+    );
+    expect(mapping).toMatchObject({
+      confidence: 'medium',
+      strategy: 'statement-call-site',
+      sourceSymbol: 'rotateXY',
+    });
+    expect(mapping.sourceRange).toBeUndefined();
+    expect(mapping.relatedSource?.uri).toBe(crossFileHelperUri);
+  });
+
+  it('falls back to token heuristics without the imported module', () => {
+    const mapping = mapWgslDiagnostic(
+      statementMapWgsl,
+      helperReturn,
+      targetOf('stepBoid'),
+      crossFileEntry.symbols,
+      statementMap,
+    );
+    expect(mapping.relatedSource).toBeUndefined();
+    expect(['statement', 'statement-token', 'statement-call-site']).not.toContain(mapping.strategy);
+  });
+
+  it('tells same-named imports apart by statement coverage', () => {
+    const impostor = discoverTypeGpuModule(
+      '/workspace/other.ts',
+      [
+        "import { tgpu, d } from 'typegpu';",
+        'export const rotateXY = tgpu.fn([d.f32], d.f32)((x) => {',
+        "  'use gpu';",
+        '  return x;',
+        '});',
+      ].join('\n'),
+    );
+    const mapping = mapWgslDiagnostic(
+      statementMapWgsl,
+      helperReturn,
+      targetOf('stepBoid'),
+      crossFileEntry.symbols,
+      statementMap,
+      [
+        ...impostor.symbols.map((symbol) => ({
+          symbol,
+          fileName: '/workspace/other.ts',
+          uri: 'file:///workspace/other.ts',
+        })),
+        ...crossFileExternalSymbols,
+      ],
+    );
+    expect(mapping.relatedSource?.uri).toBe(crossFileHelperUri);
+  });
+
+  it('places a resolution failure inside an imported helper on the call site', () => {
+    const mapping = mapResolutionFailure(
+      { fn: 'rotateXY', path: [2] },
+      targetOf('stepBoid'),
+      crossFileEntry.symbols,
+      crossFileExternalSymbols,
+    );
+    expect(mapping).toMatchObject({ strategy: 'statement-call-site', confidence: 'high' });
+    expect(mapping?.sourceRange).toEqual(rangeOnLine(crossFileEntrySource, 13, 'rot'));
+    expect(mapping?.relatedSource?.uri).toBe(crossFileHelperUri);
+    expect(mapping?.relatedSource?.range.start).toEqual({ line: 6, character: 2 });
   });
 });

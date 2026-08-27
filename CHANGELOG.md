@@ -17,9 +17,14 @@ and released together. The format follows
   statement. A helper inlined into another target's WGSL maps to its call site
   with the statement as related information, or sits on the statement itself
   when the helper reports nothing of its own (uniformity errors only exist in
-  the caller's context). Compiler notes join the error or warning they
-  explain as related information instead of appearing as diagnostics of their
-  own. Older TypeGPU versions keep the token heuristics.
+  the caller's context). Helpers imported from other files map too: the
+  server follows the document's imports (relative paths, `.js`-for-`.ts`
+  specifiers, and `tsconfig` path aliases; packages are skipped), and a
+  diagnostic inside such a helper sits on the call site with the helper's
+  statement, in its own file, as related information. Compiler notes join
+  the error or warning they explain as related information instead of
+  appearing as diagnostics of their own. Older TypeGPU versions keep the
+  token heuristics.
 
 ### Fixed
 

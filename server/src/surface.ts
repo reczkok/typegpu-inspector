@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   CodeActionKind,
   DiagnosticSeverity,
@@ -57,10 +57,12 @@ import {
 } from './surfaceData.js';
 import { analyzeSchemaLayout } from './schemaLayout.js';
 import { analyzeWgsl, formatByteSize, type WgslAnalysis } from './wgsl.js';
+import type { ExternalShaderSymbol } from './moduleGraph.js';
 import {
   compilerGeneratedRange,
   mapResolutionFailure,
   mapWgslDiagnostic,
+  type WgslDiagnosticMapping,
 } from './sourceMapping.js';
 
 const MAX_INLAY_LABEL_LENGTH = 36;
@@ -522,6 +524,7 @@ export function createDiagnostics(
   discovered: DiscoveredModule,
   inspection: DocumentInspection,
   options: SurfaceOptions = defaultSurfaceOptions,
+  externalSymbols: ExternalShaderSymbol[] = [],
 ): Diagnostic[] {
   if (inspection.failure) {
     const first = discovered.symbols[0];
@@ -572,6 +575,7 @@ export function createDiagnostics(
             target.target,
             discovered.symbols,
             target.report.statementMap,
+            externalSymbols,
           )
         : undefined;
       const generatedRange = mapping?.generatedRange ??
@@ -584,7 +588,7 @@ export function createDiagnostics(
           ? mapping.relatedSource?.range ?? mapping.sourceRange
           : undefined;
         const location = noteRange
-          ? { uri: sourceUri, range: noteRange }
+          ? { uri: mapping?.relatedSource?.uri ?? sourceUri, range: noteRange }
           : target.generatedUri && generatedRange
           ? { uri: target.generatedUri, range: generatedRange }
           : { uri: sourceUri, range: anchor.range };
@@ -596,10 +600,7 @@ export function createDiagnostics(
       }
       const relatedInformation: DiagnosticRelatedInformation[] = [];
       if (mapping?.relatedSource) {
-        relatedInformation.push({
-          location: { uri: sourceUri, range: mapping.relatedSource.range },
-          message: `in ${mapping.relatedSource.sourceSymbol}`,
-        });
+        relatedInformation.push(relatedSourceInformation(mapping.relatedSource, sourceUri));
       }
       if (target.generatedUri && generatedRange) {
         relatedInformation.push({
@@ -657,7 +658,7 @@ export function createDiagnostics(
       mappedEntries.push({
         diagnostic,
         coverageKey: `wgsl:${message.message}`,
-        ...(mapping?.relatedSource
+        ...(mapping?.relatedSource && !mapping.relatedSource.uri
           ? { statement: mapping.relatedSource.range, targetLabel: target.target.label }
           : {}),
       });
@@ -675,7 +676,7 @@ export function createDiagnostics(
       // enclosing helper.
       const failure = target.report.statementMap?.failure;
       const failureMapping = options.sourceMapping && failure
-        ? mapResolutionFailure(failure, target.target, discovered.symbols)
+        ? mapResolutionFailure(failure, target.target, discovered.symbols, externalSymbols)
         : undefined;
       const trace = options.sourceMapping && !failureMapping
         ? parseResolutionTrace(target.report.error)
@@ -695,10 +696,7 @@ export function createDiagnostics(
             ? quotedErrorSnippetRange(targetSymbols, target.report.error)
             : undefined);
       const failureRelated: DiagnosticRelatedInformation[] = failureMapping?.relatedSource
-        ? [{
-            location: { uri: sourceUri, range: failureMapping.relatedSource.range },
-            message: `in ${failureMapping.relatedSource.sourceSymbol}`,
-          }]
+        ? [relatedSourceInformation(failureMapping.relatedSource, sourceUri)]
         : [];
       // A structural condition (unbound slot, needs a wrapper, ...) means the
       // target just cannot be inspected standalone — the code is not wrong.
@@ -733,7 +731,7 @@ export function createDiagnostics(
       mappedEntries.push({
         diagnostic,
         coverageKey: 'resolution',
-        ...(failureMapping?.relatedSource
+        ...(failureMapping?.relatedSource && !failureMapping.relatedSource.uri
           ? { statement: failureMapping.relatedSource.range, targetLabel: target.target.label }
           : {}),
       });
@@ -747,10 +745,23 @@ type MappedDiagnosticEntry = {
   diagnostic: Diagnostic;
   /** Diagnostics with the same key on the same statement report one finding. */
   coverageKey: string;
-  /** The authored statement in another symbol, when the diagnostic sits on its call site. */
+  /** The authored statement in another symbol of this file, when the diagnostic sits on its call site. */
   statement?: Range;
   targetLabel?: string;
 };
+
+/** The helper statement behind a call-site diagnostic; names the file when it is another one. */
+function relatedSourceInformation(
+  relatedSource: NonNullable<WgslDiagnosticMapping['relatedSource']>,
+  sourceUri: string,
+): DiagnosticRelatedInformation {
+  const uri = relatedSource.uri ?? sourceUri;
+  const where = relatedSource.uri ? ` (${basename(fileURLToPath(relatedSource.uri))})` : '';
+  return {
+    location: { uri, range: relatedSource.range },
+    message: `in ${relatedSource.sourceSymbol}${where}`,
+  };
+}
 
 /**
  * A diagnostic parked on a call site moves onto the helper's statement when

@@ -25,6 +25,15 @@ import {
   statementMapSource,
   statementMapWgsl,
 } from './fixtures/statementMapFixture.js';
+import {
+  crossFileEntry,
+  crossFileEntrySource,
+  crossFileEntryUri,
+  crossFileExternalSymbols,
+  crossFileHelperSource,
+  crossFileHelperUri,
+  rangeOnLine,
+} from './fixtures/crossFileFixture.js';
 
 describe('inspection surface', () => {
   it('drops materialization-only runtime evidence after preserving editor surfaces', async () => {
@@ -2434,5 +2443,101 @@ describe('statement-map diagnostics', () => {
       `called from ${targetOf('mainCompute').label}`,
       'in fn stepBoid',
     ]);
+  });
+});
+
+describe('cross-file statement-map diagnostics', () => {
+  const targetOf = (name: string) =>
+    crossFileEntry.targets.find((target) => target.symbolNames.includes(name))!;
+  const helperMessage = {
+    type: 'error',
+    message: 'no matching overload for operator -',
+    offset: offsetOnLine(statementMapWgsl, 3, '((p.x * c) - (p.y * s))'),
+    length: '((p.x * c) - (p.y * s))'.length,
+    lineNum: 4,
+    linePos: 10,
+  };
+  const noteMessage = {
+    type: 'info',
+    message: 'parameter p declared here',
+    offset: offsetOnLine(statementMapWgsl, 0, 'p: vec3f'),
+    length: 1,
+    lineNum: 1,
+    linePos: 13,
+  };
+
+  it('reports an imported helper statement at the call site and links the other file', async () => {
+    const inspection = await materializeInspection(
+      '/workspace',
+      '/workspace/boids.ts',
+      1,
+      crossFileEntry,
+      {
+        ok: false,
+        targets: [{
+          label: targetOf('stepBoid').label,
+          kind: 'resolvable',
+          ok: false,
+          wgsl: statementMapWgsl,
+          statementMap,
+          compilationMessages: [helperMessage, noteMessage],
+          callIds: [1],
+        }],
+      },
+    );
+    const diagnostics = createDiagnostics(
+      crossFileEntryUri,
+      crossFileEntry,
+      inspection,
+      defaultSurfaceOptions,
+      crossFileExternalSymbols,
+    );
+    expect(diagnostics).toHaveLength(1);
+    const [diagnostic] = diagnostics;
+    // Stays on the call site: the statement is in a file this document does not own.
+    expect(diagnostic!.range).toEqual(rangeOnLine(crossFileEntrySource, 13, 'rot'));
+    expect(diagnostic!.relatedInformation?.[0]).toEqual({
+      location: {
+        uri: crossFileHelperUri,
+        range: rangeOnLine(crossFileHelperSource, 6, 'return d.vec3f(p.x * c - p.y * s, p.x * s + p.y * c, p.z);'),
+      },
+      message: 'in rotateXY (math.ts)',
+    });
+    const note = diagnostic!.relatedInformation?.find((info) => info.message === 'parameter p declared here');
+    expect(note?.location.uri).toBe(crossFileHelperUri);
+    expect(diagnostic!.data).toMatchObject({
+      mapping: { strategy: 'statement-call-site', confidence: 'high', sourceSymbol: 'rotateXY' },
+    });
+  });
+
+  it('anchors on the target when it does not call the imported helper itself', async () => {
+    const inspection = await materializeInspection(
+      '/workspace',
+      '/workspace/boids.ts',
+      1,
+      crossFileEntry,
+      {
+        ok: false,
+        targets: [{
+          label: targetOf('mainCompute').label,
+          kind: 'resolvable',
+          ok: false,
+          wgsl: statementMapWgsl,
+          statementMap,
+          compilationMessages: [helperMessage],
+          callIds: [1],
+        }],
+      },
+    );
+    const [diagnostic] = createDiagnostics(
+      crossFileEntryUri,
+      crossFileEntry,
+      inspection,
+      defaultSurfaceOptions,
+      crossFileExternalSymbols,
+    );
+    expect(diagnostic!.range).toEqual(rangeOnLine(crossFileEntrySource, 16, 'mainCompute'));
+    expect(diagnostic!.relatedInformation?.[0]?.location.uri).toBe(crossFileHelperUri);
+    expect(diagnostic!.message).not.toContain('generated WGSL line');
   });
 });

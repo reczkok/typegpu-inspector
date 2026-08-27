@@ -1010,3 +1010,33 @@ describe('shader bodies', () => {
     expect(symbols.find((symbol) => symbol.name === 'raw')?.shaderBodies).toBeUndefined();
   });
 });
+
+describe('module imports', () => {
+  it('records value imports and re-exports with their bindings', () => {
+    const result = discoverTypeGpuModule(
+      '/project/entry.ts',
+      `
+        import { tgpu, d } from 'typegpu';
+        import { helperA as a, helperB, type Shape } from './helpers.ts';
+        import * as lib from '@shaders/lib';
+        import defaultFn from './default.ts';
+        import type { Only } from './types.ts';
+        import './side-effect.ts';
+        export { reexported as pub } from './reexport.ts';
+        export * from './star.ts';
+        export type { T } from './type-reexport.ts';
+      `,
+    );
+    expect(result.imports).toEqual([
+      { specifier: 'typegpu', bindings: [{ imported: 'tgpu', local: 'tgpu' }, { imported: 'd', local: 'd' }] },
+      {
+        specifier: './helpers.ts',
+        bindings: [{ imported: 'helperA', local: 'a' }, { imported: 'helperB', local: 'helperB' }],
+      },
+      { specifier: '@shaders/lib' },
+      { specifier: './default.ts', bindings: [{ imported: 'default', local: 'defaultFn' }] },
+      { specifier: './reexport.ts', bindings: [{ imported: 'reexported', local: 'pub' }] },
+      { specifier: './star.ts' },
+    ]);
+  });
+});
