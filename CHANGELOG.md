@@ -26,7 +26,10 @@ and released together. The format follows
   nearest to it (`in evaluateLight (pbr.ts) via shade`). One finding is
   reported once: every target that inlines a broken helper reports it, and
   the best-anchored report keeps the squiggle while the others become
-  `also affects <target>` related entries. Compiler notes join
+  `also affects <target>` related entries. A statement in another file is
+  also named in the message (`— in shade (pbr.ts:98) via evaluateLight`),
+  and hovering the diagnostic shows a link to it, since not every editor
+  renders related information that points into another file. Compiler notes join
   the error or warning they explain as related information instead of
   appearing as diagnostics of their own. Older TypeGPU versions keep the
   token heuristics.

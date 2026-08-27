@@ -15,6 +15,7 @@ import {
   type InlayHint,
   type MarkupContent,
   MarkupKind,
+  type Position,
   type Range,
 } from 'vscode-languageserver';
 import type {
@@ -628,13 +629,16 @@ export function createDiagnostics(
         severity,
         source: 'TypeGPU Inspector',
         code: 'wgsl-compilation',
-        message: `${target.target.label}: ${message.message}${suffix}`,
+        message: `${target.target.label}: ${message.message}${suffix}${
+          crossFileSuffix(mapping?.relatedSource)
+        }`,
         ...(relatedInformation.length > 0 ? { relatedInformation } : {}),
         data: {
           sourceUri,
           targetId: id,
           ...(target.generatedUri ? { generatedUri: target.generatedUri } : {}),
           ...(generatedRange ? { generatedRange } : {}),
+          ...crossFileData(mapping?.relatedSource),
           ...(mapping
             ? {
                 mapping: {
@@ -703,11 +707,14 @@ export function createDiagnostics(
         code: structural ? 'target-not-standalone' : 'target-resolution',
         message: structural
           ? `${target.target.label} is not inspectable standalone: ${targetFailure(target.report)}`
-          : `${target.target.label}: ${targetFailure(target.report)}`,
+          : `${target.target.label}: ${targetFailure(target.report)}${
+            crossFileSuffix(failureMapping?.relatedSource)
+          }`,
         ...(failureRelated.length > 0 ? { relatedInformation: failureRelated } : {}),
         data: {
           sourceUri,
           targetId: id,
+          ...crossFileData(failureMapping?.relatedSource),
           ...(failureMapping
             ? {
                 mapping: {
@@ -839,17 +846,101 @@ function anchorRank(entry: MappedDiagnosticEntry): number {
   return DECLARATION_ANCHOR_RANK;
 }
 
+type RelatedSource = NonNullable<WgslDiagnosticMapping['relatedSource']>;
+
 /** The helper statement behind a call-site diagnostic; names the file when it is another one. */
 function relatedSourceInformation(
-  relatedSource: NonNullable<WgslDiagnosticMapping['relatedSource']>,
+  relatedSource: RelatedSource,
   sourceUri: string,
 ): DiagnosticRelatedInformation {
-  const uri = relatedSource.uri ?? sourceUri;
-  const where = relatedSource.uri ? ` (${basename(fileURLToPath(relatedSource.uri))})` : '';
-  const via = relatedSource.via?.length ? ` via ${relatedSource.via.join(' → ')}` : '';
   return {
-    location: { uri, range: relatedSource.range },
-    message: `in ${relatedSource.sourceSymbol}${where}${via}`,
+    location: { uri: relatedSource.uri ?? sourceUri, range: relatedSource.range },
+    message: describeRelatedSource(relatedSource),
+  };
+}
+
+/** `in shade (pbr.ts:98) via evaluateLight` — the file and line only when it is another file. */
+function describeRelatedSource(relatedSource: RelatedSource): string {
+  const where = relatedSource.uri
+    ? ` (${basename(fileURLToPath(relatedSource.uri))}:${relatedSource.range.start.line + 1})`
+    : '';
+  const via = relatedSource.via?.length ? ` via ${relatedSource.via.join(' → ')}` : '';
+  return `in ${relatedSource.sourceSymbol}${where}${via}`;
+}
+
+/**
+ * A statement in another file is named in the message itself: related
+ * locations in other files are not rendered by every editor (Zed drops
+ * them), and the message is shown by all.
+ */
+function crossFileSuffix(relatedSource: RelatedSource | undefined): string {
+  return relatedSource?.uri ? ` — ${describeRelatedSource(relatedSource)}` : '';
+}
+
+function crossFileData(relatedSource: RelatedSource | undefined): { relatedSource?: RelatedSource } {
+  return relatedSource?.uri ? { relatedSource } : {};
+}
+
+/** `file:///…/pbr.ts#L98,3` — the fragment both VS Code and Zed follow from hover markdown. */
+function locationLink(uri: string, range: Range): string {
+  return `[${basename(fileURLToPath(uri))}:${range.start.line + 1}](${uri}#L${
+    range.start.line + 1
+  },${range.start.character + 1})`;
+}
+
+/**
+ * Hover for a position inside a diagnostic whose statement lives in another
+ * file: the finding with a link to that statement. Hover markdown links are
+ * followed by every editor, unlike cross-file related information.
+ */
+export function createFindingHover(
+  diagnostics: readonly Diagnostic[],
+  position: Position,
+): Hover | undefined {
+  const findings = diagnostics.filter((diagnostic) =>
+    containsPosition(diagnostic.range, position) &&
+    (diagnostic.data as { relatedSource?: RelatedSource } | undefined)?.relatedSource?.uri
+  );
+  if (findings.length === 0) return undefined;
+  const lines: string[] = [];
+  for (const diagnostic of findings) {
+    const data = diagnostic.data as {
+      relatedSource: RelatedSource & { uri: string };
+      affectedTargets?: string[];
+    };
+    const relatedSource = data.relatedSource;
+    const message = String(diagnostic.message).replace(crossFileSuffix(relatedSource), '');
+    const via = relatedSource.via?.length ? ` via ${relatedSource.via.join(' → ')}` : '';
+    if (lines.length > 0) lines.push('');
+    lines.push(
+      `**${escapeInline(message)}**`,
+      '',
+      `in \`${escapeInline(relatedSource.sourceSymbol)}\` — ${
+        locationLink(relatedSource.uri, relatedSource.range)
+      }${escapeInline(via)}`,
+    );
+    if (data.affectedTargets?.length) {
+      lines.push('', `Also affects ${data.affectedTargets.map((name) => `\`${escapeInline(name)}\``).join(', ')}.`);
+    }
+  }
+  return { contents: { kind: MarkupKind.Markdown, value: lines.join('\n') } };
+}
+
+/** Appends `extra` under `hover`'s own content. */
+export function appendHover(hover: Hover, extra: Hover | undefined): Hover {
+  if (!extra) return hover;
+  const value = (contents: Hover['contents']): string =>
+    typeof contents === 'string'
+      ? contents
+      : Array.isArray(contents)
+      ? contents.map((entry) => (typeof entry === 'string' ? entry : entry.value)).join('\n\n')
+      : contents.value;
+  return {
+    ...hover,
+    contents: {
+      kind: MarkupKind.Markdown,
+      value: `${value(hover.contents)}\n\n---\n\n${value(extra.contents)}`,
+    },
   };
 }
 
@@ -885,6 +976,11 @@ function settleCallSiteDiagnostics(
           : info,
     );
   }
+}
+
+function containsPosition(range: Range, position: Position): boolean {
+  return comparePosition(position, range.start) >= 0 &&
+    comparePosition(position, range.end) <= 0;
 }
 
 function rangeWithin(inner: Range, outer: Range): boolean {

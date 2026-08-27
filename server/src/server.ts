@@ -48,7 +48,9 @@ import {
   type SettingsWarning,
 } from './settings.js';
 import {
+  appendHover,
   createDiagnostics,
+  createFindingHover,
   createCodeActions,
   createDetailLevelActions,
   createInlayDetailLevelActions,
@@ -318,7 +320,12 @@ connection.onHover(async ({ textDocument, position }) => {
   if (!state) return null;
   const symbol = state.discovered.symbols.find((candidate) =>
     containsPosition(candidate.range, position));
-  if (!symbol) return null;
+  // A diagnostic anchored here whose statement lives in another file gets a
+  // hover with a link to it, on its own or under the symbol's hover.
+  const findingHover = settings.hover
+    ? createFindingHover(publishedDiagnostics.get(document.uri) ?? [], position)
+    : undefined;
+  if (!symbol) return findingHover ?? null;
 
   // Hover-triggered inspection stays alive even when the hover surface is
   // hidden: in "hover"/"save-and-hover" modes this is what keeps
@@ -326,13 +333,16 @@ connection.onHover(async ({ textDocument, position }) => {
   inspectOnDemand(document, state, symbol.targetIds);
 
   if (!settings.hover) return null;
-  return createHover(
-    symbol,
-    state.discovered,
-    state.inspection,
-    document.version,
-    progress.targets(document.uri, document.version),
-    { ...surfaceOptions(), documentUri: document.uri },
+  return appendHover(
+    createHover(
+      symbol,
+      state.discovered,
+      state.inspection,
+      document.version,
+      progress.targets(document.uri, document.version),
+      { ...surfaceOptions(), documentUri: document.uri },
+    ),
+    findingHover,
   );
 });
 
@@ -709,10 +719,15 @@ function refreshInlayHints(): void {
   });
 }
 
+/** What each open document currently shows, for hovers over a diagnostic. */
+const publishedDiagnostics = new Map<string, Diagnostic[]>();
+
 function publishDiagnostics(
   document: TextDocument,
   diagnostics: Diagnostic[],
 ): void {
+  if (diagnostics.length > 0) publishedDiagnostics.set(document.uri, diagnostics);
+  else publishedDiagnostics.delete(document.uri);
   connection.sendDiagnostics({
     uri: document.uri,
     version: document.version,
