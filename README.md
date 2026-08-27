@@ -85,7 +85,22 @@ its settings UI.
 | `projectRoot` | `typegpuInspector.projectRoot` | `""` | Override workspace-root inference |
 
 `typegpuInspector.serverPath` is VS Code only and points at a local language
-server build.
+server build. In Zed, set `lsp.typegpu-inspector.binary` to run one; the
+extension itself cannot see outside its work directory, so a dev extension
+otherwise installs the published server from npm:
+
+```json
+"lsp": {
+  "typegpu-inspector": {
+    "binary": {
+      "path": "/path/to/node",
+      "arguments": ["/path/to/typegpu-inspector/server/dist/server.cjs", "--stdio"]
+    }
+  }
+}
+```
+
+The server then runs the runtime from the checkout's `inspector/` directory.
 
 `wgsl` shows only the generated WGSL for shaders and pipelines (120 lines by
 default) and compact facts for everything else. At every level the WGSL comes

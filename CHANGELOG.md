@@ -56,6 +56,10 @@ and released together. The format follows
   installs that copy when the language server starts instead of only when
   the agent's context server does. `npx` remains the fallback when neither a
   monorepo checkout nor a sibling install exists.
+- The Zed extension no longer probes the monorepo checkout it was compiled
+  from: the wasm sandbox cannot see outside the extension work directory, so
+  a dev extension always ran the npm-published server. The README documents
+  `lsp.typegpu-inspector.binary` as the way to run a local build in Zed.
 
 ## [0.7.0] - 2026-08-27
 
