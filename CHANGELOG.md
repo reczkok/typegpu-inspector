@@ -37,7 +37,14 @@ and released together. The format follows
   are remembered per module until its source changes, so reading WGSL after
   a check is instant. Reports render as terminal text rather than raw
   Markdown, and long lines wrap at spaces inside the guide so paths stay
-  intact.
+  intact. Directory walks honor `.gitignore` files above and below the
+  walked directories; `--ignore <glob>` skips more and `--no-gitignore`
+  turns the rule off, while a file named directly is always inspected.
+  `check --target <name>` narrows a run to some targets. A helper that
+  fails in several modules is reported once across files, on its own
+  statement when that file is in the run, with the other modules' call
+  sites listed on an `also in` line; the JSON carries them as `alsoIn` and
+  the finding's statement as `finding`.
 
 ## [0.7.0] - 2026-08-27
 

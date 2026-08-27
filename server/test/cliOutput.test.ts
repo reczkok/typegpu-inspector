@@ -158,6 +158,77 @@ describe('CLI output', () => {
     ]);
   });
 
+  it('reports a helper finding once across files and lists the other call sites', () => {
+    const tint = "no matching call to 'dot(vec3<f32>, vec2<f32>)'";
+    const helperStatement = {
+      uri: 'file:///workspace/src/helpers.ts',
+      range: { start: { line: 6, character: 25 }, end: { line: 6, character: 40 } },
+    };
+    const inHelper: Diagnostic = {
+      range: helperStatement.range,
+      severity: DiagnosticSeverity.Error,
+      code: 'wgsl-compilation',
+      message: `projectPointOnLine: ${tint}`,
+      data: { sourceUri: helperStatement.uri, targetId: 'helper' },
+    };
+    const viaCaller = (label: string, line: number): Diagnostic => ({
+      range: { start: { line, character: 15 }, end: { line, character: 33 } },
+      severity: DiagnosticSeverity.Error,
+      code: 'wgsl-compilation',
+      message: `${label}: ${tint} — in projectPointOnLine (helpers.ts:7)`,
+      relatedInformation: [{ location: helperStatement, message: 'in projectPointOnLine' }],
+      data: {
+        sourceUri: `file:///workspace/src/${label}.ts`,
+        targetId: label,
+        relatedSource: { ...helperStatement, sourceSymbol: 'projectPointOnLine' },
+      },
+    });
+    const files: CliFileResult[] = [
+      {
+        path: 'src/compute.ts',
+        targets: [{ id: 'simulate', label: 'simulate', status: 'failed' }],
+        diagnostics: toCliDiagnostics('/workspace/src/compute.ts', [viaCaller('simulate', 60)], cwd),
+        elapsedMs: 1,
+      },
+      {
+        path: 'src/helpers.ts',
+        targets: [{ id: 'helper', label: 'projectPointOnLine', status: 'failed' }],
+        diagnostics: toCliDiagnostics('/workspace/src/helpers.ts', [inHelper], cwd),
+        elapsedMs: 1,
+      },
+      {
+        path: 'src/render.ts',
+        targets: [{ id: 'render', label: 'render', status: 'failed' }],
+        diagnostics: toCliDiagnostics('/workspace/src/render.ts', [viaCaller('render', 20)], cwd),
+        elapsedMs: 1,
+      },
+    ];
+    const result = summarizeCheck(files, 3, false);
+    expect(result.summary).toMatchObject({ errors: 1, failed: 3, targets: 3 });
+    expect(result.files.map((file) => file.diagnostics.length)).toEqual([0, 1, 0]);
+    const [kept] = result.files[1]!.diagnostics;
+    expect(kept?.alsoIn).toEqual([
+      { path: 'src/compute.ts', line: 61, column: 16, label: 'simulate' },
+      { path: 'src/render.ts', line: 21, column: 16, label: 'render' },
+    ]);
+    expect(formatCheckText(result, { color: false, verbose: false })).toBe(
+      [
+        `src/helpers.ts:7:26: error: projectPointOnLine: ${tint} [wgsl-compilation]`,
+        '    also in: simulate (src/compute.ts:61:16), render (src/render.ts:21:16)',
+        '',
+        '✖ 1 error · 3 targets (0 ok, 3 failed) in 3 files · 3ms',
+      ].join('\n') + '\n',
+    );
+
+    // Without the helper's own file the first caller keeps the report.
+    const callersOnly = summarizeCheck([files[0]!, files[2]!], 2, false);
+    expect(callersOnly.summary.errors).toBe(1);
+    expect(callersOnly.files[0]!.diagnostics[0]?.alsoIn).toEqual([
+      { path: 'src/render.ts', line: 21, column: 16, label: 'render' },
+    ]);
+    expect(callersOnly.files[0]!.diagnostics[0]?.finding).toEqual({ path: 'src/helpers.ts', line: 7, column: 26 });
+  });
+
   it('renders a bare summary for a clean run', () => {
     const result = summarizeCheck(
       [{ path: 'src/ok.ts', targets: [{ id: 't', label: 'main', status: 'ok' }], diagnostics: [], elapsedMs: 80 }],

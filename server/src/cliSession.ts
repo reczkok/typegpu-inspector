@@ -3,7 +3,13 @@ import { basename, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import chokidar from 'chokidar';
 import type { CliSeverity, GlobalOptions, RuntimeOptions } from './cliArgs.js';
-import { collectSourceFiles, isIgnoredUnder, isSourceFile, type CollectedFiles } from './cliFiles.js';
+import {
+  collectSourceFiles,
+  isIgnoredUnder,
+  isSourceFile,
+  type CollectedFiles,
+  type CollectOptions,
+} from './cliFiles.js';
 import type { InteractiveUi } from './cliInteractive.js';
 import {
   displayPath,
@@ -161,6 +167,8 @@ export function createSession(options: SessionOptions, io: CliIo): Session {
 export type InspectedModule = {
   path: string;
   discovered: DiscoveredModule;
+  /** The targets this inspection covered; a subset when the run was narrowed. */
+  targetIds: string[];
   inspection: DocumentInspection;
   elapsedMs: number;
 };
@@ -195,7 +203,7 @@ export async function inspectModule(
     if (session.interrupted) throw error;
     inspection = failedTargetInspection(1, targetIds, errorMessage(error));
   }
-  return { path, discovered, inspection, elapsedMs: Date.now() - startedAt };
+  return { path, discovered, targetIds, inspection, elapsedMs: Date.now() - startedAt };
 }
 
 export type CheckOptions = {
@@ -215,8 +223,9 @@ export function fileResult(session: Session, module: InspectedModule, minSeverit
     session.surface,
     externalSymbols,
   );
+  const covered = new Set(module.targetIds);
   const described = describeTargets(1, discovered, inspection, new Set());
-  const targets: CliTargetStatus[] = described.targets.map((target) => {
+  const targets: CliTargetStatus[] = described.targets.filter((target) => covered.has(target.id)).map((target) => {
     const generatedUri = inspection.targets.get(target.id)?.generatedUri;
     return {
       id: target.id,
@@ -230,12 +239,46 @@ export function fileResult(session: Session, module: InspectedModule, minSeverit
   return {
     path: displayPath(path, session.io.cwd),
     targets,
-    diagnostics: filterBySeverity(toCliDiagnostics(path, diagnostics, session.io.cwd), minSeverity),
+    diagnostics: filterBySeverity(
+      toCliDiagnostics(path, diagnostics.filter((diagnostic) => coversTarget(diagnostic, covered)), session.io.cwd),
+      minSeverity,
+    ),
     elapsedMs: module.elapsedMs,
   };
 }
 
-export type ModuleEntry = readonly [string, DiscoveredModule];
+/** A module to inspect, optionally narrowed to some of its targets. */
+export type ModuleEntry = readonly [string, DiscoveredModule, InspectionTarget[]?];
+
+/** A diagnostic about a target outside the narrowed run says nothing about it. */
+function coversTarget(diagnostic: { data?: unknown }, covered: ReadonlySet<string>): boolean {
+  const data = diagnostic.data;
+  if (typeof data !== 'object' || data === null) return true;
+  const targetId = (data as { targetId?: unknown }).targetId;
+  return typeof targetId !== 'string' || covered.has(targetId);
+}
+
+/**
+ * Narrows modules to the targets named by label or symbol name; modules
+ * without a match drop out. Names that match nothing come back separately.
+ */
+export function selectTargets(
+  modules: ReadonlyArray<ModuleEntry>,
+  names: readonly string[],
+): { selected: ModuleEntry[]; unmatched: string[] } {
+  if (names.length === 0) return { selected: [...modules], unmatched: [] };
+  const matched = new Set<string>();
+  const selected: ModuleEntry[] = [];
+  for (const [path, discovered] of modules) {
+    const targets = discovered.targets.filter((target) => {
+      const hit = names.find((name) => name === target.label || target.symbolNames.includes(name));
+      if (hit !== undefined) matched.add(hit);
+      return hit !== undefined;
+    });
+    if (targets.length > 0) selected.push([path, discovered, targets]);
+  }
+  return { selected, unmatched: names.filter((name) => !matched.has(name)) };
+}
 
 export async function checkModules(
   session: Session,
@@ -244,9 +287,9 @@ export async function checkModules(
 ): Promise<CheckResult> {
   const startedAt = Date.now();
   const files: CliFileResult[] = [];
-  for (const [path, discovered] of modules) {
+  for (const [path, discovered, targets] of modules) {
     if (session.interrupted) break;
-    const module = await inspectModule(session, path, discovered);
+    const module = await inspectModule(session, path, discovered, targets);
     files.push(fileResult(session, module, options.minSeverity));
   }
   return summarizeCheck(files, Date.now() - startedAt, options.warningsAsErrors);
@@ -262,8 +305,9 @@ export async function collectOrExplain(
   paths: readonly string[],
   io: CliIo,
   quiet: boolean,
+  options: CollectOptions = {},
 ): Promise<CollectedFiles | undefined> {
-  const collected = await collectSourceFiles(paths, io.cwd);
+  const collected = await collectSourceFiles(paths, io.cwd, options);
   for (const missing of collected.missing) {
     io.stderr(`No such file or directory: ${missing}\n`);
   }
@@ -314,6 +358,7 @@ const DEPENDENCY_DEPTH = 4;
 
 export type WatchOptions = {
   paths: readonly string[];
+  files?: CollectOptions;
   collected: CollectedFiles;
   /** Kept current as files gain or lose targets. */
   modules: Map<string, DiscoveredModule>;
@@ -340,7 +385,7 @@ export async function watchModules(session: Session, options: WatchOptions): Pro
 
   const handleChanges = async (changed: string[]): Promise<void> => {
     if (options.signal.aborted) return;
-    const fresh = await collectSourceFiles(options.paths, io.cwd);
+    const fresh = await collectSourceFiles(options.paths, io.cwd, options.files);
     const added = fresh.files.filter((file) => !known.has(file));
     known = new Set(fresh.files);
     const candidates = new Set<string>();

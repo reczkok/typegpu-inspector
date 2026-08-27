@@ -262,6 +262,19 @@ describe('CLI', () => {
     expect(h.closed()).toBe(true);
   });
 
+  it('narrows a check to the named targets and reports names that match nothing', async () => {
+    const h = harness(failingReport);
+    expect(await runCli(['check', 'test/fixtures', '-t', 'badWgsl', '--quiet'], h.io)).toBe(1);
+    expect(h.calls).toEqual([{ modulePath: brokenFixture, labels: ['badWgsl'] }]);
+    expect(h.stdout()).toMatch(/1 target \(0 ok, 1 failed\) in 1 file/);
+
+    const missing = harness(passingReport);
+    expect(await runCli(['check', 'test/fixtures', '--target', 'nope', '--quiet'], missing.io)).toBe(1);
+    expect(missing.calls).toHaveLength(0);
+    expect(missing.stderr()).toContain('No target named "nope"');
+    expect(missing.stdout()).toContain('✔ no targets in 0 files');
+  });
+
   it('exits 0 with a one-line summary when everything passes', async () => {
     const h = harness(passingReport);
     const code = await runCli(['check', 'test/fixtures/wgsl-compilation-error.ts', '--verbose'], h.io);

@@ -27,6 +27,7 @@ import {
   discoverTargets,
   errorMessage,
   inspectModule,
+  selectTargets,
   textStyle,
   watchModules,
   watchWithChokidar,
@@ -119,7 +120,7 @@ export async function runCli(argv: readonly string[], io: CliIo = defaultCliIo()
 // --- targets ----------------------------------------------------------------
 
 async function runTargets(command: TargetsCommand, io: CliIo): Promise<number> {
-  const collected = await collectOrExplain(command.paths, io, command.quiet);
+  const collected = await collectOrExplain(command.paths, io, command.quiet, command.files);
   if (!collected) return EXIT_USAGE;
   const modules = await discoverTargets(collected.files);
   const rows: Array<{
@@ -170,7 +171,7 @@ async function runTargets(command: TargetsCommand, io: CliIo): Promise<number> {
 // --- check ------------------------------------------------------------------
 
 async function runCheck(command: CheckCommand, io: CliIo): Promise<number> {
-  const collected = await collectOrExplain(command.paths, io, command.quiet);
+  const collected = await collectOrExplain(command.paths, io, command.quiet, command.files);
   if (!collected) return EXIT_USAGE;
   const session = createSession(command, io);
   try {
@@ -180,10 +181,13 @@ async function runCheck(command: CheckCommand, io: CliIo): Promise<number> {
         `No TypeGPU targets in ${plural(collected.files.length, 'source file')} under ${command.paths.join(', ')}.`,
       );
     }
-    const result = await checkModules(session, [...modules.entries()], command);
+    const { selected, unmatched } = selectTargets([...modules.entries()], command.targets);
+    session.settle();
+    for (const name of unmatched) io.stderr(`No target named ${JSON.stringify(name)}.\n`);
+    const result = await checkModules(session, selected, command);
     if (session.interrupted) return EXIT_INTERRUPTED;
     emitCheck(session, result, command);
-    if (!command.watch) return result.ok ? EXIT_OK : EXIT_FINDINGS;
+    if (!command.watch) return result.ok && unmatched.length === 0 ? EXIT_OK : EXIT_FINDINGS;
     if (!io.watch) {
       io.stderr('Watching is not available here.\n');
       return EXIT_USAGE;
@@ -227,14 +231,17 @@ async function watchLoop(
   session.note(`Watching ${describeWatchScope(command.paths)}. Press Ctrl-C to stop.`);
   await watchModules(session, {
     paths: command.paths,
+    files: command.files,
     collected,
     modules,
     signal: session.abort.signal,
     onAffected: async (affected, changedNames) => {
+      const { selected } = selectTargets(affected, command.targets);
+      if (selected.length === 0) return;
       const shown = changedNames.slice(0, 4).join(', ') + (changedNames.length > 4 ? ', …' : '');
       session.settle();
       io.stdout(`\n${c.dim(`— ${new Date().toLocaleTimeString()} ${shown}`)}\n`);
-      const result = await checkModules(session, affected, command);
+      const result = await checkModules(session, selected, command);
       if (session.interrupted) return;
       emitCheck(session, result, command);
     },

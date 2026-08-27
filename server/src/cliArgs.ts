@@ -16,6 +16,13 @@ export type RuntimeOptions = {
   sourceMapping: boolean;
 };
 
+/** What a walk over directories and globs skips. */
+export type FileOptions = {
+  /** Globs relative to the working directory. */
+  ignore: string[];
+  gitignore: boolean;
+};
+
 export type GlobalOptions = {
   quiet: boolean;
   /** Undefined lets the terminal decide. */
@@ -25,6 +32,9 @@ export type GlobalOptions = {
 export type CheckCommand = GlobalOptions & {
   command: 'check';
   paths: string[];
+  files: FileOptions;
+  /** Only targets with one of these labels or symbol names; empty means all. */
+  targets: string[];
   format: OutputFormat;
   minSeverity: CliSeverity;
   warningsAsErrors: boolean;
@@ -52,12 +62,14 @@ export type ReportCommand = GlobalOptions & {
 export type TargetsCommand = GlobalOptions & {
   command: 'targets';
   paths: string[];
+  files: FileOptions;
   json: boolean;
 };
 
 export type InteractiveCommand = GlobalOptions & {
   command: 'interactive';
   paths: string[];
+  files: FileOptions;
   runtime: RuntimeOptions;
 };
 
@@ -133,12 +145,15 @@ function buildProgram(io: ParseIo, version: string, emit: (command: CliCommand) 
     });
 
   withRuntimeOptions(
-    program
-      .command('check')
-      .description(
-        'Inspect every TypeGPU module under the given files, directories, or globs and print diagnostics',
-      )
-      .argument('[paths...]', 'Files, directories, or globs to inspect', ['.'])
+    withFileOptions(
+      program
+        .command('check')
+        .description(
+          'Inspect every TypeGPU module under the given files, directories, or globs and print diagnostics',
+        )
+        .argument('[paths...]', 'Files, directories, or globs to inspect', ['.'])
+        .option('-t, --target <name>', 'Only this target (label or symbol name); repeatable', collect),
+    )
       .addOption(
         new Option('--format <format>', 'Output format; github adds workflow annotations')
           .choices(FORMATS)
@@ -166,6 +181,8 @@ function buildProgram(io: ParseIo, version: string, emit: (command: CliCommand) 
       ...globalOptions(options),
       command: 'check',
       paths,
+      files: fileOptions(options),
+      targets: options.target ?? [],
       format,
       minSeverity: options.severity,
       warningsAsErrors: options.warningsAsErrors ?? false,
@@ -219,28 +236,43 @@ function buildProgram(io: ParseIo, version: string, emit: (command: CliCommand) 
   });
 
   withRuntimeOptions(
-    program
-      .command('interactive')
-      .alias('i')
-      .description(
-        'Start a session in the terminal: pick targets, check, read WGSL and reports, watch, ' +
-          'all on one warm browser',
-      )
-      .argument('[paths...]', 'Files, directories, or globs to work in', ['.']),
+    withFileOptions(
+      program
+        .command('interactive')
+        .alias('i')
+        .description(
+          'Start a session in the terminal: pick targets, check, read WGSL and reports, watch, ' +
+            'all on one warm browser',
+        )
+        .argument('[paths...]', 'Files, directories, or globs to work in', ['.']),
+    ),
   ).action((paths: string[], _options: unknown, command: Command) => {
-    const options = command.optsWithGlobals<GlobalCliOptions & RuntimeCliOptions>();
-    emit({ ...globalOptions(options), command: 'interactive', paths, runtime: runtimeOptions(options) });
+    const options = command.optsWithGlobals<GlobalCliOptions & RuntimeCliOptions & FileCliOptions>();
+    emit({
+      ...globalOptions(options),
+      command: 'interactive',
+      paths,
+      files: fileOptions(options),
+      runtime: runtimeOptions(options),
+    });
   });
 
-  program
-    .command('targets')
-    .description('List the targets a check would inspect, from source alone; nothing runs')
-    .argument('[paths...]', 'Files, directories, or globs to scan', ['.'])
-    .option('--json', 'JSON output')
-    .action((paths: string[], _options: unknown, command: Command) => {
-      const options = command.optsWithGlobals<GlobalCliOptions & { json?: boolean }>();
-      emit({ ...globalOptions(options), command: 'targets', paths, json: options.json ?? false });
+  withFileOptions(
+    program
+      .command('targets')
+      .description('List the targets a check would inspect, from source alone; nothing runs')
+      .argument('[paths...]', 'Files, directories, or globs to scan', ['.'])
+      .option('--json', 'JSON output'),
+  ).action((paths: string[], _options: unknown, command: Command) => {
+    const options = command.optsWithGlobals<GlobalCliOptions & FileCliOptions & { json?: boolean }>();
+    emit({
+      ...globalOptions(options),
+      command: 'targets',
+      paths,
+      files: fileOptions(options),
+      json: options.json ?? false,
     });
+  });
 
   return program;
 }
@@ -256,7 +288,13 @@ type RuntimeCliOptions = {
   sourceMapping: boolean;
 };
 
-type CheckOptions = GlobalCliOptions & RuntimeCliOptions & {
+type FileCliOptions = {
+  ignore?: string[];
+  gitignore: boolean;
+};
+
+type CheckOptions = GlobalCliOptions & RuntimeCliOptions & FileCliOptions & {
+  target?: string[];
   format: OutputFormat;
   json?: boolean;
   severity: CliSeverity;
@@ -280,6 +318,12 @@ function withRuntimeOptions(command: Command): Command {
     .option('--inspector-package <spec>', 'npm package to run instead of the bundled runtime');
 }
 
+function withFileOptions(command: Command): Command {
+  return command
+    .option('--ignore <glob>', 'Skip files matching this glob when walking; repeatable', collect)
+    .option('--no-gitignore', 'Inspect files that .gitignore excludes');
+}
+
 function withTargetOptions(command: Command): Command {
   return command
     .option('-t, --target <name>', 'Only this target (label or symbol name); repeatable', collect)
@@ -296,6 +340,10 @@ function positiveInteger(value: string): number {
     throw new InvalidArgumentError('Expected a positive integer.');
   }
   return parsed;
+}
+
+function fileOptions(options: FileCliOptions): FileOptions {
+  return { ignore: options.ignore ?? [], gitignore: options.gitignore };
 }
 
 function globalOptions(options: GlobalCliOptions): GlobalOptions {

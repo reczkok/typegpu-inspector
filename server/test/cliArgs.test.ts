@@ -48,6 +48,8 @@ describe('CLI arguments', () => {
       command: {
         command: 'check',
         paths: ['src', 'shaders/*.ts'],
+        files: { ignore: [], gitignore: true },
+        targets: [],
         format: 'github',
         minSeverity: 'warning',
         warningsAsErrors: true,
@@ -119,6 +121,34 @@ describe('CLI arguments', () => {
     });
   });
 
+  it('parses file filters and a target selection for check', async () => {
+    const { result } = await parse([
+      'check',
+      'src',
+      '--ignore',
+      '**/*.stories.ts',
+      '--ignore=legacy/**',
+      '--no-gitignore',
+      '-t',
+      'shade',
+      '--target',
+      'blur',
+    ]);
+    expect(result).toMatchObject({
+      ok: true,
+      command: {
+        command: 'check',
+        files: { ignore: ['**/*.stories.ts', 'legacy/**'], gitignore: false },
+        targets: ['shade', 'blur'],
+      },
+    });
+    const targets = await parse(['targets', '--ignore', 'examples/**']);
+    expect(targets.result).toMatchObject({
+      ok: true,
+      command: { command: 'targets', files: { ignore: ['examples/**'], gitignore: true } },
+    });
+  });
+
   it('parses an interactive session with runtime overrides', async () => {
     const { result } = await parse([
       'interactive',
@@ -149,7 +179,14 @@ describe('CLI arguments', () => {
     const { result } = await parse(['targets', 'src', '--json']);
     expect(result).toEqual({
       ok: true,
-      command: { command: 'targets', paths: ['src'], json: true, quiet: false, color: undefined },
+      command: {
+        command: 'targets',
+        paths: ['src'],
+        files: { ignore: [], gitignore: true },
+        json: true,
+        quiet: false,
+        color: undefined,
+      },
     });
     const rejected = await parse(['targets', '--timeout-ms', '5']);
     expect(rejected.result).toEqual({ ok: false, exitCode: 2 });

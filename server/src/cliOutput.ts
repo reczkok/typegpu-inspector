@@ -15,6 +15,11 @@ export type CliLocation = {
 
 export type CliRelated = CliLocation & { message: string };
 
+export type CliPoint = { path: string; line: number; column: number };
+
+/** A call site in another module that reaches the same finding. */
+export type CliAlsoIn = CliPoint & { label: string };
+
 export type CliDiagnostic = CliLocation & {
   severity: CliSeverity;
   code?: string;
@@ -22,6 +27,10 @@ export type CliDiagnostic = CliLocation & {
   related: CliRelated[];
   /** Where the compiler message sits in the generated WGSL, when known. */
   generatedWgsl?: CliLocation;
+  /** The authored statement the finding is about, when it is known and in another file. */
+  finding?: CliPoint;
+  /** Modules whose own report of this finding folded into this one. */
+  alsoIn?: CliAlsoIn[];
 };
 
 export type CliTargetStatus = {
@@ -112,6 +121,10 @@ export function toCliDiagnostics(
     const data = isRecord(diagnostic.data) ? diagnostic.data : {};
     const generatedUri = typeof data.generatedUri === 'string' ? data.generatedUri : undefined;
     const generatedRange = isRange(data.generatedRange) ? data.generatedRange : undefined;
+    const relatedSource = isRecord(data.relatedSource) &&
+        typeof data.relatedSource.uri === 'string' && isRange(data.relatedSource.range)
+      ? location(data.relatedSource.uri, data.relatedSource.range, cwd)
+      : undefined;
     return {
       ...location(sourcePath, diagnostic.range, cwd),
       severity: lspSeverityName(diagnostic.severity),
@@ -124,8 +137,84 @@ export function toCliDiagnostics(
       ...(generatedUri && generatedRange
         ? { generatedWgsl: location(generatedUri, generatedRange, cwd) }
         : {}),
+      ...(relatedSource
+        ? { finding: { path: relatedSource.path, line: relatedSource.line, column: relatedSource.column } }
+        : {}),
     };
   }).sort(compareDiagnostics);
+}
+
+/**
+ * One finding, one report across files. A helper inlined by several modules
+ * fails in each of them and in its own file; the report on the statement
+ * itself stays (else the first), and the other modules' call sites are
+ * listed on it. Only compiler findings whose statement is known fold.
+ */
+export function foldAcrossFiles(files: readonly CliFileResult[]): CliFileResult[] {
+  type Entry = { file: number; diagnostic: CliDiagnostic };
+  const groups = new Map<string, Entry[]>();
+  files.forEach((file, index) => {
+    for (const diagnostic of file.diagnostics) {
+      const key = findingKey(diagnostic, file.path);
+      if (!key) continue;
+      groups.set(key, [...(groups.get(key) ?? []), { file: index, diagnostic }]);
+    }
+  });
+  const dropped = new Set<CliDiagnostic>();
+  const folded = new Map<CliDiagnostic, CliAlsoIn[]>();
+  for (const group of groups.values()) {
+    if (new Set(group.map((entry) => entry.file)).size < 2) continue;
+    const root = group.find(({ diagnostic, file }) => onFinding(diagnostic, files[file]!.path)) ?? group[0]!;
+    const alsoIn: CliAlsoIn[] = [];
+    for (const entry of group) {
+      if (entry === root || entry.file === root.file) continue;
+      dropped.add(entry.diagnostic);
+      alsoIn.push({
+        path: entry.diagnostic.path,
+        line: entry.diagnostic.line,
+        column: entry.diagnostic.column,
+        label: targetLabel(entry.diagnostic.message),
+      });
+    }
+    folded.set(root.diagnostic, alsoIn);
+  }
+  if (dropped.size === 0) return [...files];
+  return files.map((file) => ({
+    ...file,
+    diagnostics: file.diagnostics
+      .filter((diagnostic) => !dropped.has(diagnostic))
+      .map((diagnostic) => {
+        const alsoIn = folded.get(diagnostic);
+        return alsoIn ? { ...diagnostic, alsoIn: [...(diagnostic.alsoIn ?? []), ...alsoIn] } : diagnostic;
+      }),
+  }));
+}
+
+function findingKey(diagnostic: CliDiagnostic, filePath: string): string | undefined {
+  if (diagnostic.code !== 'wgsl-compilation') return undefined;
+  const finding = diagnostic.finding ?? { path: filePath, line: diagnostic.line, column: diagnostic.column };
+  return `${diagnostic.severity}|${finding.path}:${finding.line}:${finding.column}|${compilerMessage(diagnostic.message)}`;
+}
+
+function onFinding(diagnostic: CliDiagnostic, filePath: string): boolean {
+  const finding = diagnostic.finding;
+  if (!finding) return true;
+  return finding.path === filePath && finding.line === diagnostic.line && finding.column === diagnostic.column;
+}
+
+/** The label a compiler diagnostic's message starts with: `shade: …` → `shade`. */
+export function targetLabel(message: string): string {
+  const index = message.indexOf(': ');
+  return index > 0 ? message.slice(0, index) : message;
+}
+
+/** The compiler's own words: no target label, no mapping note, no cross-file suffix. */
+function compilerMessage(message: string): string {
+  const [head = ''] = message.split('\n');
+  const body = head.indexOf(': ') > 0 ? head.slice(head.indexOf(': ') + 2) : head;
+  return body
+    .replace(/ — in .*$/, '')
+    .replace(/ \((approximate source location|generated WGSL line \d+)\)$/, '');
 }
 
 function compareDiagnostics(a: CliDiagnostic, b: CliDiagnostic): number {
@@ -141,10 +230,11 @@ export function filterBySeverity(
 }
 
 export function summarizeCheck(
-  files: readonly CliFileResult[],
+  fileResults: readonly CliFileResult[],
   elapsedMs: number,
   warningsAsErrors: boolean,
 ): CheckResult {
+  const files = foldAcrossFiles(fileResults);
   const summary: CliSummary = {
     files: files.length,
     targets: 0,
@@ -222,7 +312,14 @@ export function formatDiagnosticLines(diagnostic: CliDiagnostic, style: TextStyl
     const note = generatedNotes.length > 0 ? c.dim(` (${generatedNotes.join('; ')})`) : '';
     lines.push(`    ${c.dim('wgsl')}: ${generated.path}:${generated.line}:${generated.column}${note}`);
   }
+  if (diagnostic.alsoIn && diagnostic.alsoIn.length > 0) {
+    lines.push(`    ${c.dim('also in')}: ${diagnostic.alsoIn.map(describeAlsoIn).join(', ')}`);
+  }
   return lines;
+}
+
+function describeAlsoIn(entry: CliAlsoIn): string {
+  return `${entry.label} (${entry.path}:${entry.line}:${entry.column})`;
 }
 
 export function formatCheckText(result: CheckResult, style: TextStyle): string {
@@ -304,6 +401,9 @@ export function formatCheckGithub(result: CheckResult, style: TextStyle): string
         ...diagnostic.related.map((related) =>
           `${related.path}:${related.line}:${related.column}: ${related.message}`
         ),
+        ...(diagnostic.alsoIn && diagnostic.alsoIn.length > 0
+          ? [`also in: ${diagnostic.alsoIn.map(describeAlsoIn).join(', ')}`]
+          : []),
       ].join('\n');
       lines.push(`::${command} ${properties.join(',')}::${escapeData(message)}`);
     }

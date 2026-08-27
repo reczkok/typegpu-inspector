@@ -181,7 +181,7 @@ async function scan(flow: Flow): Promise<void> {
   const { ui, command } = flow;
   const spinner = ui.spinner();
   spinner.start(`Scanning ${describeWatchScope(command.paths)}`);
-  const collected = await collectOrExplain(command.paths, flow.session.io, true);
+  const collected = await collectOrExplain(command.paths, flow.session.io, true, command.files);
   const modules = collected ? await discoverTargets(collected.files) : new Map<string, DiscoveredModule>();
   flow.workspace = {
     collected: collected ?? { files: [], missing: [], directories: [] },
@@ -489,6 +489,7 @@ async function watch(flow: Flow): Promise<'stopped' | 'interrupt'> {
   });
   await watchModules(session, {
     paths: command.paths,
+    files: command.files,
     collected: flow.workspace.collected,
     modules: flow.workspace.modules,
     signal: stop.signal,
