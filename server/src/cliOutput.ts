@@ -43,10 +43,18 @@ export type CliTargetStatus = {
   generatedWgsl?: string;
 };
 
+/** One console call the module made while it ran; repeats fold into `count`. */
+export type CliConsoleMessage = {
+  type: string;
+  text: string;
+  count?: number;
+};
+
 export type CliFileResult = {
   path: string;
   targets: CliTargetStatus[];
   diagnostics: CliDiagnostic[];
+  console?: CliConsoleMessage[];
   elapsedMs: number;
 };
 
@@ -190,6 +198,47 @@ export function foldAcrossFiles(files: readonly CliFileResult[]): CliFileResult[
   }));
 }
 
+/**
+ * A module that could not run fails every target with the same account, so
+ * one report says it, on the first target. Only a failure shared by every
+ * target in the run folds; one that some targets share still describes those
+ * targets.
+ */
+export function foldModuleFailures(
+  diagnostics: readonly CliDiagnostic[],
+  targetCount: number,
+): CliDiagnostic[] {
+  if (targetCount < 2) return [...diagnostics];
+  const groups = new Map<string, CliDiagnostic[]>();
+  for (const diagnostic of diagnostics) {
+    if (diagnostic.code !== 'target-resolution' && diagnostic.code !== 'runtime-inspection') continue;
+    const key = `${diagnostic.code}|${moduleFailureText(diagnostic)}`;
+    groups.set(key, [...(groups.get(key) ?? []), diagnostic]);
+  }
+  const dropped = new Set<CliDiagnostic>();
+  const kept = new Map<CliDiagnostic, string>();
+  for (const group of groups.values()) {
+    if (group.length !== targetCount) continue;
+    const [first, ...rest] = group;
+    kept.set(first!, moduleFailureText(first!));
+    for (const diagnostic of rest) dropped.add(diagnostic);
+  }
+  if (kept.size === 0) return [...diagnostics];
+  return diagnostics
+    .filter((diagnostic) => !dropped.has(diagnostic))
+    .map((diagnostic) => {
+      const message = kept.get(diagnostic);
+      return message === undefined ? diagnostic : { ...diagnostic, message };
+    });
+}
+
+/** A resolution failure names its target first; the account after it is what folds. */
+function moduleFailureText(diagnostic: CliDiagnostic): string {
+  if (diagnostic.code !== 'target-resolution') return diagnostic.message;
+  const index = diagnostic.message.indexOf(': ');
+  return index > 0 ? diagnostic.message.slice(index + 2) : diagnostic.message;
+}
+
 function findingKey(diagnostic: CliDiagnostic, filePath: string): string | undefined {
   if (diagnostic.code !== 'wgsl-compilation') return undefined;
   const finding = diagnostic.finding ?? { path: filePath, line: diagnostic.line, column: diagnostic.column };
@@ -267,6 +316,8 @@ export function summarizeCheck(
 export type TextStyle = {
   color: boolean;
   verbose: boolean;
+  /** Print the modules' console output. */
+  console?: boolean;
 };
 
 export type Colors = ReturnType<typeof createColors>;
@@ -318,6 +369,15 @@ export function formatDiagnosticLines(diagnostic: CliDiagnostic, style: TextStyl
   return lines;
 }
 
+function formatConsoleLines(path: string, message: CliConsoleMessage, c: Colors): string[] {
+  const [head = '', ...tail] = message.text.split('\n');
+  const times = message.count !== undefined && message.count > 1 ? c.dim(` (×${message.count})`) : '';
+  return [
+    `${c.bold(path)}: ${c.dim(`console.${message.type}`)}: ${head}${times}`,
+    ...tail.map((line) => indent(line, 4)),
+  ];
+}
+
 function describeAlsoIn(entry: CliAlsoIn): string {
   return `${entry.label} (${entry.path}:${entry.line}:${entry.column})`;
 }
@@ -329,6 +389,13 @@ export function formatCheckText(result: CheckResult, style: TextStyle): string {
     for (const diagnostic of file.diagnostics) {
       lines.push(...formatDiagnosticLines(diagnostic, style));
     }
+  }
+  if (style.console) {
+    const output = result.files.flatMap((file) =>
+      (file.console ?? []).flatMap((message) => formatConsoleLines(file.path, message, c))
+    );
+    if (output.length > 0 && lines.length > 0) lines.push('');
+    lines.push(...output);
   }
   if (style.verbose) {
     if (lines.length > 0) lines.push('');

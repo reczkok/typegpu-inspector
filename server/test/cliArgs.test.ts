@@ -55,6 +55,8 @@ describe('CLI arguments', () => {
         warningsAsErrors: true,
         watch: false,
         verbose: true,
+        console: false,
+        evaluate: false,
         quiet: true,
         color: undefined,
         runtime: {
@@ -80,6 +82,8 @@ describe('CLI arguments', () => {
       warningsAsErrors: false,
       watch: false,
       verbose: false,
+      console: false,
+      evaluate: false,
       quiet: false,
       runtime: { features: [], strictNames: true, sourceMapping: true },
     });

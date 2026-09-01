@@ -39,7 +39,8 @@ describe('runtime inspector launch', () => {
     await writeFile(bin, '#!/usr/bin/env node\n');
     process.env.TYPEGPU_INSPECTOR_RUNTIME_DIR = runtimeDir;
 
-    const launch = await resolveInspectorLaunch('bundled');
+    // An entry outside the monorepo, or the checkout's own runtime would win.
+    const launch = await resolveInspectorLaunch('bundled', join(runtimeDir, 'server', 'dist', 'server.cjs'));
 
     expect(launch.command).toBe(process.execPath);
     expect(launch.args).toEqual([bin]);

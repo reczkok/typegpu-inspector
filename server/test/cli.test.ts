@@ -60,12 +60,18 @@ type Harness = {
   closed(): boolean;
 };
 
-function harness(report: Reporter, overrides: Partial<CliIo> = {}): Harness {
+type Evaluator = (modulePath: string) => InspectorOutput;
+
+function harness(report: Reporter, overrides: Partial<CliIo> = {}, evaluate?: Evaluator): Harness {
   let out = '';
   let err = '';
   let closed = false;
   const calls: Harness['calls'] = [];
   const runtime: RuntimeLike = {
+    evaluate: async (modulePath) => {
+      calls.push({ modulePath, labels: ['<module>'] });
+      return evaluate ? evaluate(modulePath) : { ok: true, targets: [] };
+    },
     inspect: async (modulePath, targets) => {
       calls.push({ modulePath, labels: targets.map((target) => target.label) });
       const reports = targets.map(report);
@@ -313,6 +319,9 @@ describe('CLI', () => {
         inspect: async () => {
           throw new Error('Runtime inspector connection failed after one automatic retry.');
         },
+        evaluate: async () => {
+          throw new Error('Runtime inspector connection failed after one automatic retry.');
+        },
         close: async () => undefined,
       }),
     });
@@ -371,5 +380,131 @@ describe('CLI', () => {
     expect(code).toBe(0);
     expect(h.stdout()).toContain('## test/fixtures/wgsl-compilation-error.ts: badWgsl');
     expect(h.stdout()).toContain('```wgsl');
+  });
+});
+
+describe('modules without targets', () => {
+  const factory = 'test/fixtures/factory-module.ts';
+
+  it('are skipped by default, with a pointer at --evaluate', async () => {
+    const h = harness(passingReport);
+    const code = await runCli(['check', factory], h.io);
+    expect(code).toBe(0);
+    expect(h.calls).toEqual([]);
+    expect(h.stderr()).toContain('No TypeGPU targets in 1 source file');
+    expect(h.stderr()).toContain('--evaluate');
+  });
+
+  it('run with --evaluate and report what the import threw, once, on the first line', async () => {
+    const h = harness(passingReport, {}, () => ({
+      ok: false,
+      causes: [{
+        id: 'inspection-cause-1',
+        tier: 'module',
+        code: 'module-load-failed',
+        message: 'Resolution of the following tree failed:\n- computeFn:main: undefinedThing is not defined',
+      }],
+      targets: [{ label: 'inspection', kind: 'resolvable', ok: false, error: { message: 'Resolution of the following tree failed' } }],
+      console: [{ type: 'log', text: 'factory ran 42', count: 3 }],
+    }));
+    const code = await runCli(['check', factory, '--evaluate', '--quiet'], h.io);
+    expect(code).toBe(1);
+    expect(h.calls).toEqual([{ modulePath: resolve(serverRoot, factory), labels: ['<module>'] }]);
+    const out = stripVTControlCharacters(h.stdout());
+    expect(out).toContain(
+      `${factory}:1:1: error: Resolution of the following tree failed: [module-evaluation]\n    - computeFn:main: undefinedThing is not defined`,
+    );
+    expect(out.match(/module-evaluation/g)).toHaveLength(1);
+    expect(out).not.toContain('console.log');
+    expect(out).toContain('1 error · 1 target (0 ok, 1 failed) in 1 file');
+  });
+
+  it('count as a module target and carry console output in JSON', async () => {
+    const h = harness(passingReport, {}, () => ({
+      ok: true,
+      targets: [],
+      console: [{ type: 'log', text: 'factory ran 42', count: 3 }, { type: 'warn', text: 'careful' }],
+    }));
+    const code = await runCli(['check', factory, '--evaluate', '--json', '--quiet'], h.io);
+    expect(code).toBe(0);
+    const result = JSON.parse(h.stdout()) as {
+      files: Array<{ targets: Array<{ label: string; kind?: string; status: string }>; console?: unknown }>;
+    };
+    expect(result.files[0]?.targets).toEqual([
+      { id: 'module', label: 'factory-module.ts', kind: 'module', status: 'ok' },
+    ]);
+    expect(result.files[0]?.console).toEqual([
+      { type: 'log', text: 'factory ran 42', count: 3 },
+      { type: 'warn', text: 'careful' },
+    ]);
+  });
+
+  it('print console output with --console', async () => {
+    const h = harness(passingReport, {}, () => ({
+      ok: true,
+      targets: [],
+      console: [{ type: 'log', text: 'factory ran 42', count: 3 }, { type: 'warn', text: 'careful\nsecond line' }],
+    }));
+    const code = await runCli(['check', factory, '--evaluate', '--console', '--quiet'], h.io);
+    expect(code).toBe(0);
+    const out = stripVTControlCharacters(h.stdout());
+    expect(out).toContain(`${factory}: console.log: factory ran 42 (×3)\n${factory}: console.warn: careful\n    second line\n`);
+  });
+});
+
+describe('console output of a module with targets', () => {
+  it('reaches --console and the JSON even though the editor drops it', async () => {
+    const h = harness(passingReport);
+    const base = h.io.createRuntime('', () => ({} as never));
+    const runtime: RuntimeLike = {
+      ...base,
+      inspect: async (modulePath, targets, signal) => ({
+        ...(await base.inspect(modulePath, targets, signal)),
+        console: [{ type: 'log', text: 'step 100: energy 0.5' }, { type: 'log', text: 'step 200: energy 0.4' }],
+      }),
+    };
+    const io = { ...h.io, createRuntime: () => runtime };
+    const code = await runCli(['check', brokenFixture, '--console', '--quiet'], io);
+    expect(code).toBe(0);
+    const out = stripVTControlCharacters(h.stdout());
+    expect(out).toContain('test/fixtures/wgsl-compilation-error.ts: console.log: step 100: energy 0.5\n');
+    expect(out).toContain('test/fixtures/wgsl-compilation-error.ts: console.log: step 200: energy 0.4\n');
+  });
+});
+
+describe('a module that fails as a whole', () => {
+  it('is reported once, not once per target', async () => {
+    // Off to the side: the fixtures directory is what the interactive tests enumerate.
+    const dir = await mkdtemp(join(tmpdir(), 'typegpu-cli-module-'));
+    const modulePath = join(dir, 'two-helpers.ts');
+    await writeFile(
+      modulePath,
+      [
+        "import tgpu, { d } from 'typegpu';",
+        '',
+        'export const half = tgpu.fn([d.f32], d.f32)((value) => value / 2);',
+        '',
+        'export const twice = tgpu.fn([d.f32], d.f32)((value) => value * 2);',
+        '',
+      ].join('\n'),
+    );
+    const h = harness((target) => ({
+      label: target.label,
+      kind: 'resolvable',
+      ok: false,
+      compilationMessages: [],
+      error: { message: 'Dependency optimization failed: Flow is not supported (node_modules/react-native/index.js).' },
+      diagnostics: [{
+        code: 'dependency-optimization',
+        message: 'Dependency optimization failed: Flow is not supported (node_modules/react-native/index.js).',
+      }],
+    }));
+    const code = await runCli(['check', modulePath, '--quiet'], h.io);
+    expect(code).toBe(1);
+    const out = stripVTControlCharacters(h.stdout());
+    const reports = out.match(/Dependency optimization failed/g) ?? [];
+    expect(reports).toHaveLength(1);
+    expect(out).toMatch(/^\S*two-helpers\.ts:\d+:\d+: error: Dependency optimization failed/m);
+    expect(out).toContain('1 error');
   });
 });

@@ -40,6 +40,10 @@ export type CheckCommand = GlobalOptions & {
   warningsAsErrors: boolean;
   watch: boolean;
   verbose: boolean;
+  /** Print what the modules wrote to the console. */
+  console: boolean;
+  /** Import modules without targets too, and report whether they throw. */
+  evaluate: boolean;
   runtime: RuntimeOptions;
 };
 
@@ -170,7 +174,12 @@ function buildProgram(io: ParseIo, version: string, emit: (command: CliCommand) 
         '-w, --watch',
         'Re-check changed modules and their importers on save, keeping the browser warm',
       )
-      .option('--verbose', 'Also list every target with its status'),
+      .option('--verbose', 'Also list every target with its status')
+      .option('--console', 'Print what the modules wrote to the console while they ran')
+      .option(
+        '--evaluate',
+        'Also import modules that use TypeGPU but declare no target, and report whether they throw',
+      ),
   ).action((paths: string[], _options: unknown, command: Command) => {
     const options = command.optsWithGlobals<CheckOptions>();
     const format: OutputFormat = options.json ? 'json' : options.format;
@@ -188,6 +197,8 @@ function buildProgram(io: ParseIo, version: string, emit: (command: CliCommand) 
       warningsAsErrors: options.warningsAsErrors ?? false,
       watch: options.watch ?? false,
       verbose: options.verbose ?? false,
+      console: options.console ?? false,
+      evaluate: options.evaluate ?? false,
       runtime: runtimeOptions(options),
     });
   });
@@ -301,6 +312,8 @@ type CheckOptions = GlobalCliOptions & RuntimeCliOptions & FileCliOptions & {
   warningsAsErrors?: boolean;
   watch?: boolean;
   verbose?: boolean;
+  console?: boolean;
+  evaluate?: boolean;
 };
 
 type TargetedOptions = GlobalCliOptions & RuntimeCliOptions & {

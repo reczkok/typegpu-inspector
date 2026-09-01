@@ -27,6 +27,7 @@ import {
   discoverTargets,
   errorMessage,
   inspectModule,
+  modulesToEvaluate,
   selectTargets,
   textStyle,
   watchModules,
@@ -176,15 +177,20 @@ async function runCheck(command: CheckCommand, io: CliIo): Promise<number> {
   const session = createSession(command, io);
   try {
     const modules = await discoverTargets(collected.files);
-    if (modules.size === 0) {
+    // Named targets narrow the run; a module without any has none to name.
+    const evaluate = command.evaluate && command.targets.length === 0
+      ? await modulesToEvaluate(collected.files, modules)
+      : [];
+    if (modules.size === 0 && evaluate.length === 0) {
       session.note(
-        `No TypeGPU targets in ${plural(collected.files.length, 'source file')} under ${command.paths.join(', ')}.`,
+        `No TypeGPU targets in ${plural(collected.files.length, 'source file')} under ${command.paths.join(', ')}.` +
+          (command.evaluate ? '' : ' A module that only calls TypeGPU runs with --evaluate.'),
       );
     }
     const { selected, unmatched } = selectTargets([...modules.entries()], command.targets);
     session.settle();
     for (const name of unmatched) io.stderr(`No target named ${JSON.stringify(name)}.\n`);
-    const result = await checkModules(session, selected, command);
+    const result = await checkModules(session, selected, command, evaluate);
     if (session.interrupted) return EXIT_INTERRUPTED;
     emitCheck(session, result, command);
     if (!command.watch) return result.ok && unmatched.length === 0 ? EXIT_OK : EXIT_FINDINGS;

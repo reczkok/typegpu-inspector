@@ -14,10 +14,13 @@ import type { InteractiveUi } from './cliInteractive.js';
 import {
   displayPath,
   filterBySeverity,
+  foldModuleFailures,
   plural,
   summarizeCheck,
   toCliDiagnostics,
   type CheckResult,
+  type CliConsoleMessage,
+  type CliDiagnostic,
   type CliFileResult,
   type CliTargetStatus,
   type TextStyle,
@@ -38,6 +41,8 @@ import {
 
 export type RuntimeLike = {
   inspect(modulePath: string, targets: InspectionTarget[], signal?: AbortSignal): Promise<InspectorOutput>;
+  /** Imports the module without targets and reports what happened. */
+  evaluate(modulePath: string, signal?: AbortSignal): Promise<InspectorOutput>;
   close(): Promise<void>;
 };
 
@@ -170,6 +175,8 @@ export type InspectedModule = {
   /** The targets this inspection covered; a subset when the run was narrowed. */
   targetIds: string[];
   inspection: DocumentInspection;
+  /** What the module wrote to the console; the materialized inspection drops it. */
+  console: CliConsoleMessage[];
   elapsedMs: number;
 };
 
@@ -192,18 +199,23 @@ export async function inspectModule(
       : `Starting the runtime inspector for ${shown}. A first run on this machine downloads Chromium (about 170 MB).`,
   );
   let inspection: DocumentInspection;
+  let console: CliConsoleMessage[] = [];
   try {
     const output = await interruptible(
       session.runtime.inspect(path, targets, session.abort.signal),
       session.abort.signal,
     );
     session.warmed = true;
+    console = consoleMessages(output.console);
     inspection = await materializeInspection(session.root, path, 1, discovered, output, targetIds);
   } catch (error) {
     if (session.interrupted) throw error;
-    inspection = failedTargetInspection(1, targetIds, errorMessage(error));
+    // The module never ran, so the account belongs to the module, once; the
+    // targets still read as failed.
+    const message = errorMessage(error);
+    inspection = { ...failedTargetInspection(1, targetIds, message), failure: message };
   }
-  return { path, discovered, targetIds, inspection, elapsedMs: Date.now() - startedAt };
+  return { path, discovered, targetIds, inspection, console, elapsedMs: Date.now() - startedAt };
 }
 
 export type CheckOptions = {
@@ -236,15 +248,31 @@ export function fileResult(session: Session, module: InspectedModule, minSeverit
       ...(generatedUri ? { generatedWgsl: displayPath(generatedUri, session.io.cwd) } : {}),
     };
   });
+  const output = module.console;
   return {
     path: displayPath(path, session.io.cwd),
     targets,
     diagnostics: filterBySeverity(
-      toCliDiagnostics(path, diagnostics.filter((diagnostic) => coversTarget(diagnostic, covered)), session.io.cwd),
+      foldModuleFailures(
+        toCliDiagnostics(path, diagnostics.filter((diagnostic) => coversTarget(diagnostic, covered)), session.io.cwd),
+        module.targetIds.length,
+      ),
       minSeverity,
     ),
+    ...(output.length > 0 ? { console: output } : {}),
     elapsedMs: module.elapsedMs,
   };
+}
+
+function consoleMessages(entries: InspectorOutput['console']): CliConsoleMessage[] {
+  return (entries ?? []).flatMap((entry) => {
+    if (typeof entry.text !== 'string') return [];
+    return [{
+      type: entry.type ?? 'log',
+      text: entry.text,
+      ...(typeof entry.count === 'number' && entry.count > 1 ? { count: entry.count } : {}),
+    }];
+  });
 }
 
 /** A module to inspect, optionally narrowed to some of its targets. */
@@ -284,6 +312,7 @@ export async function checkModules(
   session: Session,
   modules: ReadonlyArray<ModuleEntry>,
   options: CheckOptions,
+  evaluate: readonly string[] = [],
 ): Promise<CheckResult> {
   const startedAt = Date.now();
   const files: CliFileResult[] = [];
@@ -292,13 +321,117 @@ export async function checkModules(
     const module = await inspectModule(session, path, discovered, targets);
     files.push(fileResult(session, module, options.minSeverity));
   }
+  for (const path of evaluate) {
+    if (session.interrupted) break;
+    files.push(await evaluateModule(session, path, options.minSeverity));
+  }
   return summarizeCheck(files, Date.now() - startedAt, options.warningsAsErrors);
 }
 
-export function textStyle(options: GlobalOptions & { verbose?: boolean }, io: CliIo): TextStyle {
+const TYPEGPU_SPECIFIER = /^(typegpu|@typegpu\/)/;
+
+/**
+ * Files that use TypeGPU without declaring a target: a module whose pipelines
+ * are built inside a factory, say. Discovery skips them; `--evaluate` runs
+ * them.
+ */
+export async function modulesToEvaluate(
+  files: readonly string[],
+  modules: ReadonlyMap<string, DiscoveredModule>,
+): Promise<string[]> {
+  const paths: string[] = [];
+  for (const file of files) {
+    if (modules.has(file)) continue;
+    let discovered: DiscoveredModule;
+    try {
+      discovered = await discoverModule(file);
+    } catch {
+      continue;
+    }
+    if (discovered.imports.some((edge) => TYPEGPU_SPECIFIER.test(edge.specifier))) paths.push(file);
+  }
+  return paths;
+}
+
+/**
+ * Imports the module and reports whether it threw, what its GPU calls came
+ * back with, and what it wrote to the console. Nothing here has a source
+ * location: the module is the unit, so every finding sits on its first line.
+ */
+export async function evaluateModule(
+  session: Session,
+  path: string,
+  minSeverity: CliSeverity,
+): Promise<CliFileResult> {
+  const startedAt = Date.now();
+  const shown = displayPath(path, session.io.cwd);
+  session.progress(
+    session.warmed
+      ? `Evaluating ${shown}`
+      : `Starting the runtime inspector for ${shown}. A first run on this machine downloads Chromium (about 170 MB).`,
+  );
+  let output: InspectorOutput | undefined;
+  let failure: string | undefined;
+  try {
+    output = await interruptible(session.runtime.evaluate(path, session.abort.signal), session.abort.signal);
+    session.warmed = true;
+  } catch (error) {
+    if (session.interrupted) throw error;
+    failure = errorMessage(error);
+  }
+
+  const diagnostics: CliDiagnostic[] = [];
+  const seen = new Set<string>();
+  const report = (severity: CliSeverity, code: string, message: string) => {
+    const key = `${severity}|${code}|${message}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    diagnostics.push({ path: shown, line: 1, column: 1, endLine: 1, endColumn: 1, severity, code, message, related: [] });
+  };
+  if (failure !== undefined) report('error', 'module-evaluation', failure);
+  if (output) {
+    for (const cause of output.causes ?? []) report('error', 'module-evaluation', cause.message);
+    for (const pageError of output.pageErrors ?? []) report('error', 'module-evaluation', pageError);
+    for (const call of output.calls ?? []) {
+      const name = call.name ?? 'GPU call';
+      const callError = readMessage(call.error);
+      if (call.ok === false && callError !== undefined) report('error', 'module-evaluation', `${name}: ${callError}`);
+      for (const message of call.compilationMessages ?? []) {
+        if (typeof message.message !== 'string') continue;
+        const severity: CliSeverity = message.type === 'error' ? 'error' : message.type === 'warning' ? 'warning' : 'info';
+        report(severity, 'wgsl-compilation', `${name}: ${message.message}`);
+      }
+    }
+    if (!output.ok && diagnostics.length === 0) {
+      report('error', 'module-evaluation', readMessage(output.error) ?? 'The module did not evaluate cleanly.');
+    }
+  }
+  const failed = failure !== undefined || output?.ok === false ||
+    diagnostics.some((diagnostic) => diagnostic.severity === 'error');
+  const console = output ? consoleMessages(output.console) : [];
+  return {
+    path: shown,
+    targets: [{ id: 'module', label: basename(path), kind: 'module', status: failed ? 'failed' : 'ok' }],
+    diagnostics: filterBySeverity(diagnostics, minSeverity),
+    ...(console.length > 0 ? { console } : {}),
+    elapsedMs: Date.now() - startedAt,
+  };
+}
+
+function readMessage(error: unknown): string | undefined {
+  if (typeof error === 'string') return error;
+  if (typeof error !== 'object' || error === null) return undefined;
+  const message = (error as { message?: unknown }).message;
+  return typeof message === 'string' ? message : undefined;
+}
+
+export function textStyle(
+  options: GlobalOptions & { verbose?: boolean; console?: boolean },
+  io: CliIo,
+): TextStyle {
   const color = options.color ??
     (io.stdoutIsTTY && !io.env.NO_COLOR && io.env.TERM !== 'dumb');
-  return { color, verbose: options.verbose ?? false };
+  return { color, verbose: options.verbose ?? false, console: options.console ?? false };
 }
 
 export async function collectOrExplain(

@@ -4,6 +4,7 @@ import { existsSync, realpathSync, statSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { mkdir, open, readFile, unlink } from 'node:fs/promises';
 import { dirname, join, relative, resolve, isAbsolute } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { InspectionTarget } from './discovery.js';
 import { createInspectionDocumentHtml } from './documentFixture.js';
 import type { InspectorOutput, InspectorSettings } from './protocol.js';
@@ -67,12 +68,84 @@ export class RuntimeInspectorClient {
         signal?.throwIfAborted();
         return await this.inspectOnce(modulePath, targets, signal);
       } catch (retryError) {
-        const stderr = this.stderrTail.trim();
+        const stderr = lastStderrReport(this.stderrTail);
         throw new Error(
           `Runtime inspector connection failed after one automatic retry. First failure: ${firstFailure}. Retry: ${errorMessage(retryError)}${stderr ? `\nInspector stderr:\n${stderr}` : ''}`,
         );
       }
     }
+  }
+
+  /**
+   * Imports the module and reports what happened: whether it threw, what it
+   * wrote to the console, and what the GPU calls it made came back with.
+   * For a module that builds its pipelines inside functions and so declares
+   * no target of its own.
+   */
+  public async evaluate(modulePath: string, signal?: AbortSignal): Promise<InspectorOutput> {
+    this.cancelIdleClose();
+    try {
+      signal?.throwIfAborted();
+      return await this.evaluateOnce(modulePath, signal);
+    } catch (error) {
+      if (signal?.aborted || isAbortError(error)) throw error;
+      if (!isClosedConnectionError(error)) throw error;
+      const firstFailure = errorMessage(error);
+      await this.resetConnection();
+      try {
+        signal?.throwIfAborted();
+        return await this.evaluateOnce(modulePath, signal);
+      } catch (retryError) {
+        const stderr = lastStderrReport(this.stderrTail);
+        throw new Error(
+          `Runtime inspector connection failed after one automatic retry. First failure: ${firstFailure}. Retry: ${errorMessage(retryError)}${stderr ? `\nInspector stderr:\n${stderr}` : ''}`,
+        );
+      }
+    }
+  }
+
+  private async evaluateOnce(modulePath: string, signal?: AbortSignal): Promise<InspectorOutput> {
+    const settings = this.settings();
+    const client = await this.connect();
+    const moduleText = await readModuleText(modulePath);
+    const result = await client.callTool(
+      {
+        name: 'inspect_typegpu',
+        arguments: {
+          target: { kind: 'module', path: modulePath },
+          project: {
+            root: settings.projectRoot ?? this.workspaceRoot,
+          },
+          output: {
+            timeoutMs: settings.timeoutMs,
+            verbosity: 'full',
+            includeWgsl: false,
+            includeCalls: true,
+            // Without an `inspect` export the harness imports the module and
+            // stops there, which is the point.
+            diagnosticsOnly: true,
+            maxWgslBytes: settings.maxWgslBytes,
+          },
+          environment: {
+            strictNames: settings.strictNames,
+            features: settings.features,
+            documentHtml: createInspectionDocumentHtml(modulePath, moduleText),
+            staticAssetRoutes: inferStaticAssetRoutes(
+              modulePath,
+              settings.projectRoot ?? this.workspaceRoot,
+            ),
+            quiescent: true,
+          },
+        },
+      },
+      undefined,
+      {
+        ...(signal ? { signal } : {}),
+        timeout: settings.timeoutMs + ESTABLISHMENT_GRACE_MS,
+        maxTotalTimeout: settings.timeoutMs + ESTABLISHMENT_GRACE_MS,
+      },
+    );
+    return readInspectorOutput(result);
   }
 
   private async inspectOnce(
@@ -82,14 +155,7 @@ export class RuntimeInspectorClient {
   ): Promise<InspectorOutput> {
     const settings = this.settings();
     const client = await this.connect();
-    let moduleText: string;
-    try {
-      moduleText = await readFile(modulePath, 'utf8');
-    } catch (error) {
-      throw new Error(
-        `Could not read ${modulePath} from disk (${errorMessage(error)}). Save the file and retry the inspection.`,
-      );
-    }
+    const moduleText = await readModuleText(modulePath);
     const result = await client.callTool(
       {
         name: 'inspect_typegpu',
@@ -134,25 +200,7 @@ export class RuntimeInspectorClient {
         maxTotalTimeout: settings.timeoutMs + ESTABLISHMENT_GRACE_MS,
       },
     );
-
-    if (isRecord(result.structuredContent)) {
-      return result.structuredContent as InspectorOutput;
-    }
-
-    const content = Array.isArray(result.content) ? result.content : [];
-    for (const entry of content) {
-      if (!isRecord(entry) || entry.type !== 'text' || typeof entry.text !== 'string') {
-        continue;
-      }
-      try {
-        const parsed: unknown = JSON.parse(entry.text);
-        if (isRecord(parsed)) return parsed as InspectorOutput;
-      } catch {
-        // Keep looking for a structured response.
-      }
-    }
-
-    throw new Error('Runtime inspector returned no structured inspection result.');
+    return readInspectorOutput(result);
   }
 
   public async close(): Promise<void> {
@@ -204,6 +252,13 @@ export class RuntimeInspectorClient {
         version: __TYPEGPU_SERVER_VERSION__,
       });
       await client.connect(transport, { timeout: CONNECT_TIMEOUT_MS });
+      // A runtime that dies takes its transport with it; the next inspection
+      // must start a fresh one rather than call into a closed client.
+      client.onclose = () => {
+        if (this.client === client) {
+          this.client = undefined;
+        }
+      };
       if (this.generation !== generation) {
         // The connection was reset while this connect was in flight; do not
         // resurrect it, or the child process would leak without an owner.
@@ -236,6 +291,40 @@ export class RuntimeInspectorClient {
       // A dead transport is already closed for our purposes.
     }
   }
+}
+
+async function readModuleText(modulePath: string): Promise<string> {
+  try {
+    return await readFile(modulePath, 'utf8');
+  } catch (error) {
+    throw new Error(
+      `Could not read ${modulePath} from disk (${errorMessage(error)}). Save the file and retry the inspection.`,
+    );
+  }
+}
+
+function readInspectorOutput(result: unknown): InspectorOutput {
+  if (!isRecord(result)) {
+    throw new Error('Runtime inspector returned no structured inspection result.');
+  }
+  if (isRecord(result.structuredContent)) {
+    return result.structuredContent as InspectorOutput;
+  }
+
+  const content = Array.isArray(result.content) ? result.content : [];
+  for (const entry of content) {
+    if (!isRecord(entry) || entry.type !== 'text' || typeof entry.text !== 'string') {
+      continue;
+    }
+    try {
+      const parsed: unknown = JSON.parse(entry.text);
+      if (isRecord(parsed)) return parsed as InspectorOutput;
+    } catch {
+      // Keep looking for a structured response.
+    }
+  }
+
+  throw new Error('Runtime inspector returned no structured inspection result.');
 }
 
 function inferStaticAssetRoutes(
@@ -281,9 +370,22 @@ function isInsideDirectory(parent: string, candidate: string): boolean {
 const PACKAGE_SPEC_PATTERN =
   /^(@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*(@[a-zA-Z0-9-._^~><=+ ]+)?$/;
 
+/**
+ * Where this server's bundle lives. Node resolves the main module's symlinks
+ * (a global `bin` link, a package's `.bin` entry) but leaves `argv[1]` as
+ * typed, so only the module URL leads back to a checkout or an install.
+ */
+function serverEntryPath(): string {
+  try {
+    return fileURLToPath(import.meta.url);
+  } catch {
+    return process.argv[1] ?? process.cwd();
+  }
+}
+
 export async function resolveInspectorLaunch(
   inspectorPackage: string,
-  serverEntry: string = process.argv[1] ?? process.cwd(),
+  serverEntry: string = serverEntryPath(),
 ): Promise<{ command: string; args: string[]; env?: Record<string, string> }> {
   if (inspectorPackage !== 'bundled') {
     if (!PACKAGE_SPEC_PATTERN.test(inspectorPackage)) {
@@ -614,9 +716,21 @@ async function runtimeInstallLockOwnerAlive(lockPath: string): Promise<boolean> 
 const RUNTIME_INSTALL_LOCK_TIMEOUT_MS = 600_000;
 
 
+/**
+ * The last thing the runtime wrote before it went away. Two launches that
+ * died the same way leave the same report twice; Node's version banner ends
+ * each one.
+ */
+export function lastStderrReport(tail: string): string {
+  const plain = tail.replace(/\u001b\[[0-9;]*m/g, '').trim();
+  const reports = plain.split(/\n(?=Node\.js v\d)/).map((report) => report.trim()).filter(Boolean);
+  return reports.length > 1 ? reports[reports.length - 2]! : plain;
+}
+
 function isClosedConnectionError(error: unknown): boolean {
   const message = errorMessage(error).toLowerCase();
   return message.includes('connection closed') ||
+    message.includes('not connected') ||
     message.includes('transport closed') ||
     message.includes('server disconnected') ||
     message.includes('-32000');
