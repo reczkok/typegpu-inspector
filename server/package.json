@@ -1,6 +1,6 @@
 {
   "name": "typegpu-inspector-language-server",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Language server and CLI for TypeGPU inspection: hovers, inlay hints, diagnostics, generated WGSL, and a check command for shells and CI.",
   "type": "module",
   "license": "MIT",
