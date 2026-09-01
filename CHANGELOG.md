@@ -44,9 +44,46 @@ and released together. The format follows
   fails in several modules is reported once across files, on its own
   statement when that file is in the run, with the other modules' call
   sites listed on an `also in` line; the JSON carries them as `alsoIn` and
-  the finding's statement as `finding`.
+  the finding's statement as `finding`. `check --console` prints what the
+  modules wrote to the console while they ran, one line per call with
+  repeats counted, and the JSON output carries the messages per file.
+  `check --evaluate` also imports modules that use TypeGPU but declare no
+  target (a factory that builds its pipelines inside a function) and reports
+  whether the import threw, what its GPU calls came back with, and what it
+  logged; the module counts as one target named after its file.
 
 ### Fixed
+
+- A type-only import of a package the browser build cannot parse no longer
+  breaks the module. The runtime added every import of the inspected source
+  to Vite's prebundle list, `import type { … } from 'react-native-webgpu'`
+  included, which dragged React Native's Flow-typed entry into the optimizer.
+  Erased imports stay out of the list.
+- A dependency Vite's optimizer cannot bundle no longer takes the runtime
+  down. Vite 8 reports that failure as an unhandled rejection on a cold
+  server and through its logger on a warm one, and the rejection ended the
+  process, so every later module in the same run reported `Not connected`
+  per target. The runtime now catches both, fails the one inspection with
+  the compiler's reason, the failing file, and the import of the inspected
+  module that pulled the package in (`water.ts:15 imports
+  'react-native-webgpu', which depends on 'react-native'`), and retires the
+  wedged server; the next module gets a fresh one.
+- The language server reconnects to the runtime after it dies. The client
+  kept a closed transport, so every inspection after a crash failed with
+  `Not connected`; a closed transport now drops the client, the error
+  counts as a lost connection, and the runtime's last words on stderr go
+  into the message once rather than as a tail of every launch.
+- A module that cannot run is reported once. Whether the runtime threw or
+  every target came back with the same account, the CLI printed it once per
+  target; it now prints one report on the first target, and the verbose
+  listing still marks every target failed.
+- Inspectors started together no longer race to download Chromium: the
+  download takes a lock in the temp directory, and the others find the
+  browser installed when it is released.
+- The CLI launched through a symlink (a global `bin` link, a package's
+  `.bin` entry) missed the checkout or install beside it and fell back to
+  `npx`. The server now locates itself through its module URL, which Node
+  resolves through symlinks, instead of `argv[1]`.
 
 - Zed inspections no longer need the network after the first install. The
   language server launched the runtime through `npx`, which contacts the npm

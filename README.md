@@ -178,7 +178,7 @@ src/pbr.ts:98:5: error: shade: uniformity … — in shade (pbr.ts:98) via evalu
 | Command | Does |
 | --- | --- |
 | `interactive [paths...]` | Opens a terminal session with a fuzzy target picker, checks, generated WGSL, reports, editor integration, and watch mode on one warm browser. Alias: `i`. |
-| `check [paths...]` | Inspects every module under the files, directories, or globs (default `.`) and prints one line per diagnostic, then a summary. A helper that fails in several modules is reported once, with the other call sites on an `also in` line. Exit 1 on errors or failed targets. |
+| `check [paths...]` | Inspects every module under the files, directories, or globs (default `.`) and prints one line per diagnostic, then a summary. A helper that fails in several modules is reported once, with the other call sites on an `also in` line; a module that cannot run at all is reported once, not once per target. Exit 1 on errors or failed targets. |
 | `wgsl <file>...` | Prints the generated WGSL of each target with the compiler's messages. |
 | `report <file>...` | Prints the full inspection report as Markdown: the hover at its deepest level. |
 | `targets [paths...]` | Lists what a check would inspect, from source alone. Nothing runs. |
@@ -197,7 +197,14 @@ targets, and `--watch`, which re-checks a changed module and the modules that
 import it while keeping the browser session warm. Walks over directories and
 globs honor `.gitignore` files and skip dependency and build folders;
 `--ignore <glob>` skips more and `--no-gitignore` inspects ignored files too.
-A file named directly is always inspected.
+A file named directly is always inspected. `--console` prints what the
+modules wrote to the console while they ran, one line per call with repeats
+counted, so a module that steps a simulation and logs its statistics reads
+like a test. `--evaluate` also imports modules that use TypeGPU but declare
+no target of their own (a factory that builds its pipelines inside a
+function, say) and reports whether the import threw, what its GPU calls came
+back with, and, with `--console`, what it logged; such a module counts as
+one target named after its file.
 `interactive`, `wgsl`, and `report` share the runtime flags. `wgsl` and
 `report` take `--target <name>` (a label or symbol name,
 repeatable) and `--json`. The runtime settings from the table above are flags
@@ -209,6 +216,11 @@ Colors follow the terminal and `NO_COLOR`; progress goes to stderr and
 `--quiet` silences it. Exit codes: 0 no errors, 1 errors or failed targets,
 2 usage or environment failure. Installed as a dev dependency, the binary is
 `typegpu-inspector` in `package.json` scripts.
+
+In a React Native project, name the shader modules rather than a directory:
+`App.tsx` and anything else that imports `react-native` at runtime cannot
+run in the inspector's browser, and the check says which import pulled the
+package in. Type-only imports of React Native packages are fine.
 
 Through `npx` the CLI fetches the runtime from the registry on every run.
 To keep it off the network, install both packages at the same version as
