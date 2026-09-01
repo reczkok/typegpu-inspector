@@ -8,6 +8,8 @@ export const DEFAULT_INSPECTION_TIMEOUT_MS = 15_000;
  * and the generated module's export surface stays a single inspect function.
  */
 export const TYPEGPU_MCP_BINDING_SOURCES_PROP = '__typegpuMcpBindingSources';
+/** `[pasted, real]` export pairs a private-inspection wrapper attaches, see `ProviderContext.twins`. */
+export const TYPEGPU_MCP_TWINS_PROP = '__typegpuMcpTwins';
 
 // Establishing a reusable session (cold Vite boot, Chromium launch, dependency
 // optimization) is a one-time cost that would otherwise consume the whole

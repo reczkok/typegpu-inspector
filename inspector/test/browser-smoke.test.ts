@@ -1531,6 +1531,58 @@ describe('browser harness', () => {
     expect(report.stats.renderPipelineCount).toBe(1);
   });
 
+  maybeIt('borrows an importer binding for a slot the pasted module declares', async () => {
+    const report = await inspectTypegpuSymbols({
+      cwd: resolve(import.meta.dirname, '..'),
+      modulePath: 'test/fixtures/pasted-slot-provider.ts',
+      includePrivate: true,
+      targets: [{ label: 'pasted shaded fragment', selector: 'shadedFragment', kind: 'resolvable', unwrap: false }],
+      timeoutMs: 30_000,
+    });
+
+    expect(report.ok, JSON.stringify(report.targets, null, 2)).toBe(true);
+    expect(report.targets[0]?.wgsl).toContain('0.25');
+    expect(report.targets[0]?.ledger).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'slot-value',
+          status: 'satisfied',
+          provider: 'recorded-app-bindings',
+          detail: expect.objectContaining({ slotName: 'shadeSlot' }),
+        }),
+      ]),
+    );
+  });
+
+  maybeIt('auto-binds a default-less accessor for a compute-pipeline symbol target', async () => {
+    const report = await inspectTypegpuSymbols({
+      cwd: resolve(import.meta.dirname, '..'),
+      modulePath: 'test/fixtures/symbol-targets.ts',
+      targets: [
+        {
+          label: 'auto-bound accessor compute',
+          kind: 'compute-pipeline',
+          compute: 'accessorCompute',
+        },
+      ],
+      timeoutMs: 30_000,
+    });
+
+    expect(report.ok, JSON.stringify(report.targets, null, 2)).toBe(true);
+    expect(report.targets[0]?.wgsl).toContain('struct AccessorParams');
+    expect(report.targets[0]?.pipelineCreation?.ok).toBe(true);
+    expect(report.targets[0]?.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: 'slot-bindings-auto-applied',
+          severity: 'note',
+          hint: expect.stringContaining('paramsAccess'),
+        }),
+      ]),
+    );
+    expect(report.stats.computePipelineCount).toBe(1);
+  });
+
   maybeIt('recursively avoids degenerate synthesized bindings in composite schemas', async () => {
     const report = await inspectTypegpuSymbols({
       cwd: resolve(import.meta.dirname, '..'),

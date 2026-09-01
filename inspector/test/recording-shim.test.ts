@@ -29,9 +29,15 @@ describe('buildRecordingShimModule', () => {
       'createRenderPipeline',
       'createGuardedComputePipeline',
       'createUniform',
+      'pipe',
     ]) {
       expect(code).toContain(`${method}(target, pairs, args)`);
     }
+  });
+
+  it('follows pipe: records the transform bindings and re-wraps the returned branch', () => {
+    expect(code).toContain('if (Array.isArray(result?.bindings)) added = result.bindings;');
+    expect(code).toContain('return __typegpuMcpWrapRoot(branch, [...pairs, ...addedPairs]);');
   });
 
   it('never wraps recorded values, only root/branch objects', () => {

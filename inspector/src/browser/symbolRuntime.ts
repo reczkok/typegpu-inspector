@@ -65,6 +65,22 @@ export function readSelector(
   return value;
 }
 
+type SlotProvision = [slot: unknown, value: unknown];
+
+/**
+ * Engine-discovered slot values go on the branch after the authored `with`
+ * entries: they only cover slots resolution reported missing, so they cannot
+ * shadow an authored value.
+ */
+function applyProvisions(branch: RootLike, provisions: SlotProvision[]): RootLike {
+  return provisions.reduce((current, [slot, value]) => current.with(slot, value), branch);
+}
+
+/**
+ * A compute pipeline keeps its descriptor and slot bindings private, so the
+ * inspector cannot rebuild one from the pipeline object. `recreate` is the
+ * route that rebuilds it with the engine's slot provisions instead.
+ */
 export function createComputePipeline(
   root: RootLike,
   inspectedModule: unknown,
@@ -73,11 +89,11 @@ export function createComputePipeline(
   label: string,
   descriptor: Record<string, unknown>,
   compute: unknown,
-): unknown {
-  return applyBindings(root, inspectedModule, bindings, roots, label).createComputePipeline({
-    ...descriptor,
-    compute,
-  });
+): { create: () => unknown; recreate: (provisions: SlotProvision[]) => unknown } {
+  const build = (provisions: SlotProvision[]) =>
+    applyProvisions(applyBindings(root, inspectedModule, bindings, roots, label), provisions)
+      .createComputePipeline({ ...descriptor, compute });
+  return { create: () => build([]), recreate: build };
 }
 
 export function createRenderPipeline(
@@ -93,7 +109,11 @@ export function createRenderPipeline(
   fragment: unknown,
   attribs: unknown,
   synthesizeMissing = true,
-): { create: () => unknown; ledger: LedgerEntry[] } {
+): {
+  create: () => unknown;
+  recreate: (provisions: SlotProvision[]) => unknown;
+  ledger: LedgerEntry[];
+} {
   const ledger: LedgerEntry[] = [];
   const finalDescriptor: Record<string, unknown> = { ...descriptor, vertex };
 
@@ -122,12 +142,10 @@ export function createRenderPipeline(
     }
   }
 
-  return {
-    ledger,
-    create: () =>
-      applyBindings(root, inspectedModule, bindings, roots, label)
-        .createRenderPipeline(finalDescriptor),
-  };
+  const build = (provisions: SlotProvision[]) =>
+    applyProvisions(applyBindings(root, inspectedModule, bindings, roots, label), provisions)
+      .createRenderPipeline(finalDescriptor);
+  return { ledger, create: () => build([]), recreate: build };
 }
 
 function applyBindings(

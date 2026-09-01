@@ -219,7 +219,10 @@ describe('normalizeSymbolInput', () => {
     expect(result.inlineCode).toContain('/src/browser/symbolRuntime.ts');
     expect(result.inlineCode).toContain('exportedHelper');
     expect(result.inlineCode).toContain('createComputePipeline');
+    expect(result.inlineCode).toContain('create: __typegpuMcpPreparedCompute1.create');
+    expect(result.inlineCode).toContain('recreate: __typegpuMcpPreparedCompute1.recreate');
     expect(result.inlineCode).toContain('createRenderPipeline');
+    expect(result.inlineCode).toContain('recreate: __typegpuMcpPreparedRender2.recreate');
     expect(result.inlineCode).toContain('try {');
     expect(result.inlineCode).toContain('targets.push({ label:');
     expect(result.inlineCode).toContain('error });');
@@ -253,6 +256,35 @@ describe('normalizeSymbolInput', () => {
       "{ origin: 'import-scope', label: \"./symbol-targets.ts\", value: __typegpuMcpDep0 }",
     );
     expect(result.inlineCode).not.toContain('await import("typegpu")');
+  });
+
+  it('pairs pasted exports with the real module when a binding importer exists', () => {
+    const cwd = resolve(import.meta.dirname, '..');
+    const result = buildSymbolInspectionModule(
+      normalizeSymbolInput({
+        cwd,
+        modulePath: 'test/fixtures/pasted-slot-provider.ts',
+        includePrivate: true,
+        targets: [{ selector: 'shadedFragment', kind: 'resolvable', unwrap: false }],
+      }),
+    );
+
+    expect(result.inlineCode).toContain('__typegpuMcpImporter0 = await import("/@fs/');
+    expect(result.inlineCode).toContain('__typegpuMcpRealModule = await import("/@fs/');
+    expect(result.inlineCode).toContain(
+      '__typegpuMcpTwins: [[__typegpuMcpScope["shadeSlot"], __typegpuMcpRealModule?.["shadeSlot"]], [__typegpuMcpScope["shadedFragment"], __typegpuMcpRealModule?.["shadedFragment"]]]',
+    );
+
+    const withoutImporters = buildSymbolInspectionModule(
+      normalizeSymbolInput({
+        cwd,
+        modulePath: 'test/fixtures/symbol-targets.ts',
+        includePrivate: true,
+        targets: [{ selector: 'exportedHelper' }],
+      }),
+    );
+    expect(withoutImporters.inlineCode).not.toContain('__typegpuMcpRealModule');
+    expect(withoutImporters.inlineCode).toContain('__typegpuMcpTwins: []');
   });
 
   it('exposes all runtime locals as a module-scope source under includePrivate', () => {

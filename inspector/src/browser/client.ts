@@ -24,7 +24,7 @@ import type {
   TargetDiagnostic,
   TypeGpuTargetReport,
 } from '../types.ts';
-import { TYPEGPU_MCP_BINDING_SOURCES_PROP } from '../shared.ts';
+import { TYPEGPU_MCP_BINDING_SOURCES_PROP, TYPEGPU_MCP_TWINS_PROP } from '../shared.ts';
 import {
   installEnvironmentProviders,
   installGpuSessionProvider,
@@ -305,6 +305,14 @@ async function inspectExplicitTargets(
   const sideChannel = Array.isArray(exportedTargets)
     ? (exportedTargets as unknown as Record<string, unknown>)[TYPEGPU_MCP_BINDING_SOURCES_PROP]
     : undefined;
+  const twinChannel = Array.isArray(exportedTargets)
+    ? (exportedTargets as unknown as Record<string, unknown>)[TYPEGPU_MCP_TWINS_PROP]
+    : undefined;
+  const twins = Array.isArray(twinChannel)
+    ? twinChannel.filter((pair): pair is [unknown, unknown] =>
+      Array.isArray(pair) && pair.length >= 2
+    )
+    : [];
   const bindingSources = [
     ...(Array.isArray(sideChannel) ? sideChannel : []).map((entry) =>
       isTaggedBindingSource(entry) ? entry : { value: entry, origin: 'module-scope' as const }
@@ -327,6 +335,7 @@ async function inspectExplicitTargets(
         waitBudget,
         bindingSources,
         recorded,
+        twins,
         autoBind: request.autoBind,
       },
     ),

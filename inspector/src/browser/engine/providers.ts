@@ -70,6 +70,52 @@ export function collectBindingSources(
   return collected;
 }
 
+/**
+ * Builds the twin map from `[pasted, real]` export pairs, both directions.
+ * An accessor pair also pairs the underlying slots, which is what a missing
+ * slot error carries.
+ */
+export function buildTwinMap(pairs: Array<[unknown, unknown]>): Map<unknown, unknown> {
+  const twins = new Map<unknown, unknown>();
+  const link = (left: unknown, right: unknown) => {
+    if (
+      left === right ||
+      !left || !right ||
+      (typeof left !== 'object' && typeof left !== 'function') ||
+      (typeof right !== 'object' && typeof right !== 'function')
+    ) {
+      return;
+    }
+    twins.set(left, right);
+    twins.set(right, left);
+  };
+  for (const pair of pairs) {
+    if (!Array.isArray(pair) || pair.length < 2) continue;
+    const [left, right] = pair;
+    link(left, right);
+    if (
+      (isAccessorLike(left) || isMutableAccessorLike(left)) &&
+      (isAccessorLike(right) || isMutableAccessorLike(right))
+    ) {
+      link(readAccessorSlot(left), readAccessorSlot(right));
+    }
+  }
+  return twins;
+}
+
+/** The requirement's subject and, when the module exists twice, its twin. */
+function subjectAliases(requirement: Requirement, ctx: ProviderContext): unknown[] {
+  const twin = ctx.twins?.get(requirement.subject);
+  return twin === undefined ? [requirement.subject] : [requirement.subject, twin];
+}
+
+/** A bound slot, or an accessor wrapping one, that is any of the aliases. */
+function bindsSubject(bound: unknown, aliases: unknown[]): boolean {
+  if (aliases.includes(bound)) return true;
+  if (!isAccessorLike(bound) && !isMutableAccessorLike(bound)) return false;
+  return aliases.includes(readAccessorSlot(bound));
+}
+
 function describeSourceLabel(source: TaggedBindingSource, noun: string): string {
   if (source.origin === 'importer-scope') {
     return `${noun} in direct importer${source.label ? ` '${source.label}'` : ''}`;
@@ -89,16 +135,13 @@ const borrowedBindingsProvider: Provider = {
   id: 'module-scope',
   canSatisfy: (requirement) => requirement.kind === 'slot-value',
   satisfy: (requirement, ctx) => {
+    const aliases = subjectAliases(requirement, ctx);
     for (const source of ctx.sources) {
       const renderPairs = readRenderPipelineSlotBindings(source.value);
       const pairs = renderPairs ?? readBoundFunctionProvidingPairs(source.value);
       if (!pairs) continue;
       for (const pair of pairs) {
-        const bound = pair[0];
-        const matches = bound === requirement.subject ||
-          ((isAccessorLike(bound) || isMutableAccessorLike(bound)) &&
-            readAccessorSlot(bound) === requirement.subject);
-        if (!matches) continue;
+        if (!bindsSubject(pair[0], aliases)) continue;
         return {
           value: pair[1],
           provider: source.origin,
@@ -122,10 +165,11 @@ const accessorPlaceholderProvider: Provider = {
   id: 'synthesis',
   canSatisfy: (requirement) => requirement.kind === 'slot-value',
   satisfy: (requirement, ctx) => {
+    const aliases = subjectAliases(requirement, ctx);
     for (const source of ctx.sources) {
       if (
         !isAccessorLike(source.value) ||
-        readAccessorSlot(source.value) !== requirement.subject
+        !aliases.includes(readAccessorSlot(source.value))
       ) {
         continue;
       }
@@ -158,6 +202,7 @@ const recordedAppBindingsProvider: Provider = {
   satisfy: (requirement, ctx) => {
     const recorded = ctx.recorded;
     if (!recorded) return undefined;
+    const aliases = subjectAliases(requirement, ctx);
     const pairLists = [
       recorded.slotBindings ?? [],
       ...(recorded.pipelines ?? []).map((entry) => entry.slotPairs ?? []),
@@ -165,11 +210,7 @@ const recordedAppBindingsProvider: Provider = {
     for (const pairs of pairLists) {
       for (const pair of pairs) {
         if (!Array.isArray(pair) || pair.length < 2) continue;
-        const bound = pair[0];
-        const matches = bound === requirement.subject ||
-          ((isAccessorLike(bound) || isMutableAccessorLike(bound)) &&
-            readAccessorSlot(bound) === requirement.subject);
-        if (!matches) continue;
+        if (!bindsSubject(pair[0], aliases)) continue;
         return {
           value: pair[1],
           provider: 'recorded-app-bindings',

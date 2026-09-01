@@ -74,6 +74,11 @@ export const accessorFragment = tgpu.fragmentFn({ out: d.vec4f })(() => {
   return paramsAccess.$.tint;
 });
 
+export const accessorCompute = tgpu.computeFn({ workgroupSize: [1] })(() => {
+  'use gpu';
+  const _tint = paramsAccess.$.tint;
+});
+
 export const NondegenerateParams = d.struct({
   dimensions: d.vec2f,
   divisor: d.f32,

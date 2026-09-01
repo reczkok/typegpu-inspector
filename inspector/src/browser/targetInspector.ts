@@ -67,6 +67,13 @@ export type TypeGpuInspectionTarget = {
   kind?: InspectionTargetKind | undefined;
   value?: unknown;
   create?: (() => unknown) | undefined;
+  /**
+   * Rebuilds the pipeline `create` made with extra slot bindings. Generated
+   * symbol targets supply it because a created compute pipeline keeps its
+   * descriptor private, leaving no other way to apply engine-discovered
+   * slot values before unwrap.
+   */
+  recreate?: ((slotProvisions: Array<[unknown, unknown]>) => unknown) | undefined;
   error?: unknown;
   unwrap?: boolean | undefined;
   /** Structured provenance emitted by generated code (probes, synthesis). */
@@ -82,6 +89,7 @@ export async function inspectPipelineTargets(
     waitBudget?: BrowserWaitBudget | undefined;
     bindingSources?: TaggedBindingSource[] | undefined;
     recorded?: RecordedBindingRegistry | undefined;
+    twins?: Array<[unknown, unknown]> | undefined;
     autoBind?: boolean | undefined;
   } = {},
 ): Promise<TypeGpuTargetReport[]> {
@@ -121,6 +129,7 @@ export async function inspectPipelineTargets(
       enabled: autoBind,
       sources: taggedSources,
       recorded: options.recorded,
+      twins: options.twins,
     });
     const synthesisNotes = collectShapeProvenances(target.ledger ?? []);
     if (synthesisNotes.length > 0) {
@@ -184,6 +193,7 @@ export async function inspectPipelineTargets(
           strictNames,
           waitBudget,
           engine,
+          target.recreate,
         );
       }
 
@@ -347,6 +357,7 @@ async function validatePipelineTarget(
   strictNames: boolean,
   waitBudget: BrowserWaitBudget,
   engine?: EngineContext,
+  recreate?: TypeGpuInspectionTarget['recreate'],
 ): Promise<void> {
   const { device } = recorder;
   report.pipelineCreation = { attempted: true, ok: false, callIds: [] };
@@ -376,6 +387,7 @@ async function validatePipelineTarget(
     report.kind,
     engine ? slotValueProvisions(engine) : [],
     engine?.providerContext.recorded,
+    recreate,
   );
   if (isOwnedByDifferentDevice(inspectable, device)) {
     report.pipelineCreation.ok = true;
@@ -436,6 +448,7 @@ function createInspectablePipelineTarget(
   kind: InspectionTargetKind,
   slotProvisions: Array<[unknown, unknown]>,
   recorded?: RecordedBindingRegistry | undefined,
+  recreate?: TypeGpuInspectionTarget['recreate'],
 ): unknown {
   // When the engine discovered slot provisions this pipeline needs, an
   // already-created pipeline cannot be retro-bound — but if the recording
@@ -462,6 +475,17 @@ function createInspectablePipelineTarget(
         : branch.createRenderPipeline(record.descriptor);
     } catch {
       // Recreation from the recording is best-effort; fall through.
+    }
+  }
+
+  // A target that built its own pipeline knows how to build it again with the
+  // provisions applied — the only route for a compute pipeline the recording
+  // shim never saw, since its descriptor and slot bindings are private.
+  if (slotProvisions.length > 0 && recreate) {
+    try {
+      return recreate(slotProvisions);
+    } catch {
+      // Fall through to the introspection routes below.
     }
   }
 

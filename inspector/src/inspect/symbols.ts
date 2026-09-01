@@ -9,7 +9,11 @@ import type {
   TypegpuSymbolBinding,
   TypegpuSymbolTarget,
 } from '../types.ts';
-import { DEFAULT_INSPECTION_TIMEOUT_MS, TYPEGPU_MCP_BINDING_SOURCES_PROP } from '../shared.ts';
+import {
+  DEFAULT_INSPECTION_TIMEOUT_MS,
+  TYPEGPU_MCP_BINDING_SOURCES_PROP,
+  TYPEGPU_MCP_TWINS_PROP,
+} from '../shared.ts';
 import {
   createFsModuleUrl,
   getPackageRoot,
@@ -110,6 +114,7 @@ const GENERATED_TOP_LEVEL_BINDINGS = [
   '__typegpuMcpReadSelector',
   '__typegpuMcpUnwrapZeroValueSchema',
   '__typegpuMcpScope',
+  '__typegpuMcpRealModule',
 ];
 
 /**
@@ -180,6 +185,26 @@ export function buildSymbolInspectionModule(input: NormalizedSymbolInput): {
     `let __typegpuMcpImporter${index};\n` +
     `  try { __typegpuMcpImporter${index} = await import(${JSON.stringify(createFsModuleUrl(path))}); } catch {}`
   );
+  // Pasting evaluates the module a second time, so a slot it declares exists
+  // twice: the pasted one the targets resolve against, and the real one the
+  // importers just bound through root.with(...). Pair the two by export name
+  // so the engine can match a recorded binding across them. The importers
+  // already loaded the real module, so reading its namespace costs nothing;
+  // without importers no binding can reference it and the pairs stay off.
+  const twinNames = privateScopeExposed && importerPaths.length > 0
+    ? [...(scan?.exportedNames ?? [])].filter((name) =>
+      name !== 'default' && scan?.runtimeLocals.has(name)
+    )
+    : [];
+  const twinLines = twinNames.length > 0
+    ? [
+      'let __typegpuMcpRealModule;',
+      `  try { __typegpuMcpRealModule = await import(${JSON.stringify(moduleUrl)}); } catch {}`,
+    ]
+    : [];
+  const twinEntries = twinNames.map((name) =>
+    `[__typegpuMcpScope[${JSON.stringify(name)}], __typegpuMcpRealModule?.[${JSON.stringify(name)}]]`
+  );
   const bindingSourceEntries = [
     `{ origin: 'module-scope', value: setupRoots }`,
     `{ origin: 'module-scope', value: __typegpuEditorInspectedModule }`,
@@ -212,7 +237,7 @@ import {
   unwrapZeroValueSchema as __typegpuMcpUnwrapZeroValueSchema,
 } from ${JSON.stringify(symbolRuntimeUrl)};
 
-${importerLines.length > 0 ? importerLines.join('\n') : ''}
+${[...importerLines, ...twinLines].join('\n')}
 
 async function __typegpuEditorInspect({ root, device, tgpu, d, std, common }) {
   const ctx = { root, device, tgpu, d, std, common };
@@ -230,7 +255,7 @@ ${targetBlocks.map((block) => indentGeneratedBody(block, 2)).join('\n\n')}
 
   return Object.assign(targets, { ${TYPEGPU_MCP_BINDING_SOURCES_PROP}: [
     ${bindingSourceEntries.join(',\n    ')},
-  ] });
+  ], ${TYPEGPU_MCP_TWINS_PROP}: [${twinEntries.join(', ')}] });
 }
 
 export { __typegpuEditorInspect as ${GENERATED_EXPORT_NAME} };
@@ -876,16 +901,16 @@ function createComputePipelineTargetLines(
     `const __typegpuMcpCompute${index} = __typegpuMcpReadSelector(inspectedModule, ${JSON.stringify(
       target.compute,
     )}, ${JSON.stringify(`targets[${index}].compute`)}, roots);`,
+    `const __typegpuMcpPreparedCompute${index} = __typegpuMcpCreateComputePipeline(root, inspectedModule, ${JSON.stringify(
+      target.with ?? [],
+    )}, roots, ${JSON.stringify(`targets[${index}]`)}, ${JSON.stringify(
+      descriptor,
+    )}, __typegpuMcpCompute${index});`,
     `targets.push(${objectLiteral({
       label,
       kind: 'compute-pipeline',
-      create: jsExpression(
-        `() => __typegpuMcpCreateComputePipeline(root, inspectedModule, ${JSON.stringify(
-          target.with ?? [],
-        )}, roots, ${JSON.stringify(`targets[${index}]`)}, ${JSON.stringify(
-          descriptor,
-        )}, __typegpuMcpCompute${index})`,
-      ),
+      create: jsExpression(`__typegpuMcpPreparedCompute${index}.create`),
+      recreate: jsExpression(`__typegpuMcpPreparedCompute${index}.recreate`),
     })});`,
   ];
 }
@@ -932,6 +957,7 @@ function createRenderPipelineTargetLines(
       label,
       kind: 'render-pipeline',
       create: jsExpression(`__typegpuMcpPreparedRender${index}.create`),
+      recreate: jsExpression(`__typegpuMcpPreparedRender${index}.recreate`),
       ledger: jsExpression(`__typegpuMcpPreparedRender${index}.ledger`),
     })});`,
   );

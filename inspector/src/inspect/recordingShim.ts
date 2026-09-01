@@ -64,6 +64,25 @@ const __typegpuMcpRootHandlers = {
     __typegpuMcpRecord('uniforms', { schema: args[0], initial: args[1], uniform });
     return uniform;
   },
+  pipe(target, pairs, args) {
+    // typegpu hands the transform a fresh configurable and merges the
+    // bindings it returns into a new branch. Reading them off that return
+    // value keeps bindings made inside a transform recorded, and re-wrapping
+    // the branch keeps recording whatever is bound on it afterwards.
+    const transform = args[0];
+    let added = [];
+    const observed = typeof transform === 'function'
+      ? (configurable) => {
+          const result = transform(configurable);
+          if (Array.isArray(result?.bindings)) added = result.bindings;
+          return result;
+        }
+      : transform;
+    const branch = target.pipe(observed, ...args.slice(1));
+    const addedPairs = added.filter((pair) => Array.isArray(pair) && pair.length >= 2);
+    for (const pair of addedPairs) __typegpuMcpRecord('slotBindings', [pair[0], pair[1]]);
+    return __typegpuMcpWrapRoot(branch, [...pairs, ...addedPairs]);
+  },
 };
 
 function __typegpuMcpWrapRoot(root, pairs) {
