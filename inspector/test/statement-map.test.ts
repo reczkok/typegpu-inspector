@@ -14,6 +14,7 @@ import {
   findLatestRecordedFailure,
   findStatementMapForCode,
   isStatementMapSupported,
+  statementMapTestHooks,
   type StatementMapRecorder,
 } from '../src/browser/statementMap.ts';
 import { resolveTypegpuInternalPath } from '../src/inspect/paths.ts';
@@ -170,6 +171,46 @@ describe('statement map recorder', () => {
   it('refuses code that does not contain a recorded function', () => {
     const { recorder } = resolveWithRecorder(fixture.rotateXY);
     expect(buildStatementMap(recorder, 'fn rotateXY_2() {}')).toBeUndefined();
+  });
+});
+
+describe('statement map recorder on a pre-0.12 generator', () => {
+  // TypeGPU before 0.12 returns code strings from _block and _statement and
+  // calls _block with (block, externalMap).
+  class LegacyGenerator {
+    functionDefinition(options: { name: string; body: LegacyBlock }): string {
+      return `fn ${options.name}() ${this._block(options.body, undefined)}`;
+    }
+
+    protected _block(block: LegacyBlock, _externalMap: unknown): string {
+      return `{\n${block[1].map((statement) => this._statement(statement)).join('\n')}\n}`;
+    }
+
+    protected _statement(statement: LegacyStatement): string {
+      if (statement[1] === 'boom') throw new Error('boom');
+      return `  ${statement[1]};`;
+    }
+  }
+  type LegacyStatement = readonly [number, string];
+  type LegacyBlock = readonly [0, LegacyStatement[]];
+
+  const Recording = statementMapTestHooks.defineRecordingGenerator(LegacyGenerator as never);
+
+  it('passes the code through and records no functions', () => {
+    const generator = new Recording();
+    const body: LegacyBlock = [0, [[99, 'let a = 1'], [99, 'return a']]];
+    const code = generator.functionDefinition({ name: 'legacy', body } as never);
+    expect(code).toBe('fn legacy() {\n  let a = 1;\n  return a;\n}');
+    expect(generator.recorder.functions).toEqual([]);
+    expect(buildStatementMap(generator.recorder, code)).toBeUndefined();
+  });
+
+  it('still names the statement whose resolution failed', () => {
+    const generator = new Recording();
+    const body: LegacyBlock = [0, [[99, 'let a = 1'], [99, 'boom']]];
+    expect(() => generator.functionDefinition({ name: 'legacy', body } as never)).toThrow('boom');
+    expect(generator.recorder.functions).toEqual([]);
+    expect(generator.recorder.failure).toEqual({ fn: 'legacy', path: [1] });
   });
 });
 

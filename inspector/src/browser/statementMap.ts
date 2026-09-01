@@ -39,7 +39,20 @@ type FunctionFrame = {
   bodyPending: boolean;
   bodyCode: string;
   statements: RecordedStatement[];
+  /** The base generator returns plain code (TypeGPU < 0.12); nothing to record. */
+  legacy: boolean;
 };
+
+type GeneratorResult = ResolvedStatement | string;
+
+/**
+ * Generators before TypeGPU 0.12 return the code itself instead of a
+ * `ResolvedStatement`. They still resolve through the recorder unchanged,
+ * but yield no statement map.
+ */
+function resolvedCode(result: GeneratorResult): string | undefined {
+  return typeof result === 'string' ? undefined : result.code;
+}
 
 export type StatementMapRecorder = {
   readonly sequence: number;
@@ -133,15 +146,18 @@ function defineRecordingGenerator(Base: NonNullable<GeneratorClass>) {
         bodyPending: true,
         bodyCode: '',
         statements: [],
+        legacy: false,
       };
       this.#frames.push(frame);
       try {
         const code = super.functionDefinition(options);
-        this.recorder.functions.push({
-          name: frame.name,
-          bodyCode: frame.bodyCode,
-          statements: frame.statements,
-        });
+        if (!frame.legacy) {
+          this.recorder.functions.push({
+            name: frame.name,
+            bodyCode: frame.bodyCode,
+            statements: frame.statements,
+          });
+        }
         return code;
       } catch (error) {
         this.recorder.failure ??= { fn: frame.name, path: [] };
@@ -151,19 +167,22 @@ function defineRecordingGenerator(Base: NonNullable<GeneratorClass>) {
       }
     }
 
-    protected override _block(
-      block: Block,
-      allowInlining: boolean,
-      externalMap?: Parameters<WgslGenerator['_block']>[2],
-    ): ResolvedStatement {
+    // Arguments pass through positionally: 0.12 takes (block, allowInlining,
+    // externalMap), older generators (block, externalMap).
+    protected override _block(...args: Parameters<WgslGenerator['_block']>): ResolvedStatement {
       const frame = this.#frames.at(-1);
       if (!frame || !frame.bodyPending) {
-        return super._block(block, allowInlining, externalMap);
+        return super._block(...args);
       }
       frame.bodyPending = false;
-      const result = super._block(block, allowInlining, externalMap);
-      frame.bodyCode = result.code;
-      return result;
+      const result: GeneratorResult = super._block(...args);
+      const code = resolvedCode(result);
+      if (code === undefined) {
+        frame.legacy = true;
+      } else {
+        frame.bodyCode = code;
+      }
+      return result as ResolvedStatement;
     }
 
     protected override _statement(statement: Statement): ResolvedStatement {
@@ -172,11 +191,14 @@ function defineRecordingGenerator(Base: NonNullable<GeneratorClass>) {
         ? this.#paths.get(statement)
         : undefined;
       try {
-        const result = super._statement(statement);
-        if (frame && path && result.code.length > 0) {
-          frame.statements.push({ path, code: result.code });
+        const result: GeneratorResult = super._statement(statement);
+        const code = resolvedCode(result);
+        if (frame && code === undefined) {
+          frame.legacy = true;
+        } else if (frame && path && code !== undefined && code.length > 0) {
+          frame.statements.push({ path, code });
         }
-        return result;
+        return result as ResolvedStatement;
       } catch (error) {
         if (frame && path) {
           this.recorder.failure ??= { fn: frame.name, path };
@@ -188,6 +210,8 @@ function defineRecordingGenerator(Base: NonNullable<GeneratorClass>) {
 }
 
 const RecordingGenerator = BaseGenerator ? defineRecordingGenerator(BaseGenerator) : undefined;
+
+export const statementMapTestHooks = { defineRecordingGenerator };
 
 /** Generator class for `tgpu.initFromDevice({ unstable_shaderGeneratorClass })`. */
 export function statementMapGeneratorClass(): WgslGeneratorClass | undefined {
