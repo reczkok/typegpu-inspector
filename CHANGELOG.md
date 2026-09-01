@@ -6,6 +6,32 @@ and released together. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.2] - 2026-09-01
+
+### Fixed
+
+- A compute entrypoint that reads an accessor bound only by another module
+  (the app's `root.with(accessor, uniform)`) reported `not inspectable
+  standalone` even though the inspector had auto-bound the accessor for
+  resolution. A created compute pipeline keeps its descriptor private, so the
+  final WebGPU creation step could not rebuild it with those bindings and
+  unwrapped the unbound original. Generated symbol targets now carry a
+  re-creation route that applies the auto-bound values, for compute and
+  render pipelines alike.
+- Bindings made through `root.pipe(...)` were invisible to the recording
+  shim: `pipe` returned an unwrapped branch, so neither the transform's own
+  bindings (a noise cache injection, say) nor anything bound on the returned
+  branch afterwards could be borrowed by a sibling target. The shim now
+  follows `pipe`.
+- A slot or accessor declared in the inspected module and bound only by a
+  sibling module (`root.with(shadeSlot, fn)` in the example entry) could not
+  be auto-bound in the editor, which reported `could not auto-bind it`
+  although the binding was recorded. Editor inspection pastes the module
+  source to reach private helpers, so the slot existed twice: the pasted one
+  the targets resolve against and the real one the importer bound. The
+  wrapper now pairs pasted exports with the real module's, and the engine
+  matches a recorded binding against either.
+
 ## [0.8.1] - 2026-09-01
 
 ### Fixed
@@ -243,6 +269,7 @@ First public release: VS Code Marketplace, and Zed as a dev extension.
 Internal iterations: hover and inlay surface work, discovery and diagnostics
 tuning, packaging experiments. Not published to any store.
 
+[0.8.2]: https://github.com/reczkok/typegpu-inspector/releases/tag/v0.8.2
 [0.8.1]: https://github.com/reczkok/typegpu-inspector/releases/tag/v0.8.1
 [0.8.0]: https://github.com/reczkok/typegpu-inspector/releases/tag/v0.8.0
 [0.7.0]: https://github.com/reczkok/typegpu-inspector/releases/tag/v0.7.0

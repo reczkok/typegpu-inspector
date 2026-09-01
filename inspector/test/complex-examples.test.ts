@@ -119,6 +119,30 @@ describe('complex examples', () => {
     );
   });
 
+  maybeIt('binds bare slots from bindings made through root.pipe', async () => {
+    const report = await inspectTypegpuModule({
+      cwd,
+      source: { kind: 'modulePath', modulePath: 'examples/complex/recorded-binding-pipe.ts' },
+      timeoutMs: 30_000,
+    });
+
+    expect(report.ok, JSON.stringify(report.targets, null, 2)).toBe(true);
+    expect(report.targets[0]?.label).toBe('piped pipeline');
+    expect(report.targets[0]?.ok).toBe(true);
+    expect(report.targets[1]?.ok).toBe(true);
+    expect(report.targets[1]?.wgsl).toContain('2.5');
+    expect(report.targets[1]?.wgsl).toContain('3.5');
+    expect(report.targets[1]?.ledger).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'slot-value',
+          status: 'satisfied',
+          provider: 'recorded-app-bindings',
+        }),
+      ]),
+    );
+  });
+
   maybeIt('validates a module importing an aliased helper library', async () => {
     const report = await inspectTypegpuModule({
       cwd,

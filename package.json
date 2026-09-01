@@ -1,6 +1,6 @@
 {
   "name": "typegpu-inspector",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "description": "TypeGPU Inspector monorepo: Zed extension, VS Code extension, language server, and runtime inspector.",
   "private": true,
   "packageManager": "pnpm@10.34.4",

@@ -77,6 +77,13 @@ export type ProviderContext = {
   sources: TaggedBindingSource[];
   /** Present when the recording shim captured application activity. */
   recorded?: RecordedBindingRegistry | undefined;
+  /**
+   * Same declaration, two module instances: private inspection pastes the
+   * module source, so a slot it declares exists once for the targets and once
+   * for the importers that bound it. Maps each to the other (accessors and
+   * their slots alike) so bindings match across the pair.
+   */
+  twins?: Map<unknown, unknown> | undefined;
 };
 
 /**

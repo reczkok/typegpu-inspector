@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { tgpu, d } from 'typegpu';
 import {
+  buildTwinMap,
   collectBindingSources,
   createProviderChain,
   satisfyRequirement,
 } from '../src/browser/engine/providers.ts';
+import { readAccessorSlot } from '../src/browser/typegpuIntrospection.ts';
 import type { Requirement, TaggedBindingSource } from '../src/browser/engine/types.ts';
 import {
   createAutoBindingsNote,
@@ -185,6 +187,32 @@ describe('slot-value provider chain', () => {
       moduleScope([brokenAccessorLike, bound]),
     );
     expect(provision?.value).toBe(9);
+  });
+
+  it('matches a recorded binding made on the twin of a pasted slot', () => {
+    const pastedSlot = tgpu.slot<number>();
+    const realSlot = tgpu.slot<number>();
+    const provision = satisfyRequirement(
+      slotRequirement(pastedSlot, 'shadeSlot'),
+      createProviderChain(),
+      {
+        sources: [],
+        recorded: { slotBindings: [[realSlot, 7]], pipelines: [], uniforms: [] },
+        twins: buildTwinMap([[pastedSlot, realSlot]]),
+      },
+    );
+    expect(provision?.provider).toBe('recorded-app-bindings');
+    expect(provision?.value).toBe(7);
+  });
+
+  it('pairs the slots behind twin accessors', () => {
+    const pasted = tgpu.accessor(d.f32);
+    const real = tgpu.accessor(d.f32);
+    const twins = buildTwinMap([[pasted, real]]);
+    expect(twins.get(readAccessorSlot(pasted))).toBe(readAccessorSlot(real));
+    expect(twins.get(real)).toBe(pasted);
+    // Nothing links a value to itself or to a primitive.
+    expect(buildTwinMap([[pasted, pasted], [pasted, 1]]).size).toBe(0);
   });
 
   it('returns undefined when nothing matches', () => {
