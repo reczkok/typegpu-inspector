@@ -2,7 +2,7 @@
   "name": "typegpu-inspector",
   "displayName": "TypeGPU Inspector",
   "publisher": "reczkok",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "private": true,
   "description": "Inspect TypeGPU pipelines, layouts, and generated WGSL in a headless WebGPU browser.",
   "license": "MIT",
