@@ -1,7 +1,7 @@
 {
   "name": "typegpu-inspector-language-server",
-  "version": "0.7.0",
-  "description": "Language server for TypeGPU inspection: hovers, inlay hints, diagnostics, and generated WGSL.",
+  "version": "0.8.0",
+  "description": "Language server and CLI for TypeGPU inspection: hovers, inlay hints, diagnostics, generated WGSL, and a check command for shells and CI.",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -10,7 +10,8 @@
     "directory": "server"
   },
   "bin": {
-    "typegpu-inspector-language-server": "./dist/server.cjs"
+    "typegpu-inspector-language-server": "./dist/server.cjs",
+    "typegpu-inspector": "./dist/server.cjs"
   },
   "files": [
     "dist/server.cjs",
@@ -18,19 +19,27 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json --noEmit && esbuild src/server.ts --bundle --minify --platform=node --format=cjs --target=node20 --define:__TYPEGPU_SERVER_VERSION__=$(node -p \"JSON.stringify(require('./package.json').version)\") --define:__TYPEGPU_INSPECTOR_VERSION__=$(node -p \"JSON.stringify(require('./package.json').version)\") --outfile=dist/server.cjs",
+    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json --noEmit && esbuild src/main.ts --bundle --minify --platform=node --format=cjs --target=node20 --define:__TYPEGPU_SERVER_VERSION__=$(node -p \"JSON.stringify(require('./package.json').version)\") --define:__TYPEGPU_INSPECTOR_VERSION__=$(node -p \"JSON.stringify(require('./package.json').version)\") --banner:js=\"const importMetaUrl = require('node:url').pathToFileURL(__filename).href;\" --define:import.meta.url=importMetaUrl --outfile=dist/server.cjs",
     "prepublishOnly": "pnpm build",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "test:e2e": "node test/lsp-smoke.cjs dist/server.cjs ../inspector/test/fixtures/symbol-targets.ts"
+    "test:e2e": "node test/lsp-smoke.cjs dist/server.cjs ../inspector/test/fixtures/symbol-targets.ts && node test/cli-smoke.cjs dist/server.cjs"
   },
   "devDependencies": {
+    "@clack/prompts": "^1.7.0",
     "@modelcontextprotocol/sdk": "1.30.0",
     "@types/node": "24.1.0",
+    "chokidar": "^4.0.3",
+    "commander": "^14.0.3",
     "esbuild": "0.28.1",
+    "fast-wrap-ansi": "^0.2.2",
+    "ignore": "^7.0.6",
+    "picocolors": "^1.1.1",
+    "tinyglobby": "^0.2.17",
     "typescript": "5.9.3",
     "vitest": "3.2.4",
     "vscode-languageserver": "10.1.0",
-    "vscode-languageserver-textdocument": "1.0.12"
+    "vscode-languageserver-textdocument": "1.0.12",
+    "yocto-spinner": "^1.2.2"
   }
 }

@@ -6,6 +6,100 @@ and released together. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-09-01
+
+### Added
+
+- A command line interface in the language server package, exposed as the
+  `typegpu-inspector` binary and as `typegpu-inspector-language-server`
+  without a transport flag. `check [paths...]` discovers the TypeGPU modules
+  under files, directories, or globs, inspects them through the runtime, and
+  prints the editor's diagnostics compiler-style (`path:line:col: severity:
+  message [code]`, related statements as notes, a link into the generated
+  WGSL) followed by a summary; it exits 1 on errors or failed targets and 2 on
+  usage or environment failures. `--format json` prints the full result,
+  `--format github` adds workflow annotations, `--severity` and
+  `--warnings-as-errors` tune what counts, `--verbose` lists every target,
+  and `--watch` re-checks a changed module and the modules that import it
+  while the browser session stays warm. `wgsl <file>` prints a target's
+  generated WGSL with the compiler's messages, `report <file>` prints the
+  full Markdown report, and `targets [paths...]` lists what a check would
+  inspect without running anything. Runtime settings (`--project-root`,
+  `--timeout-ms`, `--feature`, `--no-strict-names`,
+  `--no-source-mapping`, `--inspector-package`) mirror the editor
+  settings. Progress goes to stderr, colors follow the terminal and
+  `NO_COLOR`, and `--quiet` silences everything but results. Running the CLI
+  without a command on a terminal starts an interactive session on one warm
+  browser: check everything, review the targets that failed, search targets
+  by name or file, read a target's generated WGSL or its report, open the
+  generated file in `$VISUAL`/`$EDITOR`, and watch for changes;
+  `interactive [paths...]` and its `i` alias start it explicitly. Results
+  are remembered per module until its source changes, so reading WGSL after
+  a check is instant. Reports render as terminal text rather than raw
+  Markdown, and long lines wrap at spaces inside the guide so paths stay
+  intact. Directory walks honor `.gitignore` files above and below the
+  walked directories; `--ignore <glob>` skips more and `--no-gitignore`
+  turns the rule off, while a file named directly is always inspected.
+  `check --target <name>` narrows a run to some targets. A helper that
+  fails in several modules is reported once across files, on its own
+  statement when that file is in the run, with the other modules' call
+  sites listed on an `also in` line; the JSON carries them as `alsoIn` and
+  the finding's statement as `finding`. `check --console` prints what the
+  modules wrote to the console while they ran, one line per call with
+  repeats counted, and the JSON output carries the messages per file.
+  `check --evaluate` also imports modules that use TypeGPU but declare no
+  target (a factory that builds its pipelines inside a function) and reports
+  whether the import threw, what its GPU calls came back with, and what it
+  logged; the module counts as one target named after its file.
+
+### Fixed
+
+- A type-only import of a package the browser build cannot parse no longer
+  breaks the module. The runtime added every import of the inspected source
+  to Vite's prebundle list, `import type { … } from 'react-native-webgpu'`
+  included, which dragged React Native's Flow-typed entry into the optimizer.
+  Erased imports stay out of the list.
+- A dependency Vite's optimizer cannot bundle no longer takes the runtime
+  down. Vite 8 reports that failure as an unhandled rejection on a cold
+  server and through its logger on a warm one, and the rejection ended the
+  process, so every later module in the same run reported `Not connected`
+  per target. The runtime now catches both, fails the one inspection with
+  the compiler's reason, the failing file, and the import of the inspected
+  module that pulled the package in (`water.ts:15 imports
+  'react-native-webgpu', which depends on 'react-native'`), and retires the
+  wedged server; the next module gets a fresh one.
+- The language server reconnects to the runtime after it dies. The client
+  kept a closed transport, so every inspection after a crash failed with
+  `Not connected`; a closed transport now drops the client, the error
+  counts as a lost connection, and the runtime's last words on stderr go
+  into the message once rather than as a tail of every launch.
+- A module that cannot run is reported once. Whether the runtime threw or
+  every target came back with the same account, the CLI printed it once per
+  target; it now prints one report on the first target, and the verbose
+  listing still marks every target failed.
+- Inspectors started together no longer race to download Chromium: the
+  download takes a lock in the temp directory, and the others find the
+  browser installed when it is released.
+- The CLI launched through a symlink (a global `bin` link, a package's
+  `.bin` entry) missed the checkout or install beside it and fell back to
+  `npx`. The server now locates itself through its module URL, which Node
+  resolves through symlinks, instead of `argv[1]`.
+
+- Zed inspections no longer need the network after the first install. The
+  language server launched the runtime through `npx`, which contacts the npm
+  registry on every start even when the package is cached, so an inspection
+  failed offline. The server now runs the `typegpu-runtime-inspector-mcp`
+  copy installed in a `node_modules` directory above it when the versions
+  match, and the Zed extension installs that copy when the language server
+  starts instead of only when the agent's context server does. The same
+  lookup keeps the CLI off the network in a project that installs both
+  packages as dev dependencies. `npx` remains the fallback when neither a
+  monorepo checkout nor such an install exists.
+- The Zed extension no longer probes the monorepo checkout it was compiled
+  from: the wasm sandbox cannot see outside the extension work directory, so
+  a dev extension always ran the npm-published server. The README documents
+  `lsp.typegpu-inspector.binary` as the way to run a local build in Zed.
+
 ## [0.7.0] - 2026-08-27
 
 ### Added
@@ -136,6 +230,7 @@ First public release: VS Code Marketplace, and Zed as a dev extension.
 Internal iterations: hover and inlay surface work, discovery and diagnostics
 tuning, packaging experiments. Not published to any store.
 
+[0.8.0]: https://github.com/reczkok/typegpu-inspector/releases/tag/v0.8.0
 [0.7.0]: https://github.com/reczkok/typegpu-inspector/releases/tag/v0.7.0
 [0.6.1]: https://github.com/reczkok/typegpu-inspector/releases/tag/v0.6.1
 [0.6.0]: https://github.com/reczkok/typegpu-inspector/releases/tag/v0.6.0

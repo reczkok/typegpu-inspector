@@ -320,6 +320,12 @@ export function diagnoseTargetFailure(
 
 export function diagnoseInspectionFailure(error: unknown): TargetDiagnostic[] {
   const message = getErrorMessage(error);
+  // The optimizer already explained itself: the reason, the import that
+  // pulled the package in, and the way out. A generic import rule would
+  // only bury that.
+  if (error instanceof Error && error.name === 'DependencyOptimizationError') {
+    return [{ code: 'dependency-optimization', message }];
+  }
   return INSPECTION_FAILURE_RULES
     .filter((rule) => rule.matches(message))
     .map((rule) => rule.diagnostic);

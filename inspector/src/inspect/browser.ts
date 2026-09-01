@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { open, readFile, unlink } from 'node:fs/promises';
 import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
   chromium,
@@ -81,7 +83,20 @@ function installChromiumOnce(): Promise<void> {
   return chromiumInstallPromise;
 }
 
-function runChromiumInstall(): Promise<void> {
+async function runChromiumInstall(): Promise<void> {
+  // Inspectors started together (a CLI per module, two editor windows) all
+  // find the browser missing at once; one downloads while the others wait
+  // on the lock and then find it installed.
+  const releaseLock = await acquireChromiumInstallLock();
+  try {
+    if (existsSync(chromium.executablePath())) return;
+    await downloadChromium();
+  } finally {
+    await releaseLock();
+  }
+}
+
+function downloadChromium(): Promise<void> {
   // cli.js is not in the package's exports map (only the bin field points at
   // it), so resolve the exported package.json and join from its directory.
   const cli = join(
@@ -116,6 +131,47 @@ function runChromiumInstall(): Promise<void> {
       }
     });
   });
+}
+
+const CHROMIUM_INSTALL_LOCK_TIMEOUT_MS = 15 * 60_000;
+
+/**
+ * A pid-stamped lock file beside the system temp directory; a lock whose
+ * owner is gone is taken over, and a wait that outlasts the timeout goes
+ * ahead anyway rather than never installing.
+ */
+async function acquireChromiumInstallLock(): Promise<() => Promise<void>> {
+  const lockPath = join(tmpdir(), 'typegpu-inspector-chromium-install.lock');
+  const deadline = Date.now() + CHROMIUM_INSTALL_LOCK_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    try {
+      const handle = await open(lockPath, 'wx');
+      await handle.writeFile(String(process.pid));
+      await handle.close();
+      return async () => {
+        await unlink(lockPath).catch(() => undefined);
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      if (!(await lockOwnerAlive(lockPath))) {
+        await unlink(lockPath).catch(() => undefined);
+        continue;
+      }
+      await new Promise((resolveWait) => setTimeout(resolveWait, 500));
+    }
+  }
+  return async () => undefined;
+}
+
+async function lockOwnerAlive(lockPath: string): Promise<boolean> {
+  try {
+    const pid = Number.parseInt(await readFile(lockPath, 'utf8'), 10);
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
 }
 
 function formatUnknownError(error: unknown): string {

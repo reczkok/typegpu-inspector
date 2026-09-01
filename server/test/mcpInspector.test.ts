@@ -39,13 +39,102 @@ describe('runtime inspector launch', () => {
     await writeFile(bin, '#!/usr/bin/env node\n');
     process.env.TYPEGPU_INSPECTOR_RUNTIME_DIR = runtimeDir;
 
-    const launch = await resolveInspectorLaunch('bundled');
+    // An entry outside the monorepo, or the checkout's own runtime would win.
+    const launch = await resolveInspectorLaunch('bundled', join(runtimeDir, 'server', 'dist', 'server.cjs'));
 
     expect(launch.command).toBe(process.execPath);
     expect(launch.args).toEqual([bin]);
     expect(launch.env?.ELECTRON_RUN_AS_NODE).toBe('1');
   });
+
+  it('launches a version-matched runtime installed beside the server without npx', async () => {
+    const workDir = await mkdtemp(join(tmpdir(), 'typegpu-zed-work-'));
+    temporaryDirectories.push(workDir);
+    const bin = await writeRuntimePackage(workDir, __TYPEGPU_INSPECTOR_VERSION__);
+
+    const launch = await resolveInspectorLaunch('bundled', siblingServerEntry(workDir));
+
+    expect(launch.command).toBe(process.execPath);
+    expect(launch.args).toEqual([bin]);
+    expect(launch.env?.ELECTRON_RUN_AS_NODE).toBe('1');
+  });
+
+  it('falls back to npx when the sibling runtime version does not match', async () => {
+    const workDir = await mkdtemp(join(tmpdir(), 'typegpu-zed-work-'));
+    temporaryDirectories.push(workDir);
+    await writeRuntimePackage(workDir, '0.0.0-stale');
+
+    const launch = await resolveInspectorLaunch('bundled', siblingServerEntry(workDir));
+
+    expect(launch.command).toBe('npx');
+    expect(launch.args).toEqual([
+      '-y',
+      `typegpu-runtime-inspector-mcp@${__TYPEGPU_INSPECTOR_VERSION__}`,
+    ]);
+  });
+
+  it('launches the runtime a project installs as a dev dependency in the pnpm layout', async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), 'typegpu-project-'));
+    temporaryDirectories.push(projectDir);
+    // pnpm keeps the real packages under node_modules/.pnpm and symlinks the
+    // direct dependencies; node resolves argv[1] to the real server path.
+    const store = join(projectDir, 'node_modules', '.pnpm');
+    const realRuntime = await writeRuntimePackage(
+      join(store, `typegpu-runtime-inspector-mcp@${__TYPEGPU_INSPECTOR_VERSION__}`),
+      __TYPEGPU_INSPECTOR_VERSION__,
+    );
+    await symlink(
+      join(realRuntime, '..', '..'),
+      join(projectDir, 'node_modules', 'typegpu-runtime-inspector-mcp'),
+      'dir',
+    );
+    const serverEntry = join(
+      store,
+      `typegpu-inspector-language-server@${__TYPEGPU_INSPECTOR_VERSION__}`,
+      'node_modules',
+      'typegpu-inspector-language-server',
+      'dist',
+      'server.cjs',
+    );
+
+    const launch = await resolveInspectorLaunch('bundled', serverEntry);
+
+    expect(launch.command).toBe(process.execPath);
+    expect(launch.args).toEqual([
+      join(
+        projectDir,
+        'node_modules',
+        'typegpu-runtime-inspector-mcp',
+        'bin',
+        'typegpu-runtime-inspector-mcp.mjs',
+      ),
+    ]);
+  });
 });
+
+/** Where Zed's npm install puts the server bundle under its work directory. */
+function siblingServerEntry(workDir: string): string {
+  return join(
+    workDir,
+    'node_modules',
+    'typegpu-inspector-language-server',
+    'dist',
+    'server.cjs',
+  );
+}
+
+/** Writes a stub `typegpu-runtime-inspector-mcp` under `root/node_modules`. */
+async function writeRuntimePackage(root: string, version: string): Promise<string> {
+  const packageRoot = join(root, 'node_modules', 'typegpu-runtime-inspector-mcp');
+  const bin = join(packageRoot, 'bin', 'typegpu-runtime-inspector-mcp.mjs');
+  await mkdir(join(packageRoot, 'bin'), { recursive: true });
+  await writeFile(
+    join(packageRoot, 'package.json'),
+    JSON.stringify({ name: 'typegpu-runtime-inspector-mcp', version }),
+  );
+  await writeFile(bin, '#!/usr/bin/env node\n');
+  return bin;
+}
 
 async function makeExecutable(directory: string, name: string): Promise<string> {
   const file = join(directory, name);

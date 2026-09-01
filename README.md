@@ -48,7 +48,7 @@ accessors, GPU variables, and collections of them.
 
 ```sh
 git clone https://github.com/reczkok/typegpu-inspector.git
-cd typegpu-inspector && git checkout v0.7.0
+cd typegpu-inspector && git checkout v0.8.0
 ```
 
 Then run `zed: install dev extension` and pick that folder. Zed builds it
@@ -85,7 +85,22 @@ its settings UI.
 | `projectRoot` | `typegpuInspector.projectRoot` | `""` | Override workspace-root inference |
 
 `typegpuInspector.serverPath` is VS Code only and points at a local language
-server build.
+server build. In Zed, set `lsp.typegpu-inspector.binary` to run one; the
+extension itself cannot see outside its work directory, so a dev extension
+otherwise installs the published server from npm:
+
+```json
+"lsp": {
+  "typegpu-inspector": {
+    "binary": {
+      "path": "/path/to/node",
+      "arguments": ["/path/to/typegpu-inspector/server/dist/server.cjs", "--stdio"]
+    }
+  }
+}
+```
+
+The server then runs the runtime from the checkout's `inspector/` directory.
 
 `wgsl` shows only the generated WGSL for shaders and pipelines (120 lines by
 default) and compact facts for everything else. At every level the WGSL comes
@@ -104,11 +119,13 @@ Invalid values are dropped and logged. Changes apply without a restart, except
 
 ## What it downloads and runs
 
-The first inspection downloads `typegpu-runtime-inspector-mcp` from npm and a
+The extension downloads `typegpu-runtime-inspector-mcp` from npm (Zed when
+the language server starts, VS Code before the first inspection) and a
 Playwright Chromium build (about 170 MB to download, 550 MB on disk), once
-per machine. It then runs the project's top-level TypeGPU module code inside
-that browser, so a module with import-time side effects performs them. VS Code
-asks once, in a dialog, before the first download.
+per machine; after that, inspection works offline. Each inspection runs the
+project's top-level TypeGPU module code inside that browser, so a module with
+import-time side effects performs them. VS Code asks once, in a dialog,
+before the first download.
 
 Nothing is sent anywhere. There is no telemetry, and the only network traffic
 is those two downloads plus whatever the inspected module requests itself.
@@ -140,6 +157,79 @@ directory. Playwright caches browsers separately in
   get one candidate ordered by alignment and size, so the absence of a
   suggestion does not mean the order is optimal.
 
+## Command line
+
+The language server package is also a CLI, for shells, CI, and agents that
+run in a terminal. It uses the same discovery, runtime, and source mapping as
+the editor, so it prints exactly the diagnostics the editor shows:
+
+```sh
+npx -p typegpu-inspector-language-server typegpu-inspector check src
+```
+
+```
+src/pbr.ts:98:5: error: shade: uniformity … — in shade (pbr.ts:98) via evaluateLight [wgsl-compilation]
+    src/lighting.ts:12:3: note: the statement that produced the line
+    wgsl: /tmp/typegpu-inspector/…/pbr__shade.wgsl:40:9
+
+✖ 1 error · 7 targets (6 ok, 1 failed) in 3 files · 1.4s
+```
+
+| Command | Does |
+| --- | --- |
+| `interactive [paths...]` | Opens a terminal session with a fuzzy target picker, checks, generated WGSL, reports, editor integration, and watch mode on one warm browser. Alias: `i`. |
+| `check [paths...]` | Inspects every module under the files, directories, or globs (default `.`) and prints one line per diagnostic, then a summary. A helper that fails in several modules is reported once, with the other call sites on an `also in` line; a module that cannot run at all is reported once, not once per target. Exit 1 on errors or failed targets. |
+| `wgsl <file>...` | Prints the generated WGSL of each target with the compiler's messages. |
+| `report <file>...` | Prints the full inspection report as Markdown: the hover at its deepest level. |
+| `targets [paths...]` | Lists what a check would inspect, from source alone. Nothing runs. |
+
+Run `typegpu-inspector` without a command in a terminal to enter the
+interactive session for the current directory. Check everything and review
+the targets that failed, or pick a target by name or file and check it, read
+its generated WGSL or full report, open the generated file with
+`$VISUAL`/`$EDITOR`, or keep watching changes — all without restarting
+Chromium, and with each module's result remembered until its source changes.
+
+`check` takes `--format text|json|github` (`github` adds workflow
+annotations), `--severity error|warning|info|hint`, `--warnings-as-errors`,
+`--verbose` for per-target status, `--target <name>` to check only some
+targets, and `--watch`, which re-checks a changed module and the modules that
+import it while keeping the browser session warm. Walks over directories and
+globs honor `.gitignore` files and skip dependency and build folders;
+`--ignore <glob>` skips more and `--no-gitignore` inspects ignored files too.
+A file named directly is always inspected. `--console` prints what the
+modules wrote to the console while they ran, one line per call with repeats
+counted, so a module that steps a simulation and logs its statistics reads
+like a test. `--evaluate` also imports modules that use TypeGPU but declare
+no target of their own (a factory that builds its pipelines inside a
+function, say) and reports whether the import threw, what its GPU calls came
+back with, and, with `--console`, what it logged; such a module counts as
+one target named after its file.
+`interactive`, `wgsl`, and `report` share the runtime flags. `wgsl` and
+`report` take `--target <name>` (a label or symbol name,
+repeatable) and `--json`. The runtime settings from the table above are flags
+on all three: `--project-root`, `--timeout-ms`, `--feature`,
+`--no-strict-names`, `--no-source-mapping`, `--inspector-package`. Run
+`typegpu-inspector help <command>` for the rest.
+
+Colors follow the terminal and `NO_COLOR`; progress goes to stderr and
+`--quiet` silences it. Exit codes: 0 no errors, 1 errors or failed targets,
+2 usage or environment failure. Installed as a dev dependency, the binary is
+`typegpu-inspector` in `package.json` scripts.
+
+In a React Native project, name the shader modules rather than a directory:
+`App.tsx` and anything else that imports `react-native` at runtime cannot
+run in the inspector's browser, and the check says which import pulled the
+package in. Type-only imports of React Native packages are fine.
+
+Through `npx` the CLI fetches the runtime from the registry on every run.
+To keep it off the network, install both packages at the same version as
+dev dependencies; the CLI then launches the runtime found beside it:
+
+```sh
+pnpm add -D typegpu-inspector-language-server typegpu-runtime-inspector-mcp
+```
+
 ## Agent access
 
 The same runtime is a stdio MCP server. The Zed extension registers it; other
@@ -148,7 +238,9 @@ clients use the `typegpu-runtime-inspector-mcp` package. See
 
 Agents running inside the editor get the same information from diagnostics: a
 file an agent writes while it is open is inspected as if saved, and the
-results land in the problems panel.
+results land in the problems panel. Agents in a terminal get it from
+`typegpu-inspector check` (see [Command line](#command-line)), which prints
+only the diagnostics and needs no target list and no MCP setup.
 
 ## Development
 

@@ -224,6 +224,8 @@ export type RecordedGpuCall = {
   name?: string;
   ok?: boolean;
   descriptor?: unknown;
+  error?: unknown;
+  compilationMessages?: Array<{ type?: string; message?: string; lineNum?: number; linePos?: number }>;
   targetLabel?: string;
   targetKind?: string;
 };
@@ -256,7 +258,7 @@ export type InspectorOutput = {
   stats?: Record<string, unknown>;
   environment?: Record<string, unknown>;
   calls?: RecordedGpuCall[];
-  console?: Array<{ type?: string; text?: string }>;
+  console?: Array<{ type?: string; text?: string; count?: number }>;
   pageErrors?: string[];
   warnings?: string[];
   error?: unknown;

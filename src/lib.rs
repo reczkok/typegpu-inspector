@@ -29,9 +29,11 @@ fn report(status_id: Option<&LanguageServerId>, status: LanguageServerInstallati
     }
 }
 
-/// Resolves a server entry script: the local monorepo build when running as a
-/// dev extension, otherwise an npm-acquired copy inside the extension work
-/// directory (Zed registry builds must not ship the servers themselves).
+/// Resolves a server entry script: a local build placed in the extension work
+/// directory, otherwise an npm-acquired copy there (Zed registry builds must
+/// not ship the servers themselves). The wasm sandbox sees only the work
+/// directory, so a monorepo checkout elsewhere is invisible here; point Zed
+/// at one through `lsp.typegpu-inspector.binary` instead.
 fn resolve_entry(
     status_id: Option<&LanguageServerId>,
     dev_entry: &str,
@@ -41,17 +43,9 @@ fn resolve_entry(
     let work_dir = env::current_dir()
         .map_err(|error| format!("could not read extension work directory: {error}"))?;
 
-    // Dev builds compile on the developer's machine, so the manifest dir is the
-    // local checkout; registry builds bake in a CI path that won't exist on a
-    // user's machine, so that candidate simply fails the exists() check.
-    let dev_candidates = [
-        work_dir.join(dev_entry),
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(dev_entry),
-    ];
-    for candidate in dev_candidates {
-        if candidate.exists() {
-            return Ok(candidate);
-        }
+    let local = work_dir.join(dev_entry);
+    if local.exists() {
+        return Ok(local);
     }
 
     report(
@@ -130,6 +124,22 @@ impl zed::Extension for TypeGpuInspectorExtension {
                 LANGUAGE_SERVER_ENTRY,
             )?;
             args[0] = server.to_string_lossy().into_owned();
+
+            // The server launches the runtime installed beside it, which keeps
+            // inspections off the network; without one it falls back to npx,
+            // so a failed install here degrades rather than blocks.
+            let inspector = resolve_entry(
+                Some(language_server_id),
+                DEV_INSPECTOR_ENTRY,
+                INSPECTOR_PACKAGE,
+                INSPECTOR_ENTRY,
+            );
+            if inspector.is_err() {
+                report(
+                    Some(language_server_id),
+                    LanguageServerInstallationStatus::None,
+                );
+            }
         }
 
         Ok(Command { command, args, env })
