@@ -39,6 +39,19 @@ export class SessionInfrastructureError extends Error {
   }
 }
 
+/**
+ * Vite's dependency optimizer could not prebundle something the module
+ * imports. The server that hit it never serves that module, so the session
+ * owning it is retired, and no isolated retry follows: the same build fails
+ * the same way.
+ */
+export class DependencyOptimizationError extends Error {
+  public constructor(message: string, options: { cause?: unknown } = {}) {
+    super(message, { cause: options.cause });
+    this.name = 'DependencyOptimizationError';
+  }
+}
+
 export function createAbortError(reason = 'The TypeGPU inspection was cancelled.'): Error {
   const error = new Error(reason);
   error.name = 'AbortError';

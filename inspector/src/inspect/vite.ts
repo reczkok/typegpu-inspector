@@ -1,11 +1,11 @@
-import { createReadStream, existsSync, realpathSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { createServer as createNetServer } from 'node:net';
 import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { createServer, type InlineConfig, type PluginOption, type ViteDevServer } from 'vite';
+import { createLogger, createServer, type InlineConfig, type Logger, type PluginOption, type ViteDevServer } from 'vite';
 import ts from 'typescript';
-import { SessionInfrastructureError } from '../shared.ts';
+import { DependencyOptimizationError, SessionInfrastructureError } from '../shared.ts';
 import type { StaticAssetRoute } from '../types.ts';
 import type { PreparedInput } from './input.ts';
 import {
@@ -16,6 +16,7 @@ import {
   resolvePackagePathFrom,
   resolveTypegpuInternalPath,
 } from './paths.ts';
+import { describeDependencyFailure, isDependencyOptimizationError, stripAnsi } from './optimizerFailure.ts';
 import { buildRecordingShimModule } from './recordingShim.ts';
 
 const INLINE_MODULE_QUERY = 'typegpu-mcp-inline';
@@ -76,6 +77,7 @@ export async function createInspectorViteServer(
   const modulePackageRoots = await findPackageRoots(dirname(input.modulePath));
   const typegpuPlugin = await loadTypegpuVitePlugin(input.cwd, input.dependencyResolution);
   const port = await getAvailablePort();
+  const failures = createFailureSink();
   const config: InlineConfig = {
     // Dependency optimization and framework resolution must happen from the
     // inspected project. Keeping the inspector package as Vite's root makes a
@@ -84,6 +86,7 @@ export async function createInspectorViteServer(
     cacheDir: input.cacheDir,
     configFile: input.viteConfigPath ?? false,
     logLevel: 'error',
+    customLogger: createCapturingLogger(failures),
     plugins: [
       createHarnessPlugin(),
       createProjectPublicAssetPlugin(input.cwd),
@@ -149,12 +152,149 @@ export async function createInspectorViteServer(
       // The harness entry does not import the inspected app, so scan the real
       // module to discover CommonJS dependencies such as React.
       entries: [input.modulePath],
-      include: collectOptimizerIncludes(input),
+      include: input.inlineCode ? collectOptimizerIncludes(input.modulePath, input.inlineCode) : [],
       exclude: [...TYPEGPU_OPTIMIZE_DEP_EXCLUDES],
     },
   };
 
-  return createServer(config);
+  const server = await createServer(config);
+  trackOptimizerFailures(server, getInput, serverErrors, failures);
+  return server;
+}
+
+type TrackedServer = {
+  fail(error: Error): void;
+};
+
+/** Failures noticed before or after the server they belong to is tracked. */
+type FailureSink = {
+  report(error: Error): void;
+  drain(handler: (error: Error) => void): void;
+};
+
+function createFailureSink(): FailureSink {
+  let handler: ((error: Error) => void) | undefined;
+  const pending: Error[] = [];
+  return {
+    report(error) {
+      if (handler) handler(error);
+      else pending.push(error);
+    },
+    drain(next) {
+      handler = next;
+      for (const error of pending.splice(0)) next(error);
+    },
+  };
+}
+
+/**
+ * A warm server re-optimizes when a module brings a new dependency, and
+ * that path catches its own failure and logs it instead of rejecting. The
+ * logger is the only place it shows, so it reports there.
+ */
+function createCapturingLogger(failures: FailureSink): Logger {
+  const logger = createLogger('error');
+  const forward = logger.error.bind(logger);
+  logger.error = (message, options) => {
+    const error = options?.error instanceof Error ? options.error : undefined;
+    if (
+      (error && isDependencyOptimizationError(error)) ||
+      isDependencyOptimizationError(new Error(stripAnsi(message)))
+    ) {
+      failures.report(error ?? new Error(stripAnsi(message)));
+      return;
+    }
+    forward(message, options);
+  };
+  return logger;
+}
+
+const trackedServers = new Set<TrackedServer>();
+const serverFailures = new WeakMap<ViteDevServer, Promise<never>>();
+let rejectionGuardInstalled = false;
+
+/**
+ * Vite's optimizer chains `.then` on its prebundle without a `.catch`, so a
+ * dependency it cannot bundle surfaces as an unhandled rejection that would
+ * end this process, taking every open session with it. The guard hands the
+ * failure to the servers that are up, and each one fails the inspection it
+ * is serving with the reason and the import that pulled the package in.
+ * Anything else unhandled is logged and the process stays up: an inspector
+ * that dies loses the editor's warm browser for a fault it did not cause.
+ */
+function installRejectionGuard(): void {
+  if (rejectionGuardInstalled) return;
+  rejectionGuardInstalled = true;
+  process.on('unhandledRejection', (reason) => {
+    const error = reason instanceof Error ? reason : new Error(String(reason));
+    if (isDependencyOptimizationError(error) && trackedServers.size > 0) {
+      for (const tracked of [...trackedServers]) tracked.fail(error);
+      return;
+    }
+    process.stderr.write(`[typegpu-inspector] Unhandled rejection: ${error.stack ?? error.message}\n`);
+  });
+}
+
+function trackOptimizerFailures(
+  server: ViteDevServer,
+  getInput: () => PreparedInput,
+  serverErrors: string[],
+  failures: FailureSink,
+): void {
+  installRejectionGuard();
+  let reject: (error: Error) => void = () => {};
+  const failure = new Promise<never>((_, rejectFailure) => {
+    reject = rejectFailure;
+  });
+  // Nobody may be racing against it when it settles.
+  failure.catch(() => undefined);
+  serverFailures.set(server, failure);
+  const tracked: TrackedServer = {
+    fail(error) {
+      const message = describeDependencyFailure(error, inspectedModule(getInput()));
+      if (!serverErrors.includes(message)) serverErrors.push(message);
+      reject(new DependencyOptimizationError(message, { cause: error }));
+    },
+  };
+  trackedServers.add(tracked);
+  failures.drain((error) => tracked.fail(error));
+  const close = server.close.bind(server);
+  server.close = async () => {
+    trackedServers.delete(tracked);
+    await close();
+  };
+}
+
+/** Rejects once the server's optimizer has failed; never settles otherwise. */
+export function serverFailure(server: ViteDevServer): Promise<never> {
+  return serverFailures.get(server) ?? new Promise<never>(() => {});
+}
+
+const GENERATED_MODULE_SUFFIX = /\.typegpu-mcp-inspect(\.[cm]?[jt]sx?)$/;
+
+/**
+ * The file the person wrote. A symbols inspection runs a generated module
+ * beside it that inlines its source, so the explanation points at the
+ * original; other inline modules only have their own text.
+ */
+function inspectedModule(input: PreparedInput): { path: string; source: string | undefined; cwd: string } {
+  const original = input.modulePath.replace(GENERATED_MODULE_SUFFIX, '');
+  if (original !== input.modulePath && existsSync(original)) {
+    return { path: original, source: readSourceOrUndefined(original), cwd: input.cwd };
+  }
+  return {
+    path: input.modulePath,
+    source: input.inlineCode ?? readSourceOrUndefined(input.modulePath),
+    cwd: input.cwd,
+  };
+}
+
+function readSourceOrUndefined(path: string): string | undefined {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch {
+    return undefined;
+  }
 }
 
 function createHarnessPlugin(): PluginOption {
@@ -193,14 +333,19 @@ function createHarnessPlugin(): PluginOption {
   };
 }
 
-function collectOptimizerIncludes(input: PreparedInput): string[] {
-  const source = input.inlineCode;
-  if (!source) return [];
-  const scriptKind = input.modulePath.endsWith('.tsx') || input.modulePath.endsWith('.jsx')
+/**
+ * Bare specifiers an inline module imports at runtime, for
+ * `optimizeDeps.include`: the scanner only sees the on-disk entry, not the
+ * generated module. Type-only imports are erased before the module runs, so
+ * they stay out; prebundling them would drag in packages (React Native, say)
+ * that the browser build cannot parse.
+ */
+export function collectOptimizerIncludes(modulePath: string, source: string): string[] {
+  const scriptKind = modulePath.endsWith('.tsx') || modulePath.endsWith('.jsx')
     ? ts.ScriptKind.TSX
     : ts.ScriptKind.TS;
   const sourceFile = ts.createSourceFile(
-    input.modulePath,
+    modulePath,
     source,
     ts.ScriptTarget.Latest,
     false,
@@ -227,7 +372,7 @@ function collectOptimizerIncludes(input: PreparedInput): string[] {
       ts.isImportDeclaration(node) &&
       ts.isStringLiteralLike(node.moduleSpecifier)
     ) {
-      add(node.moduleSpecifier.text);
+      if (!isTypeOnlyImport(node)) add(node.moduleSpecifier.text);
     } else if (
       ts.isCallExpression(node) &&
       node.expression.kind === ts.SyntaxKind.ImportKeyword &&
@@ -240,6 +385,16 @@ function collectOptimizerIncludes(input: PreparedInput): string[] {
   };
   sourceFile.forEachChild(visit);
   return [...imports];
+}
+
+/** `import type … from` and `import { type A } from` leave nothing behind at runtime. */
+function isTypeOnlyImport(node: ts.ImportDeclaration): boolean {
+  const clause = node.importClause;
+  if (!clause) return false;
+  if (clause.isTypeOnly) return true;
+  const bindings = clause.namedBindings;
+  if (clause.name || !bindings || !ts.isNamedImports(bindings)) return false;
+  return bindings.elements.length > 0 && bindings.elements.every((element) => element.isTypeOnly);
 }
 
 export async function startInspectorViteServer(
@@ -499,10 +654,6 @@ function formatViteError(error: unknown, requestUrl: string | undefined): string
     parts.push(record.stack.split('\n').slice(0, 6).join('\n'));
   }
   return limitDiagnosticText(stripAnsi(parts.join('\n')));
-}
-
-function stripAnsi(value: string): string {
-  return value.replace(/\u001b\[[0-9;]*m/g, '');
 }
 
 function limitDiagnosticText(value: string): string {

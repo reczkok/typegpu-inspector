@@ -28,10 +28,12 @@ import {
 } from './inspect/session.ts';
 import {
   INSPECTOR_HARNESS_PATH,
+  serverFailure,
   startInspectorViteServer,
 } from './inspect/vite.ts';
 import {
   DEFAULT_INSPECTION_TIMEOUT_MS,
+  DependencyOptimizationError,
   MAX_SESSION_ESTABLISHMENT_MS,
   SessionInfrastructureError,
   createAbortError,
@@ -114,6 +116,7 @@ async function runInspection(
   let browserVersion: string | undefined;
   let report: TypeGpuInspectionReport | undefined;
   let failure: { error: unknown } | undefined;
+  let serverFailed: Promise<never> | undefined;
 
   try {
     normalized = await measureInspectionStep(
@@ -213,8 +216,12 @@ async function runInspection(
       pageErrors.push(error.stack || error.message);
     });
 
+    // A dependency the optimizer cannot bundle leaves every request for it
+    // pending; the server's failure settles the race instead.
+    const failed = serverFailure(server);
+    serverFailed = failed;
     await measureInspectionStep(timings, 'loadHarnessMs', () =>
-      withDeadline((async () => {
+      withDeadline(Promise.race([failed, (async () => {
         await page!.goto(new URL(INSPECTOR_HARNESS_PATH, baseUrl).href, {
           waitUntil: 'domcontentloaded',
           timeout: 0,
@@ -229,7 +236,7 @@ async function runInspection(
           localStorage.clear();
           sessionStorage.clear();
         });
-      })(), run, 'loading the browser harness', { establishment: coldStart }),
+      })()]), run, 'loading the browser harness', { establishment: coldStart }),
     );
 
     const browserRequest: BrowserInspectRequest = {
@@ -256,7 +263,7 @@ async function runInspection(
       timings,
       'browserInspectionMs',
       () => withDeadline<BrowserTransferResult>(
-        page!.evaluate(async (request) => {
+        Promise.race([failed, page!.evaluate(async (request) => {
           try {
             if (!window.__TYPEGPU_INSPECT__) {
               throw new Error('TypeGPU inspector harness did not initialize.');
@@ -277,7 +284,7 @@ async function runInspection(
               },
             };
           }
-        }, browserRequest) as Promise<BrowserTransferResult>,
+        }, browserRequest) as Promise<BrowserTransferResult>]),
         run,
         'running browser inspection',
       ),
@@ -307,7 +314,9 @@ async function runInspection(
       pageErrors: allPageErrors,
     };
   } catch (error) {
-    failure = { error };
+    // The page's import can fail a beat before the optimizer's rejection is
+    // routed here; the optimizer's account names the import at fault.
+    failure = { error: serverFailed ? await preferServerFailure(serverFailed, error) : error };
   } finally {
     // Cleanup runs before any retry so a cancelled or failed run never keeps
     // the page open or the session lease held.
@@ -334,7 +343,13 @@ async function runInspection(
     throw isAbortError(error) ? error : createAbortError();
   }
 
-  if (
+  if (error instanceof DependencyOptimizationError) {
+    // The optimizer stays wedged on that server; an isolated retry would
+    // only rebuild the same failure.
+    if (normalized?.reuseBrowser) {
+      await invalidateInspectorSession(normalized);
+    }
+  } else if (
     normalized?.reuseBrowser &&
     isReusableSessionInfrastructureError(error) &&
     hasRemainingDeadlineMs(deadline)
@@ -871,6 +886,20 @@ function readFailureEnvironmentLedger(
   }
   const ledger = (error as { environmentLedger?: unknown }).environmentLedger;
   return Array.isArray(ledger) ? ledger as TypeGpuInspectionReport['ledger'] : undefined;
+}
+
+const SERVER_FAILURE_GRACE_MS = 100;
+
+async function preferServerFailure(failed: Promise<never>, error: unknown): Promise<unknown> {
+  try {
+    await Promise.race([
+      failed,
+      new Promise<void>((settle) => setTimeout(settle, SERVER_FAILURE_GRACE_MS)),
+    ]);
+    return error;
+  } catch (serverError) {
+    return serverError;
+  }
 }
 
 function shouldInvalidateSession(error: unknown): boolean {
