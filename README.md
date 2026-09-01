@@ -48,7 +48,7 @@ accessors, GPU variables, and collections of them.
 
 ```sh
 git clone https://github.com/reczkok/typegpu-inspector.git
-cd typegpu-inspector && git checkout v0.8.1
+cd typegpu-inspector && git checkout v0.8.2
 ```
 
 Then run `zed: install dev extension` and pick that folder. Zed builds it
