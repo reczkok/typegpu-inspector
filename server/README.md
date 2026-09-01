@@ -37,11 +37,14 @@ annotations. Directory walks honor `.gitignore`; `--ignore <glob>` skips more.
 Run `typegpu-inspector help <command>` for every option. The
 repository README documents the commands.
 
-On first use it starts the runtime inspector, installing
-`typegpu-runtime-inspector-mcp` when the checkout does not provide it. Two
-environment variables steer that:
+On first use it starts the runtime inspector: the checkout's copy when run
+from the monorepo, otherwise a `typegpu-runtime-inspector-mcp` of the same
+version found in a `node_modules` directory above the server (a project's
+dev dependencies, or Zed's extension directory), otherwise `npx`, which
+contacts the npm registry on every launch. Two environment variables steer
+that:
 
 | Variable | Effect |
 | --- | --- |
-| `TYPEGPU_INSPECTOR_RUNTIME_DIR` | Absolute directory to install and launch the inspector from. Without it, standalone installs use `npx`. |
+| `TYPEGPU_INSPECTOR_RUNTIME_DIR` | Absolute directory to install and launch the inspector from, checked before the `node_modules` lookup. VS Code sets it. |
 | `TYPEGPU_INSPECTOR_NODE` | Absolute path to a Node.js binary whose installation includes npm, used when `npm` is not on `PATH`. |

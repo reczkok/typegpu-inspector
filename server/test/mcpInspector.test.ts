@@ -71,6 +71,44 @@ describe('runtime inspector launch', () => {
       `typegpu-runtime-inspector-mcp@${__TYPEGPU_INSPECTOR_VERSION__}`,
     ]);
   });
+
+  it('launches the runtime a project installs as a dev dependency in the pnpm layout', async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), 'typegpu-project-'));
+    temporaryDirectories.push(projectDir);
+    // pnpm keeps the real packages under node_modules/.pnpm and symlinks the
+    // direct dependencies; node resolves argv[1] to the real server path.
+    const store = join(projectDir, 'node_modules', '.pnpm');
+    const realRuntime = await writeRuntimePackage(
+      join(store, `typegpu-runtime-inspector-mcp@${__TYPEGPU_INSPECTOR_VERSION__}`),
+      __TYPEGPU_INSPECTOR_VERSION__,
+    );
+    await symlink(
+      join(realRuntime, '..', '..'),
+      join(projectDir, 'node_modules', 'typegpu-runtime-inspector-mcp'),
+      'dir',
+    );
+    const serverEntry = join(
+      store,
+      `typegpu-inspector-language-server@${__TYPEGPU_INSPECTOR_VERSION__}`,
+      'node_modules',
+      'typegpu-inspector-language-server',
+      'dist',
+      'server.cjs',
+    );
+
+    const launch = await resolveInspectorLaunch('bundled', serverEntry);
+
+    expect(launch.command).toBe(process.execPath);
+    expect(launch.args).toEqual([
+      join(
+        projectDir,
+        'node_modules',
+        'typegpu-runtime-inspector-mcp',
+        'bin',
+        'typegpu-runtime-inspector-mcp.mjs',
+      ),
+    ]);
+  });
 });
 
 /** Where Zed's npm install puts the server bundle under its work directory. */

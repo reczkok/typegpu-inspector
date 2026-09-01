@@ -122,9 +122,10 @@ Invalid values are dropped and logged. Changes apply without a restart, except
 The extension downloads `typegpu-runtime-inspector-mcp` from npm (Zed when
 the language server starts, VS Code before the first inspection) and a
 Playwright Chromium build (about 170 MB to download, 550 MB on disk), once
-per machine. After that, inspection works offline. It then runs the project's top-level TypeGPU module code inside
-that browser, so a module with import-time side effects performs them. VS Code
-asks once, in a dialog, before the first download.
+per machine; after that, inspection works offline. Each inspection runs the
+project's top-level TypeGPU module code inside that browser, so a module with
+import-time side effects performs them. VS Code asks once, in a dialog,
+before the first download.
 
 Nothing is sent anywhere. There is no telemetry, and the only network traffic
 is those two downloads plus whatever the inspected module requests itself.
@@ -208,6 +209,14 @@ Colors follow the terminal and `NO_COLOR`; progress goes to stderr and
 `--quiet` silences it. Exit codes: 0 no errors, 1 errors or failed targets,
 2 usage or environment failure. Installed as a dev dependency, the binary is
 `typegpu-inspector` in `package.json` scripts.
+
+Through `npx` the CLI fetches the runtime from the registry on every run.
+To keep it off the network, install both packages at the same version as
+dev dependencies; the CLI then launches the runtime found beside it:
+
+```sh
+pnpm add -D typegpu-inspector-language-server typegpu-runtime-inspector-mcp
+```
 
 ## Agent access
 

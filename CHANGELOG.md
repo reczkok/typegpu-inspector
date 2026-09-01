@@ -52,10 +52,12 @@ and released together. The format follows
   language server launched the runtime through `npx`, which contacts the npm
   registry on every start even when the package is cached, so an inspection
   failed offline. The server now runs the `typegpu-runtime-inspector-mcp`
-  copy installed beside it when the versions match, and the Zed extension
-  installs that copy when the language server starts instead of only when
-  the agent's context server does. `npx` remains the fallback when neither a
-  monorepo checkout nor a sibling install exists.
+  copy installed in a `node_modules` directory above it when the versions
+  match, and the Zed extension installs that copy when the language server
+  starts instead of only when the agent's context server does. The same
+  lookup keeps the CLI off the network in a project that installs both
+  packages as dev dependencies. `npx` remains the fallback when neither a
+  monorepo checkout nor such an install exists.
 - The Zed extension no longer probes the monorepo checkout it was compiled
   from: the wasm sandbox cannot see outside the extension work directory, so
   a dev extension always ran the npm-published server. The README documents
