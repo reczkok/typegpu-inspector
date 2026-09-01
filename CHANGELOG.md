@@ -6,6 +6,19 @@ and released together. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-09-01
+
+### Fixed
+
+- Inspecting a project on TypeGPU 0.11 failed every `'use gpu'` function and
+  pipeline with `Cannot read properties of undefined (reading 'length')`. The
+  statement-map recorder assumed the 0.12 generator, whose statements resolve
+  to `{ code }`, while 0.11 returns the code string; 0.11 exports the
+  generator too, so the recorder was installed there. Such a generator now
+  passes its output through untouched and records no statement map, so
+  diagnostics fall back to the heuristic placement; the failing statement is
+  still named.
+
 ## [0.8.0] - 2026-09-01
 
 ### Added
@@ -230,6 +243,7 @@ First public release: VS Code Marketplace, and Zed as a dev extension.
 Internal iterations: hover and inlay surface work, discovery and diagnostics
 tuning, packaging experiments. Not published to any store.
 
+[0.8.1]: https://github.com/reczkok/typegpu-inspector/releases/tag/v0.8.1
 [0.8.0]: https://github.com/reczkok/typegpu-inspector/releases/tag/v0.8.0
 [0.7.0]: https://github.com/reczkok/typegpu-inspector/releases/tag/v0.7.0
 [0.6.1]: https://github.com/reczkok/typegpu-inspector/releases/tag/v0.6.1
