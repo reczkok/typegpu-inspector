@@ -803,6 +803,30 @@ describe('diagnostic classifiers', () => {
     expect(diagnostics[0]?.code).toBe('wrapper-required');
   });
 
+  it('classifies a probe schema that is not a callable schema as a blocked probe', () => {
+    const diagnostics = diagnoseTargetFailure(
+      undefined,
+      'resolvable',
+      new Error(
+        "Cannot synthesize a zero value for schema 'undefined' selected by targets[1].probeArguments[0]. Expected a callable TypeGPU schema.",
+      ),
+    );
+
+    expect(diagnostics[0]?.code).toBe('probe-argument-not-synthesizable');
+  });
+
+  it('classifies a helper that reads Three.js TSL nodes as needing its toTSL wrapper', () => {
+    const diagnostics = diagnoseTargetFailure(
+      undefined,
+      'resolvable',
+      new Error(
+        "updateNormal(vec3f): Cannot access fromTSL() nodes on the CPU. Do it through a 'use gpu' function that ends up being wrapped in toTSL().",
+      ),
+    );
+
+    expect(diagnostics[0]?.code).toBe('three-tsl-wrapper-required');
+  });
+
   it('classifies slot-binding-required failures', () => {
     const diagnostics = diagnoseTargetFailure(
       undefined,

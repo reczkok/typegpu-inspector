@@ -211,7 +211,7 @@ export function foldModuleFailures(
   if (targetCount < 2) return [...diagnostics];
   const groups = new Map<string, CliDiagnostic[]>();
   for (const diagnostic of diagnostics) {
-    if (diagnostic.code !== 'target-resolution' && diagnostic.code !== 'runtime-inspection') continue;
+    if (!FOLDABLE_MODULE_FAILURE_CODES.has(diagnostic.code ?? '')) continue;
     const key = `${diagnostic.code}|${moduleFailureText(diagnostic)}`;
     groups.set(key, [...(groups.get(key) ?? []), diagnostic]);
   }
@@ -232,9 +232,15 @@ export function foldModuleFailures(
     });
 }
 
+const FOLDABLE_MODULE_FAILURE_CODES = new Set([
+  'target-resolution',
+  'runtime-inspection',
+  'inspection-unavailable',
+]);
+
 /** A resolution failure names its target first; the account after it is what folds. */
 function moduleFailureText(diagnostic: CliDiagnostic): string {
-  if (diagnostic.code !== 'target-resolution') return diagnostic.message;
+  if (diagnostic.code === 'runtime-inspection') return diagnostic.message;
   const index = diagnostic.message.indexOf(': ');
   return index > 0 ? diagnostic.message.slice(index + 2) : diagnostic.message;
 }

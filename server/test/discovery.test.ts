@@ -298,6 +298,136 @@ describe('discoverTypeGpuModule', () => {
     );
   });
 
+  it('does not treat a CPU factory that defines GPU closures as a shader helper', () => {
+    const result = discoverTypeGpuModule(
+      '/project/spring.ts',
+      `
+        export interface SpringOptions {
+          turns?: number;
+        }
+        export function spring({ turns = 4 }: SpringOptions = {}) {
+          const centerAt = (u: number) => {
+            'use gpu';
+            return d.vec3f(u * turns, 0, 0);
+          };
+          return build(centerAt);
+        }
+        function tagged(g: Geometry, coilOf: (s: number) => number) {
+          return map(g, (s) => {
+            'use gpu';
+            return coilOf(s);
+          });
+        }
+        export function helper(u: number) {
+          'use gpu';
+          return u * 2;
+        }
+      `,
+    );
+
+    expect(result.symbols.map(({ name, role }) => ({ name, role }))).toEqual([
+      { name: 'helper', role: 'shader-helper' },
+    ]);
+    expect(result.targets.map((target) => target.id)).toEqual(['resolvable:helper']);
+  });
+
+  it('only synthesizes probe arguments from names the probe can resolve to a value', () => {
+    const result = discoverTypeGpuModule(
+      '/project/typed-inputs.ts',
+      `
+        import { d } from 'typegpu';
+        import type { Surface } from './surface.ts';
+        import { Genome, type Options } from './schemas.ts';
+        interface Params { turns: number }
+        type Alias = d.Infer<typeof Genome>;
+        const Local = d.struct({ value: d.f32 });
+        export const fromInterface = (params: Params) => {
+          'use gpu';
+          return params.turns;
+        };
+        export const fromTypeImport = (surface: Surface) => {
+          'use gpu';
+          return surface.position;
+        };
+        export const fromTypeAlias = (value: Alias) => {
+          'use gpu';
+          return value.bias;
+        };
+        export const fromGlobal = (values: Float32Array) => {
+          'use gpu';
+          return values[0];
+        };
+        export const fromInferOfType = (options: d.Infer<typeof Options>) => {
+          'use gpu';
+          return options.turns;
+        };
+        export const fromValueImport = (genome: Genome) => {
+          'use gpu';
+          return genome.bias;
+        };
+        export const fromLocal = (local: d.InferGPU<typeof Local>) => {
+          'use gpu';
+          return local.value;
+        };
+      `,
+    );
+
+    const probeArguments = (name: string) =>
+      result.symbols.find((symbol) => symbol.name === name)?.probeArguments;
+    expect(probeArguments('fromInterface')).toBeUndefined();
+    expect(probeArguments('fromTypeAlias')).toBeUndefined();
+    expect(probeArguments('fromGlobal')).toBeUndefined();
+    // The runtime re-imports a type-only import's value twin from its module.
+    expect(probeArguments('fromTypeImport')).toEqual(['module.Surface']);
+    expect(probeArguments('fromInferOfType')).toEqual(['module.Options']);
+    expect(probeArguments('fromValueImport')).toEqual(['module.Genome']);
+    expect(probeArguments('fromLocal')).toEqual(['module.Local']);
+  });
+
+  it('treats a tgpu.fn shell as a shell and its applications as helpers', () => {
+    const result = discoverTypeGpuModule(
+      '/project/oklab.ts',
+      `
+        const patternFn = tgpu.fn([d.vec2f, d.vec3f], d.f32);
+        const checkers = patternFn((uv) => {
+          'use gpu';
+          return uv.x;
+        });
+        const raw = patternFn\`(uv, lab) { return uv.x; }\`;
+      `,
+    );
+
+    expect(result.symbols.map(({ name, role }) => ({ name, role }))).toEqual([
+      { name: 'checkers', role: 'shader-helper' },
+      { name: 'raw', role: 'shader-helper' },
+    ]);
+    expect(
+      result.symbols.find((symbol) => symbol.name === 'checkers')?.probeArguments,
+    ).toEqual(['ctx.d.vec2f', 'ctx.d.vec3f']);
+  });
+
+  it('infers a bitcast source schema and does not trace a parameter through a call result', () => {
+    const result = discoverTypeGpuModule(
+      '/project/bits.ts',
+      `
+        const orderedFloatBits = (value: number) => {
+          'use gpu';
+          const bits = std.bitcast(d.f32, d.u32)(value);
+          return (bits & 0x80000000) !== 0 ? bits ^ 0xffffffff : bits;
+        };
+        const floatFromBits = (ordered: number) => {
+          'use gpu';
+          return std.bitcast(d.u32, d.f32)(ordered);
+        };
+      `,
+    );
+
+    const probeArguments = (name: string) =>
+      result.symbols.find((symbol) => symbol.name === name)?.probeArguments;
+    expect(probeArguments('orderedFloatBits')).toEqual(['ctx.d.f32']);
+    expect(probeArguments('floatFromBits')).toEqual(['ctx.d.u32']);
+  });
+
   it('does not mistake an unconstrained erased type parameter for a module schema', () => {
     const result = discoverTypeGpuModule(
       '/project/unbounded.ts',

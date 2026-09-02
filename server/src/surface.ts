@@ -424,7 +424,7 @@ export function createInlayHints(
         const pipelineState = firstTarget.pipelineState;
         const structural = firstTarget.report.ok
           ? undefined
-          : structuralTargetDiagnostic(firstTarget.report);
+          : uninspectableTargetDiagnostic(firstTarget.report);
         const details = uniqueStrings([
           resource?.bindings?.length
             ? plural(resource.bindings.length, 'binding')
@@ -700,13 +700,22 @@ export function createDiagnostics(
       // target just cannot be inspected standalone — the code is not wrong.
       // Hint severity keeps it out of the Problems panel and off the red path.
       const structural = structuralTargetDiagnostic(target.report);
+      const environmental = structural ? undefined : environmentTargetDiagnostic(target.report);
       const diagnostic: Diagnostic = {
         range: tokenRange ?? fallbackSymbol.range,
-        severity: structural ? DiagnosticSeverity.Hint : DiagnosticSeverity.Error,
+        severity: structural || environmental
+          ? DiagnosticSeverity.Hint
+          : DiagnosticSeverity.Error,
         source: 'TypeGPU Inspector',
-        code: structural ? 'target-not-standalone' : 'target-resolution',
+        code: structural
+          ? 'target-not-standalone'
+          : environmental
+          ? 'inspection-unavailable'
+          : 'target-resolution',
         message: structural
           ? `${target.target.label} is not inspectable standalone: ${targetFailure(target.report)}`
+          : environmental
+          ? `${target.target.label} could not be inspected here: ${targetFailure(target.report)}`
           : `${target.target.label}: ${targetFailure(target.report)}${
             crossFileSuffix(failureMapping?.relatedSource)
           }`,
@@ -1281,7 +1290,7 @@ function appendTarget(
 ): void {
   const { report, analysis } = target;
   const level = effectiveHoverLevel(options);
-  const structural = report.ok ? undefined : structuralTargetDiagnostic(report);
+  const structural = report.ok ? undefined : uninspectableTargetDiagnostic(report);
   const status = report.ok
     ? report.resource && analysis
       ? '✓ Resource inspected and WGSL validated'
@@ -1293,7 +1302,9 @@ function appendTarget(
       ? '✓ Compute pipeline validated'
       : '✓ WGSL validated'
     : structural
-    ? '◌ Not inspectable standalone'
+    ? ENVIRONMENT_TARGET_DIAGNOSTIC_CODES.has(structural.code)
+      ? '◌ Inspection unavailable here'
+      : '◌ Not inspectable standalone'
     : '✗ Inspection failed';
   lines.push('', `**${status}**`);
 
@@ -2991,7 +3002,45 @@ const STRUCTURAL_TARGET_DIAGNOSTIC_CODES = new Set([
   'unsupported-internal-resource',
   'pipeline-resource-shape',
   'raw-webgpu-pipeline-unsupported',
+  'three-tsl-wrapper-required',
+  'webgl-backend-not-inspectable',
+  // The inspector's own probe could not be assembled: a schema selector it
+  // synthesized did not resolve to a callable schema. Never the code's fault.
+  'selector-not-resolved',
+  'probe-argument-not-synthesizable',
 ]);
+
+// The harness, not the target, failed: the browser lacked a capability the
+// module needs at import (image decoding, camera), the device was lost, or
+// the run timed out. The code may well be fine, so these never go red.
+const ENVIRONMENT_TARGET_DIAGNOSTIC_CODES = new Set([
+  'browser-capability-unavailable',
+  'canvas-dom-setup-required',
+  'gpu-feature-unavailable',
+  'module-import-failed',
+  'webgpu-device-lost',
+  'inspection-timeout',
+  'webgpu-validation-timeout',
+  'result-serialization-failed',
+]);
+
+/** The diagnostic explaining why the harness could not inspect this target, if that is what failed. */
+function environmentTargetDiagnostic(
+  report: InspectorTargetReport,
+): InspectorDiagnostic | undefined {
+  const failure = (report.diagnostics ?? []).find((diagnostic) =>
+    !isInformationalDiagnostic(diagnostic));
+  return failure && ENVIRONMENT_TARGET_DIAGNOSTIC_CODES.has(failure.code)
+    ? failure
+    : undefined;
+}
+
+/** A structural or environmental failure: the target is not wrong, it just could not be inspected here. */
+function uninspectableTargetDiagnostic(
+  report: InspectorTargetReport,
+): InspectorDiagnostic | undefined {
+  return structuralTargetDiagnostic(report) ?? environmentTargetDiagnostic(report);
+}
 
 /** The diagnostic explaining why this target is not standalone-inspectable, if that is what failed. */
 function structuralTargetDiagnostic(
@@ -3011,7 +3060,9 @@ function structuralHintLabel(code: string): string {
     case 'wrapper-required':
       return 'needs wrapper';
     default:
-      return 'not standalone';
+      return ENVIRONMENT_TARGET_DIAGNOSTIC_CODES.has(code)
+        ? 'inspection unavailable'
+        : 'not standalone';
   }
 }
 

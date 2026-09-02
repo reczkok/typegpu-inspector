@@ -21,6 +21,8 @@ const WRAPPER_REQUIRED_PATTERN = /because it expects arguments/;
 // slots: pipeline-unwrap failures and serialized errors bypass the engine.
 const MISSING_SLOT_PATTERN = /Missing value for 'slot:([^']+)'/;
 const SELECTOR_NOT_RESOLVED_PATTERN = /Could not resolve selector/;
+const PROBE_SCHEMA_PATTERN = /Cannot synthesize a zero value for schema/;
+const THREE_TSL_NODE_PATTERN = /Cannot access fromTSL\(\) nodes on the CPU/;
 const VALIDATION_SCOPE_TIMEOUT_PATTERN = /Timed out while reading WebGPU validation scope/;
 const INTERNAL_RESOURCE_FAILURE_PATTERN = /Unknown resource type|Unresolvable internal value/;
 const NOT_RESOLVABLE_PATTERN = /is not resolvable/;
@@ -145,6 +147,26 @@ const TARGET_DIAGNOSTIC_RULES: TargetDiagnosticRule[] = [
       message: 'TypeGPU resolution failed inside a random/noise helper.',
       hint:
         'This is likely a TypeGPU/library resolution issue rather than missing DOM setup. A smaller wrapper around the random/noise call is the best minimal reproduction.',
+      valueSummary,
+    }),
+  },
+  {
+    matches: (message) => THREE_TSL_NODE_PATTERN.test(message),
+    create: (_message, _value, _kind, valueSummary) => ({
+      code: 'three-tsl-wrapper-required',
+      message:
+        'The selected helper reads Three.js TSL nodes, which only resolve inside a toTSL() wrapper.',
+      hint: 'Inspect the toTSL(...) node or material that calls this helper instead.',
+      valueSummary,
+    }),
+  },
+  {
+    matches: (message) => PROBE_SCHEMA_PATTERN.test(message),
+    create: (message, _value, _kind, valueSummary) => ({
+      code: 'probe-argument-not-synthesizable',
+      message,
+      hint:
+        'The inspector could not build a zero value for one of the probe arguments, so the helper was not called. Inspect an authored caller or pipeline that passes real arguments, or pass probeArgumentPlan with a callable schema.',
       valueSummary,
     }),
   },

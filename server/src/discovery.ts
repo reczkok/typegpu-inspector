@@ -1193,7 +1193,10 @@ function computeFunctionRole(node: ts.FunctionLikeDeclaration): TypeGpuRole {
     callee.endsWith('.createBindGroup'))) {
     return 'resource-factory';
   }
-  return containsUseGpuDirective(node) ? 'shader-helper' : 'unknown';
+  // Only a directive in this function's own prologue makes it a shader
+  // helper. A CPU factory that merely defines 'use gpu' closures (geometry
+  // builders, pipeline setup) cannot be called from a probe body.
+  return hasOwnUseGpuDirective(node) ? 'shader-helper' : 'unknown';
 }
 
 function inferExpressionRole(expression: ts.Expression): TypeGpuRole {
@@ -1235,15 +1238,62 @@ function computeExpressionRole(expression: ts.Expression): TypeGpuRole {
   }
 
   if (ts.isTaggedTemplateExpression(value)) {
-    return roleFromFactoryChain(readCallee(value.tag)) ?? 'unknown';
+    return roleFromFactoryChain(readCallee(value.tag)) ??
+      (isFnShellApplication(value) ? 'shader-helper' : 'unknown');
   }
 
   if (ts.isCallExpression(value)) {
+    // `tgpu.fn(argTypes, returnType)` alone is a shell awaiting an
+    // implementation, not a resolvable function.
+    if (isFnShellCall(value)) return 'unknown';
     const direct = roleFromFactoryChain(readCallee(value.expression));
     if (direct) return direct;
+    if (isFnShellApplication(value)) return 'shader-helper';
   }
 
   return 'unknown';
+}
+
+/** `tgpu.fn(...)` called directly, without the implementation call. */
+function isFnShellCall(value: ts.CallExpression): boolean {
+  const callee = unwrap(value.expression);
+  if (ts.isCallExpression(callee)) return false;
+  const name = readCallee(callee);
+  return name !== undefined && isTgpuFactoryCall(name, 'fn');
+}
+
+/** `shell(impl)` or `shell\`...\`` where `shell` is a top-level `tgpu.fn(...)` shell. */
+function isFnShellApplication(
+  value: ts.CallExpression | ts.TaggedTemplateExpression,
+): boolean {
+  return findFnShell(value) !== undefined;
+}
+
+const fnShellCache = new WeakMap<ts.SourceFile, Map<string, ts.CallExpression>>();
+
+/** The `tgpu.fn(...)` shell call behind the callee of `value`, if it names one. */
+function findFnShell(
+  value: ts.CallExpression | ts.TaggedTemplateExpression,
+): ts.CallExpression | undefined {
+  const callee = unwrap(ts.isCallExpression(value) ? value.expression : value.tag);
+  if (!ts.isIdentifier(callee)) return undefined;
+  const sourceFile = value.getSourceFile();
+  let shells = fnShellCache.get(sourceFile);
+  if (!shells) {
+    shells = new Map();
+    for (const statement of sourceFile.statements) {
+      if (!ts.isVariableStatement(statement)) continue;
+      for (const declaration of statement.declarationList.declarations) {
+        if (!ts.isIdentifier(declaration.name) || !declaration.initializer) continue;
+        const initializer = unwrap(declaration.initializer);
+        if (ts.isCallExpression(initializer) && isFnShellCall(initializer)) {
+          shells.set(declaration.name.text, initializer);
+        }
+      }
+    }
+    fnShellCache.set(sourceFile, shells);
+  }
+  return shells.get(callee.text);
 }
 
 function isResourceCollectionExpression(value: ts.Expression): boolean {
@@ -1580,7 +1630,7 @@ function probeArgumentsFromExpression(
         ? value.expression
         : isShellCallee(readCallee(value.expression))
           ? value
-          : undefined;
+          : findFnShell(value);
     const argList = shellCall?.arguments[0];
     if (argList && ts.isArrayLiteralExpression(argList)) {
       const selectors = argList.elements
@@ -1879,6 +1929,15 @@ function inferNumberParameterSchema(
     ) {
       return short === 'u32' ? 'ctx.d.u32' : 'ctx.d.i32';
     }
+    // `std.bitcast(from, to)(value)`: the parameter has the `from` schema.
+    const bitcastSource = bitcastSourceSchema(node);
+    if (
+      bitcastSource &&
+      node.arguments.length === 1 &&
+      isParameterReference(node.arguments[0]!, parameterName)
+    ) {
+      return bitcastSource;
+    }
     const integerArgument =
       short === 'textureSampleLevel' &&
         node.arguments.length >= 5 &&
@@ -1919,6 +1978,14 @@ function inferNumberParameterSchema(
   return inferred;
 }
 
+function bitcastSourceSchema(node: ts.CallExpression): 'ctx.d.i32' | 'ctx.d.u32' | undefined {
+  const inner = unwrap(node.expression);
+  if (!ts.isCallExpression(inner) || inner.arguments.length !== 2) return undefined;
+  if (readCallee(inner.expression)?.split('.').at(-1) !== 'bitcast') return undefined;
+  const from = readCallee(inner.arguments[0]!)?.split('.').at(-1);
+  return from === 'u32' ? 'ctx.d.u32' : from === 'i32' ? 'ctx.d.i32' : undefined;
+}
+
 function isBitwiseOperator(kind: ts.SyntaxKind): boolean {
   return kind === ts.SyntaxKind.AmpersandToken ||
     kind === ts.SyntaxKind.BarToken ||
@@ -1942,6 +2009,9 @@ function containsParameterReference(
       if (containsParameterReference(initializer, parameterName, aliases, seen)) return true;
     }
   }
+  // A call's result has its own type (`bitcast(f32, u32)(value)` is a u32
+  // whatever `value` is), so an operator on it says nothing about the parameter.
+  if (ts.isCallExpression(node)) return false;
   return ts.forEachChild(node, (child) =>
     containsParameterReference(child, parameterName, aliases, seen) || undefined
   ) ?? false;
@@ -2243,13 +2313,61 @@ function schemaSelectorFromType(
     return `ctx.d.${runtimeSchemaName(scalarOrVector[1]!)}`;
   }
 
+  // A module-rooted selector must name a binding the probe can turn into a
+  // value: a variable, or an import (the runtime re-imports a type-only
+  // import's value twin). An interface, type alias, class, or global
+  // (Float32Array) would reach the probe as undefined or a non-schema callable.
   const infer = /^(?:d\.)?Infer(?:GPU)?<typeof([A-Za-z_$][\w$]*)>$/.exec(text);
-  if (infer) return `module.${infer[1]}`;
+  if (infer) {
+    return runtimeValueNames(sourceFile).has(infer[1]!) ? `module.${infer[1]}` : undefined;
+  }
 
   if (/^[A-Za-z_$][\w$]*$/.test(text)) {
-    return typeParameterNames.has(text) ? undefined : `module.${text}`;
+    return !typeParameterNames.has(text) && runtimeValueNames(sourceFile).has(text)
+      ? `module.${text}`
+      : undefined;
   }
   return undefined;
+}
+
+const runtimeValueNamesCache = new WeakMap<ts.SourceFile, Set<string>>();
+
+/** Top-level names a probe can resolve to a value: variables and imports. */
+function runtimeValueNames(sourceFile: ts.SourceFile): Set<string> {
+  const cached = runtimeValueNamesCache.get(sourceFile);
+  if (cached) return cached;
+  const names = new Set<string>();
+  const addBinding = (name: ts.BindingName): void => {
+    if (ts.isIdentifier(name)) {
+      names.add(name.text);
+      return;
+    }
+    for (const element of name.elements) {
+      if (ts.isBindingElement(element)) addBinding(element.name);
+    }
+  };
+  for (const statement of sourceFile.statements) {
+    if (ts.isVariableStatement(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        addBinding(declaration.name);
+      }
+      continue;
+    }
+    if (ts.isImportDeclaration(statement)) {
+      const clause = statement.importClause;
+      if (!clause) continue;
+      if (clause.name) names.add(clause.name.text);
+      const bindings = clause.namedBindings;
+      if (!bindings) continue;
+      if (ts.isNamespaceImport(bindings)) {
+        names.add(bindings.name.text);
+        continue;
+      }
+      for (const element of bindings.elements) names.add(element.name.text);
+    }
+  }
+  runtimeValueNamesCache.set(sourceFile, names);
+  return names;
 }
 
 function schemaSelectorFromExpression(
@@ -2375,6 +2493,21 @@ function unwrap(expression: ts.Expression): ts.Expression {
     current = current.expression;
   }
   return current;
+}
+
+function hasOwnUseGpuDirective(node: ts.FunctionLikeDeclaration): boolean {
+  const body = node.body;
+  if (!body || !ts.isBlock(body)) return false;
+  for (const statement of body.statements) {
+    if (
+      !ts.isExpressionStatement(statement) ||
+      !ts.isStringLiteral(statement.expression)
+    ) {
+      return false;
+    }
+    if (statement.expression.text === 'use gpu') return true;
+  }
+  return false;
 }
 
 function containsUseGpuDirective(node: ts.Node): boolean {

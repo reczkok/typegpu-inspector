@@ -40,6 +40,17 @@ describe('foldModuleFailures', () => {
     expect(folded).toEqual([other, failure(20, '', 'Not connected', 'runtime-inspection')]);
   });
 
+  it('folds an environment hint shared by every target, dropping the target label', () => {
+    const text = 'A browser capability required during module import was unavailable.';
+    const hint = (line: number, label: string): CliDiagnostic => ({
+      ...failure(line, label, text, 'inspection-unavailable'),
+      severity: 'hint',
+      message: `${label} could not be inspected here: ${text}`,
+    });
+    const folded = foldModuleFailures([hint(20, 'View'), hint(68, 'BlurParams')], 2);
+    expect(folded).toEqual([{ ...hint(20, 'View'), message: text }]);
+  });
+
   it('never folds a single-target run', () => {
     const only = [failure(20, 'View', text)];
     expect(foldModuleFailures(only, 1)).toEqual(only);

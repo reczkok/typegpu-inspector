@@ -321,6 +321,7 @@ const TIMEOUT_DIAGNOSTIC_CODES = new Set([
 const ENVIRONMENT_DIAGNOSTIC_CODES = new Set([
   'browser-capability-unavailable',
   'canvas-dom-setup-required',
+  'gpu-feature-unavailable',
   'module-import-failed',
   'webgpu-device-lost',
 ]);
@@ -328,11 +329,14 @@ const SOURCE_DIAGNOSTIC_CODES = new Set([
   'cpu-function-not-inspectable',
   'not-shader-resolvable',
   'plain-object-not-inspectable',
+  'probe-argument-not-synthesizable',
   'reference-wrapper-required',
   'selector-not-resolved',
   'slot-binding-required',
+  'three-tsl-wrapper-required',
   'unsupported-internal-resource',
   'value-not-inspectable',
+  'webgl-backend-not-inspectable',
   'wrapper-required',
 ]);
 

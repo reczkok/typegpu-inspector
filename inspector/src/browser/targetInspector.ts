@@ -22,6 +22,11 @@ import {
   satisfyAndAttempt,
   slotValueProvisions,
 } from './engine/engine.ts';
+import {
+  partitionUnavailableExtensionErrors,
+  unavailableExtensionFeature,
+  wgslExtensionsFor,
+} from './wgslExtensions.ts';
 import { collectShapeProvenances } from './engine/ledger.ts';
 import type {
   EngineContext,
@@ -230,6 +235,7 @@ export async function inspectPipelineTargets(
       const targetCalls = recorder.calls.slice(callStart);
       annotateCalls(targetCalls, report.label, report.kind);
       report.callIds = targetCalls.map((call) => call.id);
+      reclassifyUnavailableExtensionErrors(report, recorder.device.features);
       report.compilationSummary = summarizeCompilationMessages(report.compilationMessages);
       const ledger = [...(target.ledger ?? []), ...engine.ledger];
       if (ledger.length > 0) {
@@ -273,11 +279,24 @@ async function validateResourceTarget(
     try {
       await validateResolvableTarget(resolvable[0], report, recorder, strictNames, waitBudget);
     } catch (error) {
-      addTargetDiagnostics(report, [{
-        code: 'resource-wgsl-unavailable',
-        message: 'Structural resource inspection succeeded, but standalone WGSL resolution did not.',
-        hint: serializeError(error).message,
-      }]);
+      const message = serializeError(error).message;
+      const missingFeature = unavailableExtensionFeature(message, recorder.device.features);
+      addTargetDiagnostics(report, [
+        missingFeature
+          ? createFeatureUnavailableDiagnostic([missingFeature])
+          : isWebGlBackedResource(value, message)
+          ? {
+            code: 'webgl-backend-not-inspectable',
+            message:
+              'The selected resource belongs to a WebGL fallback root; it has no standalone WGSL to validate.',
+            hint: 'Inspect the module with a WebGPU root, or rely on the structural report.',
+          }
+          : {
+            code: 'resource-wgsl-unavailable',
+            message: 'Structural resource inspection succeeded, but standalone WGSL resolution did not.',
+            hint: message,
+          },
+      ]);
       report.compilationMessages = [];
       delete report.wgsl;
       delete report.wgslSize;
@@ -577,6 +596,7 @@ async function validateResolvableTarget(
       statementRecorder = recording?.recorder;
       return tgpu.resolveWithContext([value as never], {
         names: strictNames ? 'strict' : 'random',
+        enableExtensions: wgslExtensionsFor(device.features),
         ...(recording ? { unstable_shaderGenerator: recording.generator } : {}),
         ...(provisions.length > 0
           ? {
@@ -771,6 +791,51 @@ function dedupeMessages(messages: ShaderCompilationMessage[]): ShaderCompilation
     seen.add(key);
     return true;
   });
+}
+
+/**
+ * Compiler errors about an extension this device cannot enable become one
+ * environment diagnostic: the shader is written for hardware the inspecting
+ * GPU does not have, which says nothing about the code.
+ */
+function reclassifyUnavailableExtensionErrors(
+  report: TypeGpuTargetReport,
+  features: Iterable<string>,
+): void {
+  const { messages, unavailableFeatures } = partitionUnavailableExtensionErrors(
+    report.compilationMessages,
+    features,
+  );
+  // TypeGPU may also report the compiler's complaint as the thrown error.
+  const fromError = report.error
+    ? unavailableExtensionFeature(report.error.message, features)
+    : undefined;
+  const all = fromError && !unavailableFeatures.includes(fromError)
+    ? [...unavailableFeatures, fromError]
+    : unavailableFeatures;
+  if (all.length === 0) return;
+  report.compilationMessages = messages;
+  report.ok = false;
+  addTargetDiagnostics(report, [createFeatureUnavailableDiagnostic(all)]);
+}
+
+function createFeatureUnavailableDiagnostic(features: readonly string[]): TargetDiagnostic {
+  const list = features.map((feature) => `'${feature}'`).join(', ');
+  return {
+    code: 'gpu-feature-unavailable',
+    message: `The inspecting GPU adapter does not support ${list}, which this shader requires.`,
+    hint:
+      'The shader could not be compiled here; validate it on hardware that offers the feature, or inspect the code path the app takes without it.',
+  };
+}
+
+/** A `@typegpu/gl` resource: it or its texture carries the WebGL context. */
+function isWebGlBackedResource(value: unknown, failureMessage: string): boolean {
+  if (/\[@typegpu\/gl\]/.test(failureMessage)) return true;
+  const hasGl = (candidate: unknown): boolean =>
+    typeof candidate === 'object' && candidate !== null &&
+    typeof readProperty(candidate, 'gl') === 'object' && readProperty(candidate, 'gl') !== null;
+  return hasGl(value) || hasGl(readProperty(value, 'texture'));
 }
 
 function hasCompilationErrors(messages: ShaderCompilationMessage[]): boolean {

@@ -1036,6 +1036,41 @@ fn main() {
     expect(markdown).toContain('The standalone helper had no pipeline context.');
   });
 
+  it('renders environment failures as hints, never red errors', async () => {
+    const discovered = discoverTypeGpuModule(
+      '/workspace/blur.ts',
+      `
+        const blurred = tgpu.fn([], d.f32)(impl);
+      `,
+    );
+    const inspection = await materializeInspection(
+      '/workspace',
+      '/workspace/blur.ts',
+      1,
+      discovered,
+      {
+        ok: false,
+        targets: [{
+          label: 'blurred',
+          kind: 'resolvable',
+          ok: false,
+          compilationMessages: [],
+          diagnostics: [{
+            code: 'browser-capability-unavailable',
+            message: 'A browser capability required during module import was unavailable.',
+            hint: 'The source image could not be decoded.',
+          }],
+        }],
+      },
+    );
+
+    const diagnostics = createDiagnostics('file:///workspace/blur.ts', discovered, inspection);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]?.severity).toBe(DiagnosticSeverity.Hint);
+    expect(diagnostics[0]?.code).toBe('inspection-unavailable');
+    expect(diagnostics[0]?.message).toContain('could not be inspected here');
+  });
+
   it('renders structural not-standalone conditions as hints, never red errors', async () => {
     const discovered = discoverTypeGpuModule(
       '/workspace/slots.ts',
