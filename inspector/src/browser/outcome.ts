@@ -9,6 +9,8 @@ const UNSUPPORTED_CODES = new Set([
   'plain-object-not-inspectable',
   'cpu-function-not-inspectable',
   'three-node-not-inspectable',
+  'three-tsl-wrapper-required',
+  'webgl-backend-not-inspectable',
   'raw-webgpu-pipeline-unsupported',
   'unsupported-internal-resource',
   'pipeline-resource-shape',
@@ -20,9 +22,11 @@ const BLOCKED_CODES = new Set([
   'wrapper-required',
   'reference-wrapper-required',
   'selector-not-resolved',
+  'probe-argument-not-synthesizable',
   'module-import-failed',
   'canvas-dom-setup-required',
   'browser-capability-unavailable',
+  'gpu-feature-unavailable',
   'webgpu-device-lost',
 ]);
 

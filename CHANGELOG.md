@@ -6,6 +6,38 @@ and released together. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.3] - 2026-09-02
+
+### Fixed
+
+- A CPU factory that only *defines* `'use gpu'` closures (a geometry builder
+  such as `spring()`, a kernel factory, a React component) was classified as
+  a shader helper and probed standalone, which either failed to synthesize
+  its interface-typed parameter (`Cannot synthesize a zero value for schema
+  'undefined'`) or reported a CPU function as not resolvable. Only a
+  directive in the function's own prologue makes it a helper now.
+- Probe arguments were synthesized for any bare identifier parameter type.
+  Interfaces, type aliases, classes and globals such as `Float32Array` now
+  yield no probe; variables and imports (including type-only imports, whose
+  value twin the runtime re-imports) still do.
+- A bare `tgpu.fn(argTypes, returnType)` shell was inspected as a function
+  and failed; it is skipped, and applying the shell (`patternFn(impl)`) is
+  now discovered as a helper with the shell's argument schemas.
+- `std.bitcast(from, to)(value)` now infers the parameter from the source
+  schema, and integer inference no longer traces a parameter through a call
+  result, which had turned an `f32` parameter into `u32`.
+- Failures the code cannot cause are hints, not errors: a probe schema the
+  inspector could not synthesize, a helper that reads Three.js TSL nodes
+  outside `toTSL()`, a `@typegpu/gl` WebGL-backed resource, a browser
+  capability missing at import (image decoding), a lost device, an import
+  failure or a timeout. The CLI folds a module-wide environment hint to one
+  line.
+- Shaders using `f16`, `subgroups` and the other `enable` extensions failed
+  to compile standalone. The inspector now requests every extension feature
+  the adapter offers and passes the matching `enableExtensions` to
+  standalone resolution; when the adapter lacks a feature, the compiler
+  error is reported as an environment hint naming the feature.
+
 ## [0.8.2] - 2026-09-01
 
 ### Fixed
@@ -269,6 +301,7 @@ First public release: VS Code Marketplace, and Zed as a dev extension.
 Internal iterations: hover and inlay surface work, discovery and diagnostics
 tuning, packaging experiments. Not published to any store.
 
+[0.8.3]: https://github.com/reczkok/typegpu-inspector/releases/tag/v0.8.3
 [0.8.2]: https://github.com/reczkok/typegpu-inspector/releases/tag/v0.8.2
 [0.8.1]: https://github.com/reczkok/typegpu-inspector/releases/tag/v0.8.1
 [0.8.0]: https://github.com/reczkok/typegpu-inspector/releases/tag/v0.8.0

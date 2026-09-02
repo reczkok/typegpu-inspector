@@ -14,6 +14,7 @@ import {
   normalizeTargets,
   type TypeGpuInspectionTarget,
 } from './targetInspector.ts';
+import { OPTIONAL_EXTENSION_FEATURES } from './wgslExtensions.ts';
 import { isTaggedBindingSource } from './engine/providers.ts';
 import { statementMapGeneratorClass } from './statementMap.ts';
 import type { RecordedBindingRegistry } from './engine/types.ts';
@@ -124,8 +125,13 @@ async function inspectTypegpuModuleInBrowser(
     throw new Error(`Unsupported requested WebGPU features: ${unsupportedFeatures.join(', ')}`);
   }
 
+  // Shader-extension features are opportunistic, the way apps request them:
+  // an f16 helper must compile when the hardware can run it.
+  const optionalFeatures = OPTIONAL_EXTENSION_FEATURES.filter((feature) =>
+    !request.features.includes(feature) && adapter.features.has(feature as GPUFeatureName)
+  );
   const rawDevice = await adapter.requestDevice({
-    requiredFeatures: request.features as GPUFeatureName[],
+    requiredFeatures: [...request.features, ...optionalFeatures] as GPUFeatureName[],
   });
   try {
     const deviceErrors: string[] = [];
