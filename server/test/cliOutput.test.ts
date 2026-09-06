@@ -7,6 +7,7 @@ import {
   formatCheckJson,
   formatCheckText,
   formatDiagnosticLines,
+  foldModuleFailures,
   summarizeCheck,
   toCliDiagnostics,
   type CliFileResult,
@@ -98,6 +99,10 @@ describe('CLI output', () => {
       targets: 2,
       passed: 1,
       failed: 1,
+      blocked: 0,
+      unsupported: 0,
+      notInspected: 0,
+      assumed: 0,
       errors: 1,
       warnings: 1,
       infos: 0,
@@ -227,6 +232,61 @@ describe('CLI output', () => {
       { path: 'src/render.ts', line: 21, column: 16, label: 'render' },
     ]);
     expect(callersOnly.files[0]!.diagnostics[0]?.finding).toEqual({ path: 'src/helpers.ts', line: 7, column: 26 });
+  });
+
+  it('reports one source-attributed import failure while preserving every blocked target', () => {
+    const files: CliFileResult[] = Array.from({ length: 19 }, (_, index) => {
+      const path = `src/importer-${index}.ts`;
+      const targets = index === 0 ? ['one', 'two'] : ['shade'];
+      const diagnostics = targets.map((label): Diagnostic => ({
+        range: layoutHint.range,
+        severity: DiagnosticSeverity.Error,
+        code: 'target-resolution',
+        message: `${label}: Invalid value: NaN`,
+        data: { moduleFailure: {
+          uri: 'file:///workspace/src/config.ts', message: 'Invalid value: NaN',
+          range: { start: { line: 33, character: 4 }, end: { line: 33, character: 4 } },
+        } },
+      }));
+      return { path, targets: targets.map((label) => ({ id: label, label, status: 'blocked' })),
+        diagnostics: foldModuleFailures(toCliDiagnostics(`/workspace/${path}`, diagnostics, cwd), targets.length),
+        elapsedMs: 1 };
+    });
+    const result = summarizeCheck(files, 19, false);
+    expect(result.ok).toBe(false);
+    expect(result.summary).toMatchObject({ errors: 1, targets: 20, blocked: 20, failed: 0 });
+    const all = result.files.flatMap((file) => file.diagnostics);
+    expect(all).toHaveLength(1);
+    expect(all[0]).toMatchObject({ path: 'src/config.ts', line: 34, column: 5,
+      message: 'Invalid value: NaN', affectedModules: files.map((file) => file.path) });
+    const text = formatCheckText(result, { color: false, verbose: false });
+    expect(text).toContain('src/config.ts:34:5: error: Invalid value: NaN');
+    expect(text).toContain('affected modules: src/importer-0.ts, src/importer-1.ts');
+    expect(text.match(/Invalid value: NaN/g)).toHaveLength(1);
+    const json = JSON.parse(formatCheckJson(result));
+    expect(json.files.flatMap((file: CliFileResult) => file.targets)).toHaveLength(20);
+    expect(formatCheckGithub(result, { color: false, verbose: false }))
+      .toContain('::error file=src/config.ts,line=34,col=5,');
+  });
+
+  it('does not merge equal module messages at different source locations or severities', () => {
+    const files: CliFileResult[] = [1, 2, 3, 4].map((index) => ({
+      path: `src/${index}.ts`, targets: [], elapsedMs: 1,
+      diagnostics: [{ path: 'src/config.ts', line: index === 2 ? 2 : 1, column: 1, endLine: 1, endColumn: 1,
+        message: 'bad config', severity: index === 3 ? 'warning' : 'error', code: 'target-resolution', related: [],
+        ...(index === 4 ? {} : { affectedModules: [`src/${index}.ts`] }) }],
+    }));
+    const result = summarizeCheck(files, 1, false);
+    expect(result.summary).toMatchObject({ errors: 3, warnings: 1 });
+  });
+
+  it('explains concrete validation failure from assumptions and empty discovery', () => {
+    const assumed = summarizeCheck([{ path: 'src/a.ts', elapsedMs: 1, diagnostics: [],
+      targets: [{ id: 'a', label: 'a', status: 'ok', outcome: 'passed-with-assumptions' }] }], 1, false);
+    expect(formatCheckText({ ...assumed, ok: false, requireConcrete: true }, { color: false, verbose: false }))
+      .toContain('Concrete validation required: 1 target passed with inspection assumptions.');
+    expect(formatCheckText({ ...summarizeCheck([], 1, false), ok: false, requireConcrete: true },
+      { color: false, verbose: false })).toContain('Concrete validation required, but no targets were found.');
   });
 
   it('renders a bare summary for a clean run', () => {

@@ -2,7 +2,7 @@ import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { resolveInspectorLaunch, resolveNpmInvocation } from '../src/mcpInspector.js';
+import { resolveInspectorLaunch, resolveNpmInvocation, restoreModuleFailureSources } from '../src/mcpInspector.js';
 
 const temporaryDirectories: string[] = [];
 
@@ -236,5 +236,27 @@ describe('npm resolution for the runtime install', () => {
 
     expect(() => resolveNpmInvocation({ PATH: emptyDirectory }, 'linux'))
       .toThrowError(/npm on PATH.*node on PATH.*Environment Doctor/s);
+  });
+});
+
+
+describe('module failure source transport', () => {
+  it('restores targets and evaluation causes against the requested project, not the redacted package root', () => {
+    const sourceLocation = { path: '<packageRoot>/src/config.ts', projectRelativePath: '../packages/shared/src/config.ts', line: 4, column: 9 };
+    const output = restoreModuleFailureSources({ ok: false,
+      targets: [{ label: 'shade', kind: 'resolvable', ok: false, error: { sourceLocation: { ...sourceLocation } } }],
+      causes: [{ id: 'cause', tier: 'module', code: 'module-load-failed', message: 'bad', error: { sourceLocation: { ...sourceLocation } } }],
+    }, '/workspace/app');
+    expect(output.targets?.[0]?.error).toMatchObject({ sourceLocation: { path: '/workspace/packages/shared/src/config.ts' } });
+    expect(output.causes?.[0]?.error).toMatchObject({ sourceLocation: { path: '/workspace/packages/shared/src/config.ts' } });
+  });
+
+  it('does not guess source paths when an older runtime supplies only redacted package locations', () => {
+    const output = restoreModuleFailureSources({ ok: false,
+      targets: [{ label: 'shade', kind: 'resolvable', ok: false, error: {
+        message: 'bad', sourceLocation: { path: '<packageRoot>/src/config.ts', line: 4, column: 9 },
+      } }],
+    }, '/workspace/app');
+    expect(output.targets?.[0]?.error).toEqual({ message: 'bad' });
   });
 });

@@ -1,4 +1,4 @@
-import { join, resolve } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import {
   resolveTypegpuContext,
   type ClientRoot,
@@ -151,6 +151,17 @@ export async function inspectTypegpuTool(
       await runAgentInspection(input, resolvedContext, context.signal),
       resolvedContext,
     );
+    // Dependency resolution may choose a nested package as cwd; transport locations
+    // must remain relative to the caller's original project root.
+    const sourceRoot = input.project?.root
+      ? resolve(context.cwd ?? process.cwd(), input.project.root)
+      : resolvedContext.cwd;
+    for (const error of [...report.targets.map((target) => target.error),
+      ...(report.causes ?? []).map((cause) => cause.error)]) {
+      if (error?.sourceLocation) {
+        error.sourceLocation.projectRelativePath = relative(sourceRoot, error.sourceLocation.path);
+      }
+    }
     const formatted = formatInspectionReport(report, createReportOptions(input));
     const nextActions = [
       ...(report.ok

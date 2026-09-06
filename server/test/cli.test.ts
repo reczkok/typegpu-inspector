@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +12,8 @@ import {
   type InteractiveUi,
 } from '../src/cliInteractive.js';
 import type { InspectionTarget } from '../src/discovery.js';
+import { discoverTypeGpuModule } from '../src/discovery.js';
+import { selectTargets } from '../src/cliSession.js';
 import type { InspectorOutput, InspectorTargetReport } from '../src/protocol.js';
 
 const serverRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -47,8 +49,23 @@ function passingReport(target: InspectionTarget): InspectorTargetReport {
     label: target.label,
     kind: 'resolvable',
     ok: true,
+    outcome: 'passed',
     wgsl: 'fn badWgsl() -> f32 {\n  return 1f;\n}',
     compilationMessages: [],
+  };
+}
+
+function unboundReport(target: InspectionTarget): InspectorTargetReport {
+  return {
+    label: target.label,
+    kind: 'resolvable',
+    ok: false,
+    compilationMessages: [],
+    diagnostics: [{
+      code: 'slot-binding-required',
+      message: `Missing quality binding for ${target.label}.`,
+      hint: 'Bind the slot through a wrapper.',
+    }],
   };
 }
 
@@ -159,6 +176,30 @@ function scriptedUi(actions: Array<string | Cancelled>): { ui: InteractiveUi; tr
 }
 
 describe('CLI', () => {
+  it('matches every requested alias of a shared render target', () => {
+    const path = '/project/shaders.ts';
+    const discovered = discoverTypeGpuModule(path, `
+      import tgpu from 'typegpu';
+      import * as d from 'typegpu/data';
+      export const vertex = tgpu.vertexFn({ out: { position: d.builtin.position } })(() => { 'use gpu'; return { position: d.vec4f() }; });
+      export const fragment = tgpu.fragmentFn({ out: d.vec4f })(() => { 'use gpu'; return d.vec4f(); });
+    `);
+    expect(discovered.targets.some((target) => target.symbolNames.includes('vertex') && target.symbolNames.includes('fragment'))).toBe(true);
+    const result = selectTargets([[path, discovered]], ['vertex', 'fragment']);
+    expect(result.unmatched).toEqual([]);
+  });
+
+  it('offers blocked targets for review without calling them shader failures', async () => {
+    const scripted = scriptedUi(['check', 'failed', 'back', 'quit']);
+    const h = harness((target) => ({ ...unboundReport(target), outcome: 'blocked' }), {
+      stdinIsTTY: true, stdoutIsTTY: true,
+      createInteractiveUi: async () => scripted.ui,
+    });
+    expect(await runCli(['interactive', brokenFixture], h.io)).toBe(0);
+    expect(scripted.transcript.some((line) => line.includes('(resolvable · blocked)'))).toBe(true);
+    expect(scripted.transcript.some((line) => line.includes('0 ok, 1 blocked'))).toBe(true);
+  });
+
   it('wraps long interactive output inside the Clack guide', () => {
     const message =
       "index.ts:222:5: error: blendSprite: Ternary operator '(uv.x > 0.5) ? sampleSprite(uv) : " +
@@ -204,7 +245,7 @@ describe('CLI', () => {
     expect(h.calls).toHaveLength(1);
     expect(scripted.transcript).toContain('What next?: failed');
     expect(scripted.transcript).toContain(
-      'Which target? [failed]: badWgsl  test/fixtures/wgsl-compilation-error.ts:4 (resolvable · failed)',
+      'Which target?: badWgsl  test/fixtures/wgsl-compilation-error.ts:4 (resolvable · failed)',
     );
     const failure = scripted.transcript.find((line) => line.startsWith('failure: '));
     expect(stripVTControlCharacters(failure ?? '')).toMatch(/^failure: 1 error · 1 target \(0 ok, 1 failed\) in 1 file · \d+ms$/);
@@ -212,6 +253,40 @@ describe('CLI', () => {
     expect(report).toBeDefined();
     expect(report).not.toContain('**');
     expect(report).not.toContain('](file://');
+  });
+
+  it('keeps bulk hints compact and only shows the selected target details', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'typegpu-cli-hints-'));
+    const modulePath = join(dir, 'helpers.ts');
+    try {
+      await writeFile(modulePath, [
+        "import tgpu, { d } from 'typegpu';",
+        'export const half = tgpu.fn([d.f32], d.f32)((v) => v / 2);',
+        'export const twice = tgpu.fn([d.f32], d.f32)((v) => v * 2);',
+        'export const broken = tgpu.fn([d.f32], d.f32)((v) => v);',
+      ].join('\n'));
+      const scripted = scriptedUi(['check', 'target', 'check', 'back', 'quit']);
+      const h = harness((target) => target.label === 'broken' ? failingReport(target) : unboundReport(target), {
+        stdinIsTTY: true,
+        stdoutIsTTY: true,
+        createInteractiveUi: async () => scripted.ui,
+      });
+      expect(await runCli(['interactive', modulePath], h.io)).toBe(0);
+      const targetMenu = scripted.transcript.indexOf('What next?: target');
+      const bulk = stripVTControlCharacters(scripted.transcript.slice(0, targetMenu).join('\n'));
+      expect(bulk).toContain('2 hints');
+      expect(bulk).toContain('error:');
+      expect(bulk).toContain('Hint and info details hidden');
+      expect(bulk).not.toContain('hint:');
+      expect(bulk).not.toContain('Missing quality binding');
+      const detail = stripVTControlCharacters(scripted.transcript.slice(targetMenu).join('\n'));
+      expect(detail).toContain('Missing quality binding for half');
+      expect(detail).not.toContain('Missing quality binding for twice');
+      expect(detail).not.toContain('error:');
+      expect(h.calls).toHaveLength(1);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it('rejects an explicit interactive session without a terminal', async () => {
@@ -278,7 +353,7 @@ describe('CLI', () => {
     expect(await runCli(['check', 'test/fixtures', '--target', 'nope', '--quiet'], missing.io)).toBe(1);
     expect(missing.calls).toHaveLength(0);
     expect(missing.stderr()).toContain('No target named "nope"');
-    expect(missing.stdout()).toContain('✔ no targets in 0 files');
+    expect(missing.stdout()).toContain('✖ no targets in 0 files');
   });
 
   it('exits 0 with a one-line summary when everything passes', async () => {
@@ -311,6 +386,96 @@ describe('CLI', () => {
     expect(code).toBe(1);
     expect(h.stdout()).not.toContain('hint:');
     expect(h.stderr()).toBe('');
+  });
+
+  it('hides hints by default without claiming uninspected targets passed', async () => {
+    const h = harness(unboundReport);
+    expect(await runCli(['check', brokenFixture, '--quiet'], h.io)).toBe(1);
+    expect(h.stdout()).not.toContain('hint:');
+    expect(h.stdout()).toContain('0 ok, 1 failed');
+    const detailed = harness(unboundReport);
+    expect(await runCli(['check', brokenFixture, '--severity', 'hint', '--quiet'], detailed.io)).toBe(1);
+    expect(detailed.stdout()).toContain('hint:');
+    expect(detailed.stdout()).toContain('Missing quality binding');
+  });
+
+  it('does not let a display filter disable warnings-as-errors', async () => {
+    const h = harness((target) => ({
+      ...passingReport(target),
+      compilationMessages: [{ type: 'warning', message: 'test warning', lineNum: 2, linePos: 1 }],
+    }));
+    expect(await runCli(['check', brokenFixture, '--warnings-as-errors', '--severity', 'error', '--json'], h.io)).toBe(1);
+    const result = JSON.parse(h.stdout());
+    expect(result.ok).toBe(false);
+    expect(result.summary.warnings).toBe(1);
+    expect(result.files[0].diagnostics).toEqual([]);
+  });
+
+  it('does not report JSON success when a requested target is missing', async () => {
+    const h = harness(passingReport);
+    expect(await runCli(['check', brokenFixture, '-t', 'missing', '--json'], h.io)).toBe(1);
+    expect(JSON.parse(h.stdout())).toMatchObject({ ok: false, unmatchedTargets: ['missing'] });
+  });
+
+  it.each(['blocked', 'unsupported'] as const)('keeps %s separate from shader failures in JSON', async (outcome) => {
+    const h = harness((target) => ({ ...unboundReport(target), outcome }));
+    expect(await runCli(['check', brokenFixture, '--json'], h.io)).toBe(1);
+    const result = JSON.parse(h.stdout());
+    expect(result.files[0].targets[0]).toMatchObject({ status: outcome, outcome });
+    expect(result.files[0].targets[0].notes).toEqual([{
+      code: 'slot-binding-required',
+      message: 'Missing quality binding for badWgsl. Bind the slot through a wrapper.',
+    }]);
+    expect(result.summary.failed).toBe(0);
+    expect(result.summary[outcome]).toBe(1);
+  });
+
+  it('exposes successful inspections that used synthesized assumptions', async () => {
+    const h = harness((target) => ({ ...passingReport(target), outcome: 'passed-with-assumptions' }));
+    expect(await runCli(['check', brokenFixture, '--json'], h.io)).toBe(0);
+    const result = JSON.parse(h.stdout());
+    expect(result.summary.assumed).toBe(1);
+    expect(result.files[0].targets[0].outcome).toBe('passed-with-assumptions');
+  });
+
+  it('preserves a blocked outcome in JSON reports', async () => {
+    const h = harness((target) => ({ ...unboundReport(target), outcome: 'blocked' }));
+    expect(await runCli(['report', brokenFixture, '--json'], h.io)).toBe(1);
+    expect(JSON.parse(h.stdout())[0]).toMatchObject({ status: 'blocked', outcome: 'blocked' });
+  });
+
+  it('lets CI reject assumption-qualified checks even when diagnostics are hidden', async () => {
+    const h = harness((target) => ({ ...passingReport(target), outcome: 'passed-with-assumptions' }));
+    expect(await runCli(['check', brokenFixture, '--require-concrete', '--severity', 'error', '--json'], h.io)).toBe(1);
+    expect(JSON.parse(h.stdout())).toMatchObject({ ok: false, requireConcrete: true, summary: { assumed: 1 } });
+  });
+
+  it('accepts an explicitly validated target in concrete mode', async () => {
+    const h = harness((target) => ({ ...passingReport(target), outcome: 'passed' }));
+    expect(await runCli(['check', brokenFixture, '--require-concrete', '--json'], h.io)).toBe(0);
+    expect(JSON.parse(h.stdout())).toMatchObject({ ok: true, requireConcrete: true });
+  });
+
+  it('does not certify a runtime that omits confidence metadata', async () => {
+    const h = harness((target) => {
+      const { outcome, ...report } = passingReport(target);
+      return report;
+    });
+    expect(await runCli(['check', brokenFixture, '--require-concrete', '--json'], h.io)).toBe(1);
+    expect(JSON.parse(h.stdout())).toMatchObject({ ok: false, summary: { assumed: 1 } });
+  });
+
+  it('does not give an empty CI selection a passing result', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'typegpu-empty-check-'));
+    try {
+      await writeFile(join(directory, 'empty.ts'), 'export const ordinary = 1;');
+      const h = harness(passingReport);
+      expect(await runCli(['check', directory, '--require-concrete', '--json'], h.io)).toBe(1);
+      expect(JSON.parse(h.stdout())).toMatchObject({ ok: false, requireConcrete: true, summary: { targets: 0 } });
+      expect(h.calls).toHaveLength(0);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it('turns a runtime failure into a diagnostic instead of a crash', async () => {
@@ -412,11 +577,11 @@ describe('modules without targets', () => {
     expect(h.calls).toEqual([{ modulePath: resolve(serverRoot, factory), labels: ['<module>'] }]);
     const out = stripVTControlCharacters(h.stdout());
     expect(out).toContain(
-      `${factory}:1:1: error: Resolution of the following tree failed: [module-evaluation]\n    - computeFn:main: undefinedThing is not defined`,
+      `${factory}:1:1: error: Resolution of the following tree failed: [target-resolution]\n    - computeFn:main: undefinedThing is not defined`,
     );
-    expect(out.match(/module-evaluation/g)).toHaveLength(1);
+    expect(out.match(/target-resolution/g)).toHaveLength(1);
     expect(out).not.toContain('console.log');
-    expect(out).toContain('1 error · 1 target (0 ok, 1 failed) in 1 file');
+    expect(out).toContain('1 error · 1 target (0 ok, 1 blocked) in 1 file');
   });
 
   it('count as a module target and carry console output in JSON', async () => {
@@ -431,12 +596,44 @@ describe('modules without targets', () => {
       files: Array<{ targets: Array<{ label: string; kind?: string; status: string }>; console?: unknown }>;
     };
     expect(result.files[0]?.targets).toEqual([
-      { id: 'module', label: 'factory-module.ts', kind: 'module', status: 'ok' },
+      expect.objectContaining({ id: 'module', label: 'factory-module.ts', kind: 'module', status: 'ok', outcome: 'passed-with-assumptions' }),
     ]);
     expect(result.files[0]?.console).toEqual([
       { type: 'log', text: 'factory ran 42', count: 3 },
       { type: 'warn', text: 'careful' },
     ]);
+  });
+
+  it('attributes evaluated module failures once despite duplicate page errors', async () => {
+    const message = 'Invalid config: NaN';
+    const h = harness(passingReport, {}, () => ({ ok: false,
+      causes: [{ id: 'cause', tier: 'module', code: 'module-load-failed', message,
+        error: { message, sourceLocation: { path: resolve(serverRoot, 'src/config.ts'), line: 34, column: 9 } } }],
+      pageErrors: [`Error: ${message}\n    at config.ts:34:9`],
+    }));
+    expect(await runCli(['check', factory, '--evaluate', '--json', '--quiet'], h.io)).toBe(1);
+    const result = JSON.parse(h.stdout());
+    expect(result.summary).toMatchObject({ errors: 1, blocked: 1, failed: 0 });
+    expect(result.files[0].diagnostics).toEqual([expect.objectContaining({ path: 'src/config.ts', line: 34,
+      column: 9, message, affectedModules: [factory] })]);
+  });
+
+  it('keeps evaluation environment limits blocked with an explanation after filtering hints', async () => {
+    const h = harness(passingReport, {}, () => ({ ok: false,
+      causes: [{ id: 'cause', tier: 'environment', code: 'browser-capability-unavailable', message: 'Node-only APIs are unavailable.' }],
+    }));
+    expect(await runCli(['check', factory, '--evaluate', '--json', '--quiet'], h.io)).toBe(1);
+    const result = JSON.parse(h.stdout());
+    expect(result.summary).toMatchObject({ errors: 0, hints: 1, blocked: 1, failed: 0 });
+    expect(result.files[0].diagnostics).toEqual([]);
+    expect(result.files[0].targets[0].notes).toContainEqual({ code: 'browser-capability-unavailable', message: 'Node-only APIs are unavailable.' });
+  });
+
+  it('does not treat successful module evaluation as concrete shader validation', async () => {
+    const h = harness(passingReport);
+    expect(await runCli(['check', factory, '--evaluate', '--require-concrete', '--json', '--quiet'], h.io)).toBe(1);
+    const result = JSON.parse(h.stdout());
+    expect(result).toMatchObject({ ok: false, requireConcrete: true, summary: { assumed: 1, passed: 1 } });
   });
 
   it('print console output with --console', async () => {

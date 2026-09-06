@@ -774,8 +774,11 @@ function createSymbolTargetLines(
           )}, ${JSON.stringify(schemaLabel)}, roots), ${JSON.stringify(schemaLabel)});`,
         );
         if (ref) {
+          // Take the reference directly from a typed constructor expression.
+          // An intermediate scalar variable becomes an alias in TGSL, and
+          // taking a reference to that alias is illegal even when declared let.
           const refLocal = `__typegpuMcpProbeRef${index}_${argumentIndex}`;
-          probePrelude.push(`let ${refLocal} = ${local}();`);
+          probePrelude.push(`const ${refLocal} = d.ref(${local}());`);
           return refLocal;
         }
         return `${local}()`;

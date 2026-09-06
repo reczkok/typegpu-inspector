@@ -28,6 +28,9 @@ const BLOCKED_CODES = new Set([
   'browser-capability-unavailable',
   'gpu-feature-unavailable',
   'webgpu-device-lost',
+  'inspection-timeout',
+  'webgpu-validation-timeout',
+  'result-serialization-failed',
 ]);
 
 export function inferTargetOutcome(input: {
@@ -65,6 +68,10 @@ function hasInspectionAssumptions(entries: LedgerEntry[] | undefined): boolean {
     entry.tier !== 'environment' &&
     (
       entry.provider === 'synthesis' ||
+      entry.provider === 'module-scope' ||
+      entry.provider === 'import-scope' ||
+      entry.provider === 'importer-scope' ||
+      entry.provider === 'recorded-app-bindings' ||
       (
         entry.provider === 'user-explicit' &&
         (entry.kind === 'argument-values' || entry.kind === 'slot-value')

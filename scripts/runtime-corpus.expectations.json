@@ -11,10 +11,6 @@
         "vertexShader": {
           "outcome": "blocked",
           "codes": ["wrapper-required"]
-        },
-        "App": {
-          "outcome": "unsupported",
-          "codes": ["cpu-function-not-inspectable"]
         }
       }
     },
@@ -35,24 +31,24 @@
       "modulePath": "src/examples/simulation/fluid-with-atomics/index.ts",
       "targets": {
         "flowDown": {
-          "outcome": "blocked",
-          "codes": ["reference-wrapper-required"]
+          "outcome": "passed-with-assumptions",
+          "codes": []
         },
         "flowSidewaysTo": {
-          "outcome": "blocked",
-          "codes": ["reference-wrapper-required"]
+          "outcome": "passed-with-assumptions",
+          "codes": []
         },
         "flowLeft": {
-          "outcome": "blocked",
-          "codes": ["reference-wrapper-required"]
+          "outcome": "passed-with-assumptions",
+          "codes": []
         },
         "flowRight": {
-          "outcome": "blocked",
-          "codes": ["reference-wrapper-required"]
+          "outcome": "passed-with-assumptions",
+          "codes": []
         },
         "flowUp": {
-          "outcome": "blocked",
-          "codes": ["reference-wrapper-required"]
+          "outcome": "passed-with-assumptions",
+          "codes": []
         }
       }
     },

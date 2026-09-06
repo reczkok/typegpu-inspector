@@ -48,7 +48,7 @@ accessors, GPU variables, and collections of them.
 
 ```sh
 git clone https://github.com/reczkok/typegpu-inspector.git
-cd typegpu-inspector && git checkout v0.8.3
+cd typegpu-inspector && git checkout v0.8.4
 ```
 
 Then run `zed: install dev extension` and pick that folder. Zed builds it
@@ -161,11 +161,25 @@ directory. Playwright caches browsers separately in
 
 The language server package is also a CLI, for shells, CI, and agents that
 run in a terminal. It uses the same discovery, runtime, and source mapping as
-the editor, so it prints exactly the diagnostics the editor shows:
+the editor, with repeated source failures grouped across modules:
 
 ```sh
 npx -p typegpu-inspector-language-server typegpu-inspector check src
 ```
+
+Discovery is exploratory: its summary distinguishes shader failures, blocked
+or unsupported checks, and successful checks made with inspection assumptions.
+Hints are counted but hidden by default; `--severity hint` shows their details.
+For CI, export a configured pipeline or caller fixture and select it explicitly:
+
+```sh
+typegpu-inspector check test/shaders.ts -t configuredPipeline --require-concrete --json
+```
+
+`--require-concrete` rejects assumptions and empty selections as well as errors
+and incomplete checks. A pass validates that configuration's generated WGSL and
+pipeline creation. It does not test rendered output or every application branch.
+Use `report` to inspect the provenance ledger and missing setup.
 
 ```
 src/pbr.ts:98:5: error: shade: uniformity … — in shade (pbr.ts:98) via evaluateLight [wgsl-compilation]

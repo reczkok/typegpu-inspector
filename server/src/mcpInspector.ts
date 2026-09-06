@@ -145,7 +145,7 @@ export class RuntimeInspectorClient {
         maxTotalTimeout: settings.timeoutMs + ESTABLISHMENT_GRACE_MS,
       },
     );
-    return readInspectorOutput(result);
+    return restoreModuleFailureSources(readInspectorOutput(result), settings.projectRoot ?? this.workspaceRoot);
   }
 
   private async inspectOnce(
@@ -200,7 +200,7 @@ export class RuntimeInspectorClient {
         maxTotalTimeout: settings.timeoutMs + ESTABLISHMENT_GRACE_MS,
       },
     );
-    return readInspectorOutput(result);
+    return restoreModuleFailureSources(readInspectorOutput(result), settings.projectRoot ?? this.workspaceRoot);
   }
 
   public async close(): Promise<void> {
@@ -301,6 +301,24 @@ async function readModuleText(modulePath: string): Promise<string> {
       `Could not read ${modulePath} from disk (${errorMessage(error)}). Save the file and retry the inspection.`,
     );
   }
+}
+
+/** The MCP report redacts absolute paths; explicit project-relative locations survive that boundary. */
+export function restoreModuleFailureSources(output: InspectorOutput, projectRoot: string): InspectorOutput {
+  const errors = [output.error, ...(output.targets ?? []).map((target) => target.error),
+    ...(output.causes ?? []).map((cause) => cause.error)];
+  for (const error of errors) {
+    if (!isRecord(error) || !isRecord(error.sourceLocation)) continue;
+    const source = error.sourceLocation;
+    if (typeof source.projectRelativePath === 'string' && !isAbsolute(source.projectRelativePath) &&
+        !source.projectRelativePath.includes('<') && !source.projectRelativePath.includes('\0')) {
+      source.path = resolve(projectRoot, source.projectRelativePath);
+    } else if (typeof source.path !== 'string' || !isAbsolute(source.path)) {
+      // A redacted package root cannot be inferred from the requested project root.
+      delete error.sourceLocation;
+    }
+  }
+  return output;
 }
 
 function readInspectorOutput(result: unknown): InspectorOutput {

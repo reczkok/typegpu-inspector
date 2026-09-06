@@ -5,12 +5,13 @@ import { styleText } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { wrapAnsi } from 'fast-wrap-ansi';
 import yoctoSpinner from 'yocto-spinner';
-import type { InteractiveCommand } from './cliArgs.js';
+import type { CliSeverity, InteractiveCommand } from './cliArgs.js';
 import type { CollectedFiles } from './cliFiles.js';
 import { renderMarkdown } from './cliMarkdown.js';
 import {
   colors,
   displayPath,
+  filterBySeverity,
   formatDiagnosticLines,
   formatSummaryLine,
   plural,
@@ -218,7 +219,7 @@ async function mainMenu(flow: Flow): Promise<'quit' | 'interrupt'> {
         disabled: none,
       },
       ...(failed > 0
-        ? [{ value: 'failed', label: `Review ${plural(failed, 'failed target')}`, hint: 'from the last run' }]
+        ? [{ value: 'failed', label: `Review ${plural(failed, 'unresolved target')}`, hint: 'failed, blocked, or unsupported in the last run' }]
         : []),
       {
         value: 'target',
@@ -243,7 +244,7 @@ async function mainMenu(flow: Flow): Promise<'quit' | 'interrupt'> {
         break;
       case 'target':
       case 'failed': {
-        const picked = await pickTarget(flow, action === 'failed' ? 'failed' : undefined);
+        const picked = await pickTarget(flow, action === 'failed');
         if (picked === CANCELLED) return 'interrupt';
         const outcome = await targetMenu(flow, picked);
         if (outcome === 'interrupt') return 'interrupt';
@@ -297,19 +298,23 @@ async function inspectCached(
   return { module, fromCache: false };
 }
 
-function showCheck(flow: Flow, result: CheckResult): void {
+function showCheck(flow: Flow, result: CheckResult, minSeverity: CliSeverity = 'warning'): void {
   const summary = formatSummaryLine(result, flow.style, { mark: false });
   if (flow.progress.active) flow.progress.stop(summary, result.ok);
-  else flow.ui.message(summary, result.ok ? 'success' : 'error');
+  else flow.ui.message(summary, result.ok ? 'success' : result.summary.errors > 0 ? 'error' : 'warn');
   const lines = result.files.flatMap((file) =>
-    file.diagnostics.flatMap((diagnostic) => formatDiagnosticLines(diagnostic, flow.style))
+    filterBySeverity(file.diagnostics, minSeverity)
+      .flatMap((diagnostic) => formatDiagnosticLines(diagnostic, flow.style))
   );
   if (lines.length > 0) flow.ui.message(lines);
+  if (minSeverity === 'warning' && result.summary.hints + result.summary.infos > 0) {
+    flow.ui.message('Hint and info details hidden. Pick a target and choose Check to see them.', 'info');
+  }
 }
 
 // --- one target -------------------------------------------------------------
 
-async function pickTarget(flow: Flow, initialInput?: string): Promise<PickedTarget | Cancelled> {
+async function pickTarget(flow: Flow, unresolvedOnly = false): Promise<PickedTarget | Cancelled> {
   const { ui, io } = flow;
   const c = colors(flow.style.color);
   const choices = new Map<string, PickedTarget>();
@@ -319,10 +324,13 @@ async function pickTarget(flow: Flow, initialInput?: string): Promise<PickedTarg
   for (const [path, discovered] of entries) {
     const cached = flow.cache.get(path);
     for (const target of discovered.targets) {
+      const report = cached?.module.inspection.targets.get(target.id)?.report;
+      const failed = cached?.module.inspection.targetFailures?.has(target.id);
+      if (unresolvedOnly && report?.ok !== false && !failed) continue;
       const key = `${path} ${target.id}`;
       choices.set(key, { path, discovered, target });
-      const status = cached?.module.inspection.targets.get(target.id)?.report.ok;
-      const mark = status === undefined ? '' : status ? ` · ${c.green('ok')}` : ` · ${c.red('failed')}`;
+      const status = report?.outcome ?? (report ? (report.ok ? 'ok' : 'failed') : failed ? 'failed' : undefined);
+      const mark = status === undefined ? '' : ` · ${report?.ok ? c.green(status) : c.yellow(status)}`;
       options.push({
         value: key,
         label: `${target.label}  ${c.dim(`${displayPath(path, io.cwd)}:${targetLine(discovered, target)}`)}`,
@@ -330,7 +338,7 @@ async function pickTarget(flow: Flow, initialInput?: string): Promise<PickedTarg
       });
     }
   }
-  const key = await ui.autocomplete('Which target?', options, 'type to search by name or file', initialInput);
+  const key = await ui.autocomplete('Which target?', options, 'type to search by name or file');
   if (key === CANCELLED) return CANCELLED;
   return choices.get(key) ?? CANCELLED;
 }
@@ -380,11 +388,11 @@ async function targetMenu(flow: Flow, picked: PickedTarget): Promise<'back' | 'i
         const startedAt = Date.now();
         const { module, fromCache } = await inspectCached(flow, picked.path, picked.discovered);
         const result = summarizeCheck(
-          [fileResult(flow.session, module, 'hint')],
+          [fileResult(flow.session, { ...module, targetIds: [picked.target.id] }, 'hint')],
           fromCache ? module.elapsedMs : Date.now() - startedAt,
           false,
         );
-        showCheck(flow, result);
+        showCheck(flow, result, 'hint');
         break;
       }
       case 'wgsl':
@@ -522,13 +530,16 @@ function editorName(editor: string | undefined): string {
   return basename(editor.split(/\s+/)[0] ?? editor);
 }
 
-/** Targets the remembered inspections report as failed. */
+/** Targets whose remembered inspections did not pass. */
 function countFailed(flow: Flow): number {
   let count = 0;
   for (const [path, cached] of flow.cache) {
     if (!flow.workspace.modules.has(path)) continue;
     for (const target of cached.module.inspection.targets.values()) {
       if (!target.report.ok) count += 1;
+    }
+    for (const id of cached.module.inspection.targetFailures?.keys() ?? []) {
+      if (!cached.module.inspection.targets.has(id)) count += 1;
     }
   }
   return count;

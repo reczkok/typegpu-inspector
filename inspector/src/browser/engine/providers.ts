@@ -6,7 +6,7 @@ import {
   readBoundFunctionProvidingPairs,
   readRenderPipelineSlotBindings,
 } from '../typegpuIntrospection.ts';
-import { createPlaceholderValue } from './synthesis.ts';
+import { createPlaceholderValue, StorageBindingRequiredError } from './synthesis.ts';
 import type {
   Provider,
   ProviderContext,
@@ -184,8 +184,12 @@ const accessorPlaceholderProvider: Provider = {
           provenance:
             'non-degenerate placeholder value recursively derived from its accessor schema',
         };
-      } catch {
-        // Non-callable schema; another source may still match.
+      } catch (error) {
+        if (error instanceof StorageBindingRequiredError) {
+          requirement.detail = { ...requirement.detail, bindingReason: error.message };
+        }
+        // Another source may still provide an actual binding. Retain why a
+        // known schema could not be synthesized for the unresolved diagnostic.
       }
     }
     return undefined;

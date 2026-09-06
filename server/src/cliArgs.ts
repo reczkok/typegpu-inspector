@@ -38,6 +38,7 @@ export type CheckCommand = GlobalOptions & {
   format: OutputFormat;
   minSeverity: CliSeverity;
   warningsAsErrors: boolean;
+  requireConcrete: boolean;
   watch: boolean;
   verbose: boolean;
   /** Print what the modules wrote to the console. */
@@ -129,7 +130,7 @@ function buildProgram(io: ParseIo, version: string, emit: (command: CliCommand) 
     .addHelpText(
       'after',
       '\nRun without a command in a terminal to start an interactive session.\n' +
-        'Exit codes: 0 no errors, 1 errors or failed targets, 2 usage or environment failure.',
+        'Exit codes: 0 inspected successfully, 1 findings or incomplete checks, 2 usage or environment failure, 130 interrupted.',
     )
     .exitOverride()
     .configureOutput({
@@ -153,7 +154,7 @@ function buildProgram(io: ParseIo, version: string, emit: (command: CliCommand) 
       program
         .command('check')
         .description(
-          'Inspect every TypeGPU module under the given files, directories, or globs and print diagnostics',
+          'Explore discovered TypeGPU targets and print diagnostics; synthesized checks do not validate application bindings',
         )
         .argument('[paths...]', 'Files, directories, or globs to inspect', ['.'])
         .option('-t, --target <name>', 'Only this target (label or symbol name); repeatable', collect),
@@ -167,9 +168,10 @@ function buildProgram(io: ParseIo, version: string, emit: (command: CliCommand) 
       .addOption(
         new Option('--severity <level>', 'Lowest severity to print')
           .choices(SEVERITIES)
-          .default('hint'),
+          .default('warning'),
       )
       .option('--warnings-as-errors', 'Exit 1 on warnings too')
+      .option('--require-concrete', 'Exit 1 if any target uses inspection assumptions, or no targets are found (for CI)')
       .option(
         '-w, --watch',
         'Re-check changed modules and their importers on save, keeping the browser warm',
@@ -179,7 +181,10 @@ function buildProgram(io: ParseIo, version: string, emit: (command: CliCommand) 
       .option(
         '--evaluate',
         'Also import modules that use TypeGPU but declare no target, and report whether they throw',
-      ),
+      )
+      .addHelpText('after', '\nFor CI, select authored pipelines or caller fixtures with -t and --require-concrete.\n' +
+        'A passing check validates generated WGSL/pipeline creation, not rendering or all application branches.\n' +
+        'Use report <file> -t <target> to inspect the assumptions and missing bindings.'),
   ).action((paths: string[], _options: unknown, command: Command) => {
     const options = command.optsWithGlobals<CheckOptions>();
     const format: OutputFormat = options.json ? 'json' : options.format;
@@ -195,6 +200,7 @@ function buildProgram(io: ParseIo, version: string, emit: (command: CliCommand) 
       format,
       minSeverity: options.severity,
       warningsAsErrors: options.warningsAsErrors ?? false,
+      requireConcrete: options.requireConcrete ?? false,
       watch: options.watch ?? false,
       verbose: options.verbose ?? false,
       console: options.console ?? false,
@@ -310,6 +316,7 @@ type CheckOptions = GlobalCliOptions & RuntimeCliOptions & FileCliOptions & {
   json?: boolean;
   severity: CliSeverity;
   warningsAsErrors?: boolean;
+  requireConcrete?: boolean;
   watch?: boolean;
   verbose?: boolean;
   console?: boolean;

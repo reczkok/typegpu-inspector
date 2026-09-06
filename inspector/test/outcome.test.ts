@@ -2,6 +2,20 @@ import { describe, expect, it } from 'vitest';
 import { inferTargetOutcome } from '../src/browser/outcome.ts';
 
 describe('inferTargetOutcome', () => {
+  it.each(['module-scope', 'import-scope', 'importer-scope', 'recorded-app-bindings'] as const)(
+    'qualifies bindings borrowed from %s as inspection assumptions', (provider) => {
+      expect(inferTargetOutcome({
+        ok: true,
+        ledger: [{ tier: 'resource', kind: 'slot-value', key: 'slot:value', status: 'satisfied', discoveredBy: 'failure', provider }],
+      })).toBe('passed-with-assumptions');
+    },
+  );
+
+  it.each(['inspection-timeout', 'webgpu-validation-timeout', 'result-serialization-failed'])(
+    'classifies %s as an incomplete inspection, not a shader failure', (code) => {
+      expect(inferTargetOutcome({ ok: false, diagnostics: [{ code, message: code }] })).toBe('blocked');
+    },
+  );
   it('does not count environment-tier ledger entries as target assumptions', () => {
     expect(inferTargetOutcome({
       ok: true,
