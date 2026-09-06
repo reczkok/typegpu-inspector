@@ -58,6 +58,8 @@ export type SerializedError = {
   name?: string | undefined;
   message: string;
   stack?: string | undefined;
+  /** Authored source location of a module-initialization failure, mapped from Vite. */
+  sourceLocation?: { path: string; projectRelativePath?: string; line: number; column: number } | undefined;
   cause?: unknown;
 };
 

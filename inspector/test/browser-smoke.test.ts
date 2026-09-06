@@ -27,6 +27,105 @@ afterAll(async () => {
 });
 
 describe('browser harness', () => {
+  maybeIt('validates synthesized integer scalar and short-vector color attachments', async () => {
+    const report = await inspectTypegpuSymbols({
+      cwd, modulePath: 'test/fixtures/integer-fragment-output.ts', timeoutMs: 30_000,
+      targets: ['scalar', 'vector', 'triple', 'floatScalar', 'floatTriple'].map((fragment) => ({
+        kind: 'render-pipeline', vertex: 'vertex', fragment, synthesizeMissing: true,
+      })),
+    });
+    expect(report.targets).toHaveLength(5);
+    expect(report.ok, JSON.stringify(report.targets)).toBe(true);
+  });
+  maybeIt('attributes a shared initialization error to authored source across importers', async () => {
+    for (const importer of ['first', 'second']) {
+      const report = await inspectTypegpuSymbols({
+        cwd, modulePath: `test/fixtures/module-failure/${importer}.ts`,
+        targets: [{ selector: 'shade', kind: 'resolvable' }], timeoutMs: 30_000,
+      });
+      expect(report.targets[0]?.outcome).toBe('blocked');
+      expect(report.targets[0]?.error?.sourceLocation).toEqual({
+        path: resolve(cwd, 'test/fixtures/module-failure/shared.ts'), line: 2, column: 9,
+        projectRelativePath: 'test/fixtures/module-failure/shared.ts',
+      });
+    }
+  });
+
+  maybeIt('reports a Node-only module as an environment limitation', async () => {
+    const report = await inspectTypegpuSymbols({
+      cwd, modulePath: 'test/fixtures/node-only-module.ts',
+      targets: [{ selector: 'shade', kind: 'resolvable' }], timeoutMs: 30_000,
+    });
+    expect(report.ok).toBe(false);
+    expect(report.targets[0]?.outcome).toBe('blocked');
+    expect(report.targets[0]?.diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'browser-capability-unavailable' }),
+    ]));
+  });
+
+  maybeIt('distinguishes a detached value probe from a valid reference probe', async () => {
+    const options = { cwd, modulePath: 'test/fixtures/reference-argument.ts', timeoutMs: 30_000 };
+    const blocked = await inspectTypegpuSymbols({
+      ...options,
+      targets: [{ selector: 'readReference', kind: 'resolvable', probeArguments: ['Vector'] }],
+    });
+    expect(blocked.targets[0]?.outcome, JSON.stringify(blocked.targets)).toBe('blocked');
+    expect(blocked.targets[0]?.diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'reference-wrapper-required' }),
+    ]));
+    const bound = await inspectTypegpuSymbols({
+      ...options,
+      targets: [{ selector: 'readReference', kind: 'resolvable', probeArgumentPlan: [{ refSchema: 'Vector' }] }],
+    });
+    expect(bound.ok, JSON.stringify(bound.targets)).toBe(true);
+  });
+
+  maybeIt('constructs mutable scalar reference arguments without introducing scalar aliases', async () => {
+    const report = await inspectTypegpuSymbols({
+      cwd, modulePath: 'test/fixtures/reference-argument.ts', timeoutMs: 30_000,
+      targets: ['f32', 'u32', 'i32'].map((scalar) => ({
+        label: scalar,
+        selector: 'incrementReference',
+        kind: 'resolvable',
+        probeArgumentPlan: [{ refSchema: `ctx.d.${scalar}` }],
+      })),
+    });
+    expect(report.targets).toHaveLength(3);
+    expect(report.ok, JSON.stringify(report.targets)).toBe(true);
+    for (const target of report.targets) {
+      expect(target.wgsl).toContain(`ptr<function, ${target.label}>`);
+    }
+  });
+
+  maybeIt('blocks runtime-sized accessor synthesis and validates the same shader with a storage binding', async () => {
+    const options = {
+      cwd,
+      modulePath: 'test/fixtures/runtime-array-accessor.ts',
+      timeoutMs: 30_000,
+    };
+    const blocked = await inspectTypegpuSymbols({
+      ...options,
+      targets: [{ kind: 'compute-pipeline', compute: 'main' }],
+    });
+    expect(blocked.ok).toBe(false);
+    expect(blocked.targets[0]?.outcome).toBe('blocked');
+    expect(blocked.targets[0]?.diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'slot-binding-required' }),
+    ]));
+
+    const bound = await inspectTypegpuSymbols({
+      ...options,
+      setupBody: 'return { buffer: root.createReadonly(d.arrayOf(d.vec4f, 1), [d.vec4f(1)]) };',
+      targets: [{
+        kind: 'compute-pipeline', compute: 'main',
+        with: [{ slot: 'instances', value: 'setup.buffer' }],
+      }],
+    });
+    expect(bound.ok, JSON.stringify(bound.targets)).toBe(true);
+    expect(bound.targets[0]?.wgsl).toContain('var<storage, read>');
+    expect(bound.targets[0]?.wgsl).not.toContain('array<vec4f>()');
+  });
+
   maybeIt.each([false, true])(
     'accepts a self-signed HTTPS Vite harness (reuseBrowser=%s)',
     async (reuseBrowser) => {

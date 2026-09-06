@@ -51,6 +51,7 @@ import type {
   TypeGpuTargetReport,
 } from './types.ts';
 import { inferTargetOutcome } from './browser/outcome.ts';
+import { attributeModuleFailure, readFailureSource } from './inspect/failureSource.ts';
 
 type BrowserTransferResult =
   | { ok: true; json: string }
@@ -317,6 +318,7 @@ async function runInspection(
     // The page's import can fail a beat before the optimizer's rejection is
     // routed here; the optimizer's account names the import at fault.
     failure = { error: serverFailed ? await preferServerFailure(serverFailed, error) : error };
+    if (server) await attributeModuleFailure(failure.error, server, normalized?.cwd);
   } finally {
     // Cleanup runs before any retry so a cancelled or failed run never keeps
     // the page open or the session lease held.
@@ -856,7 +858,7 @@ function createFailureReport(
 
 function serializeFailureError(error: unknown): TypeGpuInspectionReport['targets'][number]['error'] {
   return error instanceof Error
-    ? { name: error.name, message: error.message, stack: error.stack }
+    ? { name: error.name, message: error.message, stack: error.stack, sourceLocation: readFailureSource(error) }
     : { message: getErrorMessage(error) };
 }
 

@@ -13,6 +13,8 @@ type TypeGpuNamespace = {
 
 const MAX_PLACEHOLDER_DEPTH = 32;
 
+export class StorageBindingRequiredError extends Error {}
+
 /**
  * Unwraps `d.align(...)` / `d.size(...)` style decorations down to the callable
  * schema constructor. Decorated schemas are plain descriptor objects and are not
@@ -59,13 +61,18 @@ function createPlaceholder(
 ): unknown {
   const value = unwrapSchema(schema);
   const constructor = unwrapZeroValueSchema(value, label);
+  const type = readString(value, 'type');
+  if ((type === 'array' || type === 'disarray') && readNumber(value, 'elementCount') === 0) {
+    throw new StorageBindingRequiredError(
+      `Runtime-sized arrays require a storage binding${label ? ` (${label})` : ''}; they cannot be synthesized as literal values.`,
+    );
+  }
   if (depth >= MAX_PLACEHOLDER_DEPTH || ancestors.has(value)) {
     return constructor();
   }
 
   ancestors.add(value);
   try {
-    const type = readString(value, 'type');
     if (type === 'struct' || type === 'unstruct') {
       const propTypes = readRecord(value, 'propTypes');
       if (propTypes) {
@@ -117,7 +124,8 @@ function createPlaceholder(
       }
     }
     return zero;
-  } catch {
+  } catch (error) {
+    if (error instanceof StorageBindingRequiredError) throw error;
     // Unknown future schema shapes retain the previous safe behavior instead
     // of making auto-binding itself a new source of inspection failures.
     return constructor();
@@ -134,7 +142,8 @@ function createNestedPlaceholder(
 ): unknown {
   try {
     return createPlaceholder(schema, label, depth, ancestors);
-  } catch {
+  } catch (error) {
+    if (error instanceof StorageBindingRequiredError) throw error;
     return createZeroValue(schema, label);
   }
 }
@@ -192,16 +201,31 @@ export function synthesizeFragmentTargets(
   const output = shell?.out ?? shell?.returnType;
   if (!output || d.isBuiltin?.(output)) return undefined;
 
-  const propTypes = readNestedRecord(output, ['propTypes']);
+  const type = readString(output, 'type');
+  const propTypes = readNestedRecord(output, ['propTypes']) ??
+    (type === undefined ? readNestedRecord(output, []) : undefined);
   if (propTypes) {
     const entries = Object.entries(propTypes)
       .filter(([, schema]) => !d.isBuiltin?.(schema))
-      .map(([name]) => [name, { format: 'rgba8unorm' }]);
+      .map(([name, schema]) => [name, { format: fragmentTargetFormat(schema) }]);
     return entries.length > 0 ? Object.fromEntries(entries) : undefined;
   }
 
-  const type = readString(output, 'type');
-  return type && type !== 'void' ? { format: 'rgba8unorm' } : undefined;
+  return type && type !== 'void' ? { format: fragmentTargetFormat(output) } : undefined;
+}
+
+function fragmentTargetFormat(schema: unknown): string {
+  const type = readString(unwrapSchema(schema), 'type');
+  const vector = /^vec([234])([fiuh])$/.exec(type ?? '');
+  const components = vector ? Number(vector[1]) : 1;
+  // WebGPU rejects a target with more channels than the shader writes. There
+  // is no general three-channel render format; an inspection target can omit
+  // the third component because it validates creation without rendering.
+  const channels = components === 4 ? 'rgba' : components >= 2 ? 'rg' : 'r';
+  if (type === 'u32' || vector?.[2] === 'u') return `${channels}32uint`;
+  if (type === 'i32' || vector?.[2] === 'i') return `${channels}32sint`;
+  if (components < 4 && (type === 'f32' || type === 'f16' || vector)) return `${channels}32float`;
+  return 'rgba8unorm';
 }
 
 export function createVertexAttribsLedgerEntry(): LedgerEntry {
@@ -226,7 +250,7 @@ export function createFragmentTargetsLedgerEntry(): LedgerEntry {
     discoveredBy: 'shape',
     provider: 'synthesis',
     provenance:
-      'Fragment targets were synthesized from fragment.shell.out with rgba8unorm formats.',
+      'Fragment targets were synthesized from fragment.shell.out with formats matching the output scalar types.',
   };
 }
 

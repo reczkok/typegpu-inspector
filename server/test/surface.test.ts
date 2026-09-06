@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { DiagnosticSeverity } from 'vscode-languageserver/node';
 import { discoverTypeGpuModule } from '../src/discovery.js';
 import { tableRowWidth } from '../src/markdown.js';
+import { toCliDiagnostics } from '../src/cliOutput.js';
 import {
   appendHover,
   createCodeActions,
@@ -38,6 +39,30 @@ import {
 } from './fixtures/crossFileFixture.js';
 
 describe('inspection surface', () => {
+  it('carries mapped module failures through materialization without attributing ordinary target errors as imports', async () => {
+    const path = '/workspace/importer.ts';
+    const discovered = discoverTypeGpuModule(path, `const shade = tgpu.fn([], d.f32)(() => 1);`);
+    for (const shared of [true, false]) {
+      const inspection = await materializeInspection('/workspace', path, 1, discovered, {
+        ok: false,
+        targets: [{ label: 'shade', kind: 'resolvable', ok: false,
+          ...(shared ? { causeId: 'inspection-cause-1', outcome: 'blocked' as const } : {}),
+          error: { message: 'Invalid config: NaN', sourceLocation: { path: '/workspace/config.ts', line: 34, column: 9 } },
+        }],
+      });
+      const diagnostics = toCliDiagnostics(path, createDiagnostics('file:///workspace/importer.ts', discovered, inspection), '/workspace');
+      expect(diagnostics).toHaveLength(1);
+      expect(diagnostics[0]?.severity).toBe('error');
+      if (shared) {
+        expect(diagnostics[0]).toMatchObject({ path: 'config.ts', line: 34, column: 9,
+          message: 'Invalid config: NaN', affectedModules: ['importer.ts'] });
+      } else {
+        expect(diagnostics[0]?.path).toBe('importer.ts');
+        expect(diagnostics[0]?.affectedModules).toBeUndefined();
+      }
+    }
+  });
+
   it('drops materialization-only runtime evidence after preserving editor surfaces', async () => {
     const discovered = discoverTypeGpuModule(
       '/workspace/pipeline.ts',

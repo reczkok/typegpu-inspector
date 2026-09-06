@@ -46,6 +46,29 @@ assert(diagnostic.line >= 4, `diagnostic line was ${diagnostic.line}`);
 const usage = run(['check', '--format', 'yaml']);
 assert(usage.code === 2, `usage error exited ${usage.code}, expected 2`);
 
+const concrete = run(['check', '../inspector/test/fixtures/configured-pipeline.ts', '-t', 'configuredPipeline', '--require-concrete', '--json']);
+assert(concrete.code === 0, `configured pipeline exited ${concrete.code}`, concrete.stderr + concrete.stdout);
+const concreteReport = JSON.parse(concrete.stdout);
+assert(concreteReport.ok === true && concreteReport.requireConcrete === true, 'concrete policy was not satisfied', concrete.stdout);
+assert(concreteReport.summary.targets === 1 && concreteReport.summary.assumed === 0, 'configured pipeline unexpectedly needed assumptions', concrete.stdout);
+assert(concreteReport.files[0].targets[0].outcome === 'passed', 'configured pipeline lacked a concrete outcome', concrete.stdout);
+
+const sharedFailure = run(['check', '../inspector/test/fixtures/module-failure/first.ts', '../inspector/test/fixtures/module-failure/second.ts', '--json']);
+assert(sharedFailure.code === 1, `shared module failure exited ${sharedFailure.code}`, sharedFailure.stderr + sharedFailure.stdout);
+const sharedReport = JSON.parse(sharedFailure.stdout);
+const sharedErrors = sharedReport.files.flatMap((file) => file.diagnostics).filter((entry) => entry.severity === 'error');
+assert(sharedErrors.length === 1 && sharedReport.summary.blocked === 2, 'shared cause was duplicated or importer status lost', sharedFailure.stdout);
+assert(sharedErrors[0].path === resolve(cwd, '../inspector/test/fixtures/module-failure/shared.ts'), 'shared error lost its usable source path through MCP', sharedFailure.stdout);
+assert(sharedErrors[0].line === 2 && sharedErrors[0].column === 9, 'shared error lost its authored position', sharedFailure.stdout);
+assert(sharedErrors[0].affectedModules.length === 2, 'shared error lost its affected importers', sharedFailure.stdout);
+
+const evaluatedFailure = run(['check', '../inspector/test/fixtures/module-failure/evaluation.ts', '--evaluate', '--json']);
+assert(evaluatedFailure.code === 1, `module evaluation exited ${evaluatedFailure.code}`, evaluatedFailure.stderr + evaluatedFailure.stdout);
+const evaluatedReport = JSON.parse(evaluatedFailure.stdout);
+const evaluatedError = evaluatedReport.files.flatMap((file) => file.diagnostics).find((entry) => entry.severity === 'error');
+assert(evaluatedReport.files[0].targets[0].kind === 'module', 'fixture did not exercise module evaluation', evaluatedFailure.stdout);
+assert(evaluatedError?.path === resolve(cwd, '../inspector/test/fixtures/module-failure/shared.ts'), 'evaluated module lost its usable source path through MCP', evaluatedFailure.stdout);
+
 const interactive = run(['interactive']);
 assert(interactive.code === 2, `non-TTY interactive session exited ${interactive.code}, expected 2`);
 assert(
@@ -58,5 +81,6 @@ process.stdout.write(`${JSON.stringify({
   ok: true,
   targets: listed.targets.length,
   errors: report.summary.errors,
+  concreteTargets: concreteReport.summary.targets,
   firstError: diagnostic.message.slice(0, 160),
 }, null, 2)}\n`);

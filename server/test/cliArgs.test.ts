@@ -32,6 +32,7 @@ describe('CLI arguments', () => {
       '--severity',
       'warning',
       '--warnings-as-errors',
+      '--require-concrete',
       '--verbose',
       '--timeout-ms',
       '90000',
@@ -53,6 +54,7 @@ describe('CLI arguments', () => {
         format: 'github',
         minSeverity: 'warning',
         warningsAsErrors: true,
+        requireConcrete: true,
         watch: false,
         verbose: true,
         console: false,
@@ -70,7 +72,7 @@ describe('CLI arguments', () => {
     });
   });
 
-  it('defaults check to the current directory, text output, and every severity', async () => {
+  it('defaults check to the current directory, text output, and warnings or errors', async () => {
     const { result } = await parse(['check']);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -78,8 +80,9 @@ describe('CLI arguments', () => {
       command: 'check',
       paths: ['.'],
       format: 'text',
-      minSeverity: 'hint',
+      minSeverity: 'warning',
       warningsAsErrors: false,
+      requireConcrete: false,
       watch: false,
       verbose: false,
       console: false,

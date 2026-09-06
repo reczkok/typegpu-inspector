@@ -4,6 +4,7 @@ import { createColors } from 'picocolors';
 import { DiagnosticSeverity, type Diagnostic, type Range } from 'vscode-languageserver/node';
 import type { CliSeverity } from './cliArgs.js';
 import { SEVERITIES } from './cliArgs.js';
+import type { InspectorTargetReport } from './protocol.js';
 
 export type CliLocation = {
   path: string;
@@ -31,13 +32,17 @@ export type CliDiagnostic = CliLocation & {
   finding?: CliPoint;
   /** Modules whose own report of this finding folded into this one. */
   alsoIn?: CliAlsoIn[];
+  /** Importers blocked by this source-attributed module initialization error. */
+  affectedModules?: string[];
 };
 
 export type CliTargetStatus = {
   id: string;
   label: string;
   kind?: string;
-  status: 'ok' | 'failed' | 'not-inspected';
+  status: 'ok' | 'failed' | 'blocked' | 'unsupported' | 'not-inspected';
+  outcome?: NonNullable<InspectorTargetReport['outcome']>;
+  notes?: Array<{ code?: string; message: string }>;
   wgslLines?: number;
   /** Path of the generated `.wgsl` file, when the target produced WGSL. */
   generatedWgsl?: string;
@@ -63,6 +68,10 @@ export type CliSummary = {
   targets: number;
   passed: number;
   failed: number;
+  blocked: number;
+  unsupported: number;
+  notInspected: number;
+  assumed: number;
   errors: number;
   warnings: number;
   infos: number;
@@ -72,6 +81,8 @@ export type CliSummary = {
 
 export type CheckResult = {
   ok: boolean;
+  unmatchedTargets?: string[];
+  requireConcrete?: boolean;
   files: CliFileResult[];
   summary: CliSummary;
 };
@@ -133,11 +144,17 @@ export function toCliDiagnostics(
         typeof data.relatedSource.uri === 'string' && isRange(data.relatedSource.range)
       ? location(data.relatedSource.uri, data.relatedSource.range, cwd)
       : undefined;
+    const moduleFailure = isRecord(data.moduleFailure) && typeof data.moduleFailure.uri === 'string' &&
+        isRange(data.moduleFailure.range) && typeof data.moduleFailure.message === 'string'
+      ? location(data.moduleFailure.uri, data.moduleFailure.range, cwd)
+      : undefined;
     return {
       ...location(sourcePath, diagnostic.range, cwd),
       severity: lspSeverityName(diagnostic.severity),
       ...(diagnostic.code !== undefined ? { code: String(diagnostic.code) } : {}),
-      message: typeof diagnostic.message === 'string' ? diagnostic.message : diagnostic.message.value,
+      message: moduleFailure
+        ? (data.moduleFailure as { message: string }).message
+        : typeof diagnostic.message === 'string' ? diagnostic.message : diagnostic.message.value,
       related: (diagnostic.relatedInformation ?? []).map((info) => ({
         ...location(info.location.uri, info.location.range, cwd),
         message: info.message,
@@ -145,6 +162,7 @@ export function toCliDiagnostics(
       ...(generatedUri && generatedRange
         ? { generatedWgsl: location(generatedUri, generatedRange, cwd) }
         : {}),
+      ...(moduleFailure ? { ...moduleFailure, affectedModules: [displayPath(sourcePath, cwd)] } : {}),
       ...(relatedSource
         ? { finding: { path: relatedSource.path, line: relatedSource.line, column: relatedSource.column } }
         : {}),
@@ -212,7 +230,7 @@ export function foldModuleFailures(
   const groups = new Map<string, CliDiagnostic[]>();
   for (const diagnostic of diagnostics) {
     if (!FOLDABLE_MODULE_FAILURE_CODES.has(diagnostic.code ?? '')) continue;
-    const key = `${diagnostic.code}|${moduleFailureText(diagnostic)}`;
+    const key = `${diagnostic.severity}|${diagnostic.code}|${diagnostic.affectedModules ? `${diagnostic.path}:${diagnostic.line}:${diagnostic.column}` : ''}|${moduleFailureText(diagnostic)}`;
     groups.set(key, [...(groups.get(key) ?? []), diagnostic]);
   }
   const dropped = new Set<CliDiagnostic>();
@@ -232,6 +250,33 @@ export function foldModuleFailures(
     });
 }
 
+/** Equal messages alone are not evidence that unrelated failures have one cause. */
+function foldModuleCauses(files: readonly CliFileResult[]): CliFileResult[] {
+  const grouped = new Map<string, CliDiagnostic[]>();
+  for (const file of files) {
+    for (const diagnostic of file.diagnostics) {
+      if (!diagnostic.affectedModules) continue;
+      const key = JSON.stringify([diagnostic.severity, diagnostic.code, diagnostic.path,
+        diagnostic.line, diagnostic.column, diagnostic.message]);
+      const group = grouped.get(key) ?? [];
+      group.push(diagnostic);
+      grouped.set(key, group);
+    }
+  }
+  const dropped = new Set<CliDiagnostic>();
+  const replacements = new Map<CliDiagnostic, CliDiagnostic>();
+  for (const [first, ...rest] of grouped.values()) {
+    if (!first || rest.length === 0) continue;
+    for (const diagnostic of rest) dropped.add(diagnostic);
+    replacements.set(first, { ...first, affectedModules: [...new Set(
+      [first, ...rest].flatMap((diagnostic) => diagnostic.affectedModules ?? []),
+    )] });
+  }
+  return files.map((file) => ({ ...file, diagnostics: file.diagnostics
+    .filter((diagnostic) => !dropped.has(diagnostic))
+    .map((diagnostic) => replacements.get(diagnostic) ?? diagnostic) }));
+}
+
 const FOLDABLE_MODULE_FAILURE_CODES = new Set([
   'target-resolution',
   'runtime-inspection',
@@ -240,9 +285,13 @@ const FOLDABLE_MODULE_FAILURE_CODES = new Set([
 
 /** A resolution failure names its target first; the account after it is what folds. */
 function moduleFailureText(diagnostic: CliDiagnostic): string {
-  if (diagnostic.code === 'runtime-inspection') return diagnostic.message;
-  const index = diagnostic.message.indexOf(': ');
-  return index > 0 ? diagnostic.message.slice(index + 2) : diagnostic.message;
+  if (diagnostic.affectedModules || diagnostic.code === 'runtime-inspection') return diagnostic.message;
+  return stripTargetLabel(diagnostic.message);
+}
+
+function stripTargetLabel(message: string): string {
+  const index = message.indexOf(': ');
+  return index > 0 ? message.slice(index + 2) : message;
 }
 
 function findingKey(diagnostic: CliDiagnostic, filePath: string): string | undefined {
@@ -289,12 +338,16 @@ export function summarizeCheck(
   elapsedMs: number,
   warningsAsErrors: boolean,
 ): CheckResult {
-  const files = foldAcrossFiles(fileResults);
+  const files = foldAcrossFiles(foldModuleCauses(fileResults));
   const summary: CliSummary = {
     files: files.length,
     targets: 0,
     passed: 0,
     failed: 0,
+    blocked: 0,
+    unsupported: 0,
+    notInspected: 0,
+    assumed: 0,
     errors: 0,
     warnings: 0,
     infos: 0,
@@ -305,7 +358,11 @@ export function summarizeCheck(
     for (const target of file.targets) {
       summary.targets += 1;
       if (target.status === 'ok') summary.passed += 1;
-      else summary.failed += 1;
+      else if (target.status === 'failed') summary.failed += 1;
+      else if (target.status === 'blocked') summary.blocked += 1;
+      else if (target.status === 'unsupported') summary.unsupported += 1;
+      else summary.notInspected += 1;
+      if (target.outcome === 'passed-with-assumptions') summary.assumed += 1;
     }
     for (const diagnostic of file.diagnostics) {
       if (diagnostic.severity === 'error') summary.errors += 1;
@@ -315,6 +372,7 @@ export function summarizeCheck(
     }
   }
   const ok = summary.errors === 0 && summary.failed === 0 &&
+    summary.blocked === 0 && summary.unsupported === 0 && summary.notInspected === 0 &&
     (!warningsAsErrors || summary.warnings === 0);
   return { ok, files: [...files], summary };
 }
@@ -369,6 +427,9 @@ export function formatDiagnosticLines(diagnostic: CliDiagnostic, style: TextStyl
     const note = generatedNotes.length > 0 ? c.dim(` (${generatedNotes.join('; ')})`) : '';
     lines.push(`    ${c.dim('wgsl')}: ${generated.path}:${generated.line}:${generated.column}${note}`);
   }
+  if (diagnostic.affectedModules?.length) {
+    lines.push(`    ${c.dim('affected modules')}: ${diagnostic.affectedModules.join(', ')}`);
+  }
   if (diagnostic.alsoIn && diagnostic.alsoIn.length > 0) {
     lines.push(`    ${c.dim('also in')}: ${diagnostic.alsoIn.map(describeAlsoIn).join(', ')}`);
   }
@@ -411,7 +472,7 @@ export function formatCheckText(result: CheckResult, style: TextStyle): string {
           ? c.green('ok')
           : target.status === 'failed'
           ? c.red('failed')
-          : c.dim('not inspected');
+          : c.dim(target.status === 'not-inspected' ? 'not inspected' : target.status);
         const detail = [
           target.kind,
           target.wgslLines !== undefined ? `${target.wgslLines} lines` : undefined,
@@ -419,6 +480,11 @@ export function formatCheckText(result: CheckResult, style: TextStyle): string {
         lines.push(`${file.path}: ${target.label} ${status}${detail ? c.dim(` (${detail})`) : ''}`);
       }
     }
+  }
+  if (result.requireConcrete && (result.summary.assumed > 0 || result.summary.targets === 0)) {
+    lines.push(result.summary.targets === 0
+      ? 'Concrete validation required, but no targets were found.'
+      : `Concrete validation required: ${plural(result.summary.assumed, 'target')} passed with inspection assumptions. Inspect authored callers or pipelines with actual bindings.`);
   }
   if (lines.length > 0) lines.push('');
   lines.push(formatSummaryLine(result, style));
@@ -437,15 +503,24 @@ export function formatSummaryLine(
   if (summary.warnings > 0) counts.push(c.yellow(plural(summary.warnings, 'warning')));
   if (summary.infos > 0) counts.push(plural(summary.infos, 'info', 'infos'));
   if (summary.hints > 0) counts.push(plural(summary.hints, 'hint'));
+  const incomplete = summary.failed + summary.blocked + summary.unsupported + summary.notInspected;
+  const statuses = [
+    `${summary.passed} ok`,
+    ...(summary.failed ? [`${summary.failed} failed`] : []),
+    ...(summary.blocked ? [`${summary.blocked} blocked`] : []),
+    ...(summary.unsupported ? [`${summary.unsupported} unsupported`] : []),
+    ...(summary.notInspected ? [`${summary.notInspected} not inspected`] : []),
+  ];
   const targets = summary.targets === 0
     ? 'no targets'
-    : summary.failed === 0
+    : incomplete === 0
     ? `${plural(summary.targets, 'target')} ok`
-    : `${plural(summary.targets, 'target')} (${summary.passed} ok, ${summary.failed} failed)`;
+    : `${plural(summary.targets, 'target')} (${statuses.join(', ')})`;
   const mark = options.mark === false ? '' : result.ok ? `${c.green('✔')} ` : `${c.red('✖')} `;
   const parts = [
     ...(counts.length > 0 ? [counts.join(', ')] : []),
     `${targets} in ${plural(summary.files, 'file')}`,
+    ...(summary.assumed ? [`${summary.assumed} with inspection assumptions`] : []),
     formatDuration(summary.elapsedMs),
   ];
   return `${mark}${parts.join(' · ')}`;
@@ -474,6 +549,7 @@ export function formatCheckGithub(result: CheckResult, style: TextStyle): string
         ...diagnostic.related.map((related) =>
           `${related.path}:${related.line}:${related.column}: ${related.message}`
         ),
+        ...(diagnostic.affectedModules?.length ? [`affected modules: ${diagnostic.affectedModules.join(', ')}`] : []),
         ...(diagnostic.alsoIn && diagnostic.alsoIn.length > 0
           ? [`also in: ${diagnostic.alsoIn.map(describeAlsoIn).join(', ')}`]
           : []),

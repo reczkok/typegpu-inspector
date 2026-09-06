@@ -97,6 +97,20 @@ import scope, then synthesized descriptor parts. Every decision lands in the
 target's `ledger`. `environment.autoBind: false` surfaces raw failures
 instead.
 
+Symbol discovery is exploratory: a target may compile with synthesized
+arguments, descriptor parts, or a binding borrowed from another caller. Such
+results have `outcome: "passed-with-assumptions"`; inspect the ledger before
+treating them as evidence about an application's configuration. For validation,
+return the configured application pipeline from a `module` or `probe` caller
+and require `outcome: "passed"` for every requested target. The CLI exposes the
+same gate with `check --require-concrete`. A successful quiescent check validates
+generated WGSL and pipeline creation, not rendered output or runtime data.
+
+Runtime-sized array accessors require a real storage buffer binding. They
+cannot be represented by an empty array literal: bind the accessor with
+`root.with(accessor, buffer.as('readonly'))` in your caller. A missing binding
+is a blocked inspection, not a shader compiler error.
+
 ### Environment
 
 | Field | Default | Effect |

@@ -793,6 +793,19 @@ describe('target kind and schema helpers', () => {
 });
 
 describe('diagnostic classifiers', () => {
+  it('blocks Node-only imports for targets and module evaluation', () => {
+    const error = new Error('Module "node:child_process" has been externalized for browser compatibility. Cannot access "node:child_process.execFileSync" in client code.');
+    expect(diagnoseTargetFailure(undefined, 'resolvable', error)[0]?.code).toBe('browser-capability-unavailable');
+    expect(diagnoseInspectionFailure(error)[0]?.code).toBe('browser-capability-unavailable');
+  });
+
+  it('only classifies reference-of-argument failures as blocked when an inspection argument probe was used', () => {
+    const error = new Error('ref: d.ref(genes) is illegal, cannot take a reference of an argument. Copy the value first, and take a reference of the copy.');
+    expect(diagnoseTargetFailure(undefined, 'resolvable', error, { hasArgumentProbe: true })[0]?.code)
+      .toBe('reference-wrapper-required');
+    expect(diagnoseTargetFailure(undefined, 'compute-pipeline', error)).toEqual([]);
+  });
+
   it('classifies wrapper-required failures', () => {
     const diagnostics = diagnoseTargetFailure(
       undefined,

@@ -127,6 +127,9 @@ export function createRequirementFailure(
       ),
       valueSummary: summarizeTargetValue(targetValue),
       autoBindAttempted: true,
+      ...(typeof requirement.detail?.bindingReason === 'string'
+        ? { bindingReason: requirement.detail.bindingReason }
+        : {}),
     }),
   ]);
 }

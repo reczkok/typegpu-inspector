@@ -216,7 +216,9 @@ export async function inspectPipelineTargets(
         report.ok = true;
       } else {
         report.error = serializeError(error);
-        addTargetDiagnostics(report, diagnoseTargetFailure(targetValue, report.kind, error));
+        addTargetDiagnostics(report, diagnoseTargetFailure(targetValue, report.kind, error, {
+          hasArgumentProbe: target.ledger?.some((entry) => entry.kind === 'argument-values' && entry.status === 'satisfied'),
+        }));
         await recorder.flushCompilationInfo().catch(() => undefined);
         hydrateReportFromCalls(report, recorder.calls.slice(callStart), recorderSequence);
         // A failure recorded by the newest generator locates the statement

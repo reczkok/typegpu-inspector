@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { discoverTypeGpuModule } from '../server/src/discovery.ts';
 import { inspectTypegpuSymbols } from '../inspector/src/inspect.ts';
@@ -23,15 +23,26 @@ type CorpusExpectations = {
 
 const expectationsPath = resolve(import.meta.dirname, 'runtime-corpus.expectations.json');
 const expectations = JSON.parse(readFileSync(expectationsPath, 'utf8')) as CorpusExpectations;
-const docsRoot = resolve(
+const projectRoot = resolve(
   process.env.TYPEGPU_DOCS_ROOT ??
-    process.argv.find((argument) => !argument.startsWith('--')) ??
+    process.argv.slice(2).find((argument) => !argument.startsWith('--')) ??
     resolve(import.meta.dirname, '../../TypeGPU'),
 );
-const cwd = resolve(docsRoot, 'apps/typegpu-docs');
+// Accept either the TypeGPU repository or its docs app, matching the environment
+// variable's name without breaking callers that already pass the repository root.
+const cwd = existsSync(resolve(projectRoot, 'src/examples'))
+  ? projectRoot
+  : resolve(projectRoot, 'apps/typegpu-docs');
 const snapshotMode = process.argv.includes('--snapshot');
 
 async function main(): Promise<void> {
+  if (!existsSync(resolve(cwd, 'src/examples'))) {
+    throw new Error(
+      `TypeGPU docs examples were not found under ${projectRoot}. ` +
+      'Pass the TypeGPU checkout or apps/typegpu-docs directory as a positional argument, ' +
+      'or set TYPEGPU_DOCS_ROOT to that directory.',
+    );
+  }
   const actual: CorpusExpectations = { version: 1, cases: {} };
   try {
     for (const [caseName, expectedCase] of Object.entries(expectations.cases)) {
@@ -99,10 +110,18 @@ async function main(): Promise<void> {
     }
   }
 
+  const outcomes = new Map<TargetOutcome, number>();
+  for (const entry of Object.values(actual.cases)) {
+    for (const target of Object.values(entry.targets)) {
+      outcomes.set(target.outcome, (outcomes.get(target.outcome) ?? 0) + 1);
+    }
+  }
   process.stdout.write([
     `Runtime corpus: ${Object.keys(actual.cases).length} modules, ${
       Object.values(actual.cases).reduce((sum, entry) => sum + Object.keys(entry.targets).length, 0)
     } targets`,
+    `Outcomes: ${[...outcomes].sort(([a], [b]) => a.localeCompare(b))
+      .map(([outcome, count]) => `${count} ${outcome}`).join(', ')}`,
     `Fixed (${fixed.length}):${fixed.length ? `\n- ${fixed.join('\n- ')}` : ' none'}`,
     `Regressed (${regressed.length}):${regressed.length ? `\n- ${regressed.join('\n- ')}` : ' none'}`,
     `Unexpected failure codes:${newFamilies.size ? ` ${[...newFamilies].sort().join(', ')}` : ' none'}`,

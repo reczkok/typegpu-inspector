@@ -221,6 +221,7 @@ export async function inspectModule(
 export type CheckOptions = {
   minSeverity: CliSeverity;
   warningsAsErrors: boolean;
+  requireConcrete?: boolean;
 };
 
 export function fileResult(session: Session, module: InspectedModule, minSeverity: CliSeverity): CliFileResult {
@@ -238,12 +239,27 @@ export function fileResult(session: Session, module: InspectedModule, minSeverit
   const covered = new Set(module.targetIds);
   const described = describeTargets(1, discovered, inspection, new Set());
   const targets: CliTargetStatus[] = described.targets.filter((target) => covered.has(target.id)).map((target) => {
-    const generatedUri = inspection.targets.get(target.id)?.generatedUri;
+    const materialized = inspection.targets.get(target.id);
+    const generatedUri = materialized?.generatedUri;
+    // Older/custom runtimes without confidence metadata cannot certify a
+    // concrete pass. Keep their successful result explicitly qualified.
+    const outcome = materialized?.report.outcome ??
+      (materialized?.report.ok ? 'passed-with-assumptions' : undefined);
+    const notes = outcome === 'blocked' || outcome === 'unsupported'
+      ? materialized?.report.diagnostics?.filter((diagnostic) => diagnostic.severity !== 'note').map((diagnostic) => ({
+        code: diagnostic.code,
+        message: [diagnostic.message, diagnostic.hint].filter(Boolean).join(' '),
+      }))
+      : undefined;
     return {
       id: target.id,
       label: target.label,
       ...(target.kind !== undefined ? { kind: target.kind } : {}),
-      status: target.status === 'ok' ? 'ok' : target.status === 'failed' ? 'failed' : 'not-inspected',
+      status: outcome === 'blocked' || outcome === 'unsupported'
+        ? outcome
+        : target.status === 'ok' ? 'ok' : target.status === 'failed' ? 'failed' : 'not-inspected',
+      ...(outcome ? { outcome } : {}),
+      ...(notes?.length ? { notes } : {}),
       ...(target.wgslLines !== undefined ? { wgslLines: target.wgslLines } : {}),
       ...(generatedUri ? { generatedWgsl: displayPath(generatedUri, session.io.cwd) } : {}),
     };
@@ -299,9 +315,9 @@ export function selectTargets(
   const selected: ModuleEntry[] = [];
   for (const [path, discovered] of modules) {
     const targets = discovered.targets.filter((target) => {
-      const hit = names.find((name) => name === target.label || target.symbolNames.includes(name));
-      if (hit !== undefined) matched.add(hit);
-      return hit !== undefined;
+      const hits = names.filter((name) => name === target.label || target.symbolNames.includes(name));
+      for (const hit of hits) matched.add(hit);
+      return hits.length > 0;
     });
     if (targets.length > 0) selected.push([path, discovered, targets]);
   }
@@ -319,13 +335,24 @@ export async function checkModules(
   for (const [path, discovered, targets] of modules) {
     if (session.interrupted) break;
     const module = await inspectModule(session, path, discovered, targets);
-    files.push(fileResult(session, module, options.minSeverity));
+    files.push(fileResult(session, module, 'hint'));
   }
   for (const path of evaluate) {
     if (session.interrupted) break;
-    files.push(await evaluateModule(session, path, options.minSeverity));
+    files.push(await evaluateModule(session, path, 'hint'));
   }
-  return summarizeCheck(files, Date.now() - startedAt, options.warningsAsErrors);
+  const result = summarizeCheck(files, Date.now() - startedAt, options.warningsAsErrors);
+  if (options.requireConcrete) {
+    result.requireConcrete = true;
+    if (result.summary.assumed > 0 || result.summary.targets === 0) result.ok = false;
+  }
+  return {
+    ...result,
+    files: result.files.map((file) => ({
+      ...file,
+      diagnostics: filterBySeverity(file.diagnostics, options.minSeverity),
+    })),
+  };
 }
 
 const TYPEGPU_SPECIFIER = /^(typegpu|@typegpu\/)/;
@@ -355,8 +382,8 @@ export async function modulesToEvaluate(
 
 /**
  * Imports the module and reports whether it threw, what its GPU calls came
- * back with, and what it wrote to the console. Nothing here has a source
- * location: the module is the unit, so every finding sits on its first line.
+ * back with, and what it wrote to the console. Mapped initialization failures
+ * retain their authored source; otherwise the module's first line is the fallback.
  */
 export async function evaluateModule(
   session: Session,
@@ -382,16 +409,31 @@ export async function evaluateModule(
 
   const diagnostics: CliDiagnostic[] = [];
   const seen = new Set<string>();
-  const report = (severity: CliSeverity, code: string, message: string) => {
+  const report = (severity: CliSeverity, code: string, message: string, error?: unknown) => {
     const key = `${severity}|${code}|${message}`;
     if (seen.has(key)) return;
     seen.add(key);
-    diagnostics.push({ path: shown, line: 1, column: 1, endLine: 1, endColumn: 1, severity, code, message, related: [] });
+    const source = failureSourceLocation(error, session.io.cwd);
+    diagnostics.push({ path: shown, line: 1, column: 1, endLine: 1, endColumn: 1, severity, code, message, related: [],
+      ...(source ? { ...source, endLine: source.line, endColumn: source.column, affectedModules: [shown] } : {}) });
   };
   if (failure !== undefined) report('error', 'module-evaluation', failure);
   if (output) {
-    for (const cause of output.causes ?? []) report('error', 'module-evaluation', cause.message);
-    for (const pageError of output.pageErrors ?? []) report('error', 'module-evaluation', pageError);
+    const causeErrors = new Set<string>();
+    for (const cause of output.causes ?? []) {
+      const environment = cause.tier === 'environment';
+      report(environment ? 'hint' : 'error', environment ? 'inspection-unavailable' : 'target-resolution', cause.message, cause.error);
+      causeErrors.add(cause.message);
+      const errorMessage = readMessage(cause.error);
+      if (errorMessage) causeErrors.add(errorMessage);
+      if (cause.error && typeof cause.error === 'object' && 'stack' in cause.error && typeof cause.error.stack === 'string') {
+        causeErrors.add(cause.error.stack);
+      }
+    }
+    for (const pageError of output.pageErrors ?? []) {
+      const head = pageError.split('\n')[0]!.replace(/^[A-Za-z]*Error: /, '');
+      if (!causeErrors.has(pageError) && !causeErrors.has(head)) report('error', 'module-evaluation', pageError);
+    }
     for (const call of output.calls ?? []) {
       const name = call.name ?? 'GPU call';
       const callError = readMessage(call.error);
@@ -411,11 +453,26 @@ export async function evaluateModule(
   const console = output ? consoleMessages(output.console) : [];
   return {
     path: shown,
-    targets: [{ id: 'module', label: basename(path), kind: 'module', status: failed ? 'failed' : 'ok' }],
+    targets: [{ id: 'module', label: basename(path), kind: 'module',
+      status: failed ? (output?.causes?.length ? 'blocked' : 'failed') : 'ok',
+      outcome: failed ? (output?.causes?.length ? 'blocked' : 'failed') : 'passed-with-assumptions',
+      notes: failed
+        ? (output?.causes ?? []).map((cause) => ({ code: cause.code, message: cause.message }))
+        : [{ code: 'module-evaluation', message: 'The module evaluated, but no requested shader or pipeline was validated.' }],
+    }],
     diagnostics: filterBySeverity(diagnostics, minSeverity),
     ...(console.length > 0 ? { console } : {}),
     elapsedMs: Date.now() - startedAt,
   };
+}
+
+function failureSourceLocation(error: unknown, cwd: string): { path: string; line: number; column: number } | undefined {
+  if (!error || typeof error !== 'object' || !('sourceLocation' in error)) return undefined;
+  const source = error.sourceLocation;
+  if (!source || typeof source !== 'object' || !('path' in source) || !('line' in source) || !('column' in source)) return undefined;
+  if (typeof source.path !== 'string' || typeof source.line !== 'number' || typeof source.column !== 'number' ||
+      !Number.isInteger(source.line) || !Number.isInteger(source.column) || source.line < 1 || source.column < 1) return undefined;
+  return { path: displayPath(source.path, cwd), line: source.line, column: source.column };
 }
 
 function readMessage(error: unknown): string | undefined {

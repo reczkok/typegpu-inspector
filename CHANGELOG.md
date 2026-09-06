@@ -6,6 +6,39 @@ and released together. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.4] - 2026-09-06
+
+### Fixed
+
+- Named fragment output records now synthesize matching render targets,
+  including signed/unsigned integer formats and omitted builtin outputs.
+- Runtime-sized accessors no longer generate illegal empty array literals.
+  Missing storage bindings are blocked checks with actionable binding guidance.
+- Reference argument probes pass actual references, including scalar refs;
+  detached value probes that need a reference caller are classified as blocked.
+- Browser-incompatible Node imports and inspection timeouts remain environment
+  limitations, rather than being reported as shader bugs.
+- Shared module initialization errors map back to their original source and
+  report once across importing modules, with affected call sites retained.
+- Bulk CLI/interactive checks hide hint details by default, preserve diagnostic
+  counts, and show complete details for a selected target. Interactive review
+  distinguishes blocked/unsupported checks from shader failures.
+- Diagnostic severity filters no longer change exit status or disable
+  `--warnings-as-errors`. Missing target names return consistent failing JSON;
+  vertex and fragment aliases selecting the same pipeline both match correctly.
+- JSON preserves target outcomes and actionable incomplete-check notes. Binding
+  values borrowed from another caller are now assumption-qualified too.
+- The runtime corpus accepts repository or docs-app roots, correctly reads its
+  positional argument, and no longer expects a React component to be a shader.
+
+### Added
+
+- `check --require-concrete` rejects assumption-qualified checks and empty
+  selections, for CI callers that supply the intended pipeline configuration.
+  Help and reports distinguish exploratory discovery from concrete validation.
+- Regression coverage for real storage bindings, named fragment outputs,
+  reference calls, source-attributed import failures, and CLI automation gates.
+
 ## [0.8.3] - 2026-09-02
 
 ### Fixed

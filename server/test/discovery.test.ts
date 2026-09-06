@@ -979,6 +979,36 @@ describe('discoverTypeGpuModule', () => {
     ).toBe(false);
   });
 
+  it('does not discover a React component whose shaders and pipelines live inside hooks', () => {
+    const result = discoverTypeGpuModule(
+      '/project/confetti.tsx',
+      `
+        import React, { useMemo } from 'react';
+        import { useRoot } from '@typegpu/react';
+
+        const vertexShader = (input: d.v4f) => {
+          'use gpu';
+          return input;
+        };
+
+        export function App() {
+          const root = useRoot();
+          const pipeline = useMemo(() => root.createRenderPipeline({
+            vertex: vertexShader,
+            fragment: ({ color }) => {
+              'use gpu';
+              return color;
+            },
+          }), []);
+          return <canvas data-pipeline={pipeline} />;
+        }
+      `,
+    );
+
+    expect(result.symbols.map((symbol) => symbol.name)).toEqual(['vertexShader']);
+    expect(result.targets.map((target) => target.id)).toEqual(['resolvable:vertexShader']);
+  });
+
   it('recognizes the unified pipeline constructor and comptime constants', () => {
     const result = discoverTypeGpuModule(
       '/project/unified.ts',

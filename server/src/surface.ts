@@ -724,6 +724,7 @@ export function createDiagnostics(
           sourceUri,
           targetId: id,
           ...crossFileData(failureMapping?.relatedSource),
+          ...(target.report.causeId ? moduleFailureData(target.report.error, targetFailure(target.report)) : {}),
           ...(failureMapping
             ? {
                 mapping: {
@@ -849,6 +850,15 @@ function anchorRank(entry: MappedDiagnosticEntry): number {
   if (entry.anchor === 'statement') return 0;
   if (entry.anchor === 'call-site') return 1 + entry.viaDepth;
   return DECLARATION_ANCHOR_RANK;
+}
+
+/** Only runtime-attributed module failures can fold across importing modules. */
+function moduleFailureData(error: unknown, message: string): { moduleFailure?: { uri: string; range: Range; message: string } } {
+  const source = isRecord(error) && isRecord(error.sourceLocation) ? error.sourceLocation : undefined;
+  if (!source || typeof source.path !== 'string' || typeof source.line !== 'number' ||
+      typeof source.column !== 'number' || source.line < 1 || source.column < 1) return {};
+  const start = { line: source.line - 1, character: source.column - 1 };
+  return { moduleFailure: { uri: pathToFileURL(source.path).href, range: { start, end: start }, message } };
 }
 
 type RelatedSource = NonNullable<WgslDiagnosticMapping['relatedSource']>;

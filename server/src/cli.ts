@@ -191,6 +191,10 @@ async function runCheck(command: CheckCommand, io: CliIo): Promise<number> {
     session.settle();
     for (const name of unmatched) io.stderr(`No target named ${JSON.stringify(name)}.\n`);
     const result = await checkModules(session, selected, command, evaluate);
+    if (unmatched.length > 0) {
+      result.ok = false;
+      result.unmatchedTargets = unmatched;
+    }
     if (session.interrupted) return EXIT_INTERRUPTED;
     emitCheck(session, result, command);
     if (!command.watch) return result.ok && unmatched.length === 0 ? EXIT_OK : EXIT_FINDINGS;
@@ -282,9 +286,9 @@ async function inspectSelected(
     const discovered = await discoverModule(path);
     const targets = discovered.targets.filter((target) => {
       if (requested.length === 0) return true;
-      const hit = requested.find((name) => name === target.label || target.symbolNames.includes(name));
-      if (hit !== undefined) matched.add(hit);
-      return hit !== undefined;
+      const hits = requested.filter((name) => name === target.label || target.symbolNames.includes(name));
+      for (const hit of hits) matched.add(hit);
+      return hits.length > 0;
     });
     if (targets.length === 0) continue;
     const module = await inspectModule(session, path, discovered, targets);
@@ -366,7 +370,8 @@ async function runWgsl(command: WgslCommand, io: CliIo): Promise<number> {
 type ReportEntry = {
   path: string;
   label: string;
-  status: 'ok' | 'failed';
+  status: 'ok' | 'failed' | 'blocked' | 'unsupported';
+  outcome?: 'passed' | 'passed-with-assumptions' | 'failed' | 'blocked' | 'unsupported';
   markdown?: string;
   reason?: string;
 };
@@ -393,12 +398,15 @@ async function runReport(command: ReportCommand, io: CliIo): Promise<number> {
         session.surface,
       );
       const materialized = module.inspection.targets.get(target.id);
-      const status: ReportEntry['status'] = materialized?.report.ok ? 'ok' : 'failed';
-      if (!response.ok || status === 'failed') failures += 1;
+      const outcome = materialized?.report.outcome;
+      const status: ReportEntry['status'] = outcome === 'blocked' || outcome === 'unsupported'
+        ? outcome : materialized?.report.ok ? 'ok' : 'failed';
+      if (!response.ok || status !== 'ok') failures += 1;
       return {
         path: displayPath(module.path, io.cwd),
         label: target.label,
         status,
+        ...(outcome ? { outcome } : {}),
         ...(response.ok ? { markdown: response.markdown } : { reason: response.reason }),
       };
     });

@@ -33,6 +33,13 @@ const INSPECTION_TIMEOUT_PATTERN = /TypeGPU inspection timed out/;
 const CANVAS_SETUP_PATTERN =
   /Cannot read properties of null \(reading 'getContext'\)|Failed to execute 'getContext'/;
 const REFERENCE_ARGUMENT_PATTERN = /Property '\$' not found on/;
+const REFERENCE_OF_ARGUMENT_PATTERN = /d\.ref\([^)]+\) is illegal, cannot take a reference of an argument/;
+const NODE_ONLY_IMPORT_PATTERN = /Module ["'][^"']+["'] has been externalized for browser compatibility/;
+const NODE_ONLY_IMPORT_DIAGNOSTIC: TargetDiagnostic = {
+  code: 'browser-capability-unavailable',
+  message: 'This module imports Node-only APIs that cannot run in the browser inspection harness.',
+  hint: 'Inspect the shader module directly, or exclude Node-only test files with --ignore. This does not indicate a shader error.',
+};
 
 type TargetDiagnosticRule = {
   matches(message: string, value: unknown): boolean;
@@ -70,6 +77,10 @@ export function createWrapperRequiredDiagnostic(valueSummary: unknown): TargetDi
 }
 
 const TARGET_DIAGNOSTIC_RULES: TargetDiagnosticRule[] = [
+  {
+    matches: (message) => NODE_ONLY_IMPORT_PATTERN.test(message),
+    create: (_message, _value, _kind, valueSummary) => ({ ...NODE_ONLY_IMPORT_DIAGNOSTIC, valueSummary }),
+  },
   {
     matches: (message) => REFERENCE_ARGUMENT_PATTERN.test(message),
     create: (_message, _value, _kind, valueSummary) => ({
@@ -194,6 +205,10 @@ const TARGET_DIAGNOSTIC_RULES: TargetDiagnosticRule[] = [
 
 const INSPECTION_FAILURE_RULES: InspectionFailureRule[] = [
   {
+    matches: (message) => NODE_ONLY_IMPORT_PATTERN.test(message),
+    diagnostic: NODE_ONLY_IMPORT_DIAGNOSTIC,
+  },
+  {
     matches: (message) => CANVAS_SETUP_PATTERN.test(message),
     diagnostic: {
       code: 'canvas-dom-setup-required',
@@ -287,6 +302,7 @@ export function createSlotBindingRequiredDiagnostic(options: {
   appliedSlotNames: string[];
   valueSummary?: unknown;
   autoBindAttempted: boolean;
+  bindingReason?: string;
 }): TargetDiagnostic {
   const { slotName, appliedSlotNames, valueSummary, autoBindAttempted } = options;
   const applied = appliedSlotNames.length > 0
@@ -297,7 +313,9 @@ export function createSlotBindingRequiredDiagnostic(options: {
     message: `The selected target depends on 'slot:${slotName}', but no value was bound for that slot${
       autoBindAttempted ? ' and the inspector could not auto-bind it' : ''
     }.`,
-    hint: (autoBindAttempted
+    hint: options.bindingReason
+      ? `${options.bindingReason} Bind a storage buffer usage with root.with(accessor, buffer.as('readonly')) or return a pipeline with that binding from an inspection caller.`
+      : (autoBindAttempted
       ? `No matching accessor or borrowable binding was found among module exports, setup values, and sibling targets.${applied} Bind the slot through a symbol target \`with\` entry, \`probeBindings\`, or a \`root.with(slot, value)\` wrapper — exporting an accessor for this slot, or a pipeline/bound function that provides it, enables auto-binding.`
       : `Bind the slot through a symbol target \`with\` entry, or build a wrapper with \`root.with(slot, value)\` in setupBody/inlineCode.${applied}`),
     valueSummary,
@@ -327,6 +345,7 @@ export function diagnoseTargetFailure(
   value: unknown,
   kind: InspectionTargetKind,
   error: unknown,
+  context: { hasArgumentProbe?: boolean } = {},
 ): TargetDiagnostic[] {
   if (error instanceof TargetDiagnosticError) {
     return error.diagnostics;
@@ -334,6 +353,15 @@ export function diagnoseTargetFailure(
 
   const message = getErrorMessage(error);
   const valueSummary = summarizeTargetValue(value);
+
+  if (context.hasArgumentProbe && REFERENCE_OF_ARGUMENT_PATTERN.test(message)) {
+    return [{
+      code: 'reference-wrapper-required',
+      message: 'The inspection wrapper passed a value to a helper that takes a reference of that argument.',
+      hint: 'Inspect an authored caller that passes a local with d.ref, or supply a refSchema probe argument. The detached value probe cannot validate this call shape.',
+      valueSummary,
+    }];
+  }
 
   return TARGET_DIAGNOSTIC_RULES
     .filter((rule) => rule.matches(message, value))
