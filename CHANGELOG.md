@@ -6,6 +6,45 @@ and released together. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-09-08
+
+### Added
+
+- Inspect private and non-exported nested shader helpers through their original
+  runtime objects. Separate closure instances retain their captured values and
+  produce individually inspectable WGSL and compiler diagnostics.
+- Reusable specialization fixtures through CLI `--context-file` and the editor's
+  `contextFile` setting. Select closure instances with `--instance`, binding
+  usages with `--usage`, and factory-result members through fixture contexts.
+- Inspect actual factory results, including records, arrays, conditional results,
+  aliases, and computed properties, without invoking CPU factories or getters.
+- Static importer suggestions help locate explicit setup for blocked helpers.
+  Reports preserve context labels, closure instances, binding provenance, and
+  helper argument assumptions across the CLI and editor.
+
+### Changed
+
+- Automatic binding discovery uses complete observed binding sets. It no longer
+  executes neighboring modules or combines individual values from unrelated
+  callers. Checks that relied on that behavior may now be blocked; load the
+  intended caller in fixture setup or supply explicit bindings to reproduce its
+  shader context.
+- Helper planning uses lexical bindings and complete call-site argument tuples.
+  Missing arguments remain visible instead of being filled from unrelated calls.
+- Shader access and factory inspection share runtime target preparation,
+  replacing copied-module identity matching and static return-shape inference.
+
+### Fixed
+
+- Failed dependency optimization no longer stalls inspection while Vite shuts
+  down. Subsequent shader requests recover in the same language-server process.
+- JavaScript discovery supports `.js`, `.jsx`, `.mjs`, and `.cjs` without crashing
+  the isolated TypeScript binding checker.
+- Private bindings preserve slot/accessor identity; nested schemas and shadowed
+  helper names resolve in their lexical scope.
+- Saving after a context change refreshes captured instance counts and generated
+  WGSL rather than retaining the previous run's expanded targets.
+
 ## [0.8.4] - 2026-09-06
 
 ### Fixed
@@ -334,6 +373,8 @@ First public release: VS Code Marketplace, and Zed as a dev extension.
 Internal iterations: hover and inlay surface work, discovery and diagnostics
 tuning, packaging experiments. Not published to any store.
 
+[0.9.0]: https://github.com/reczkok/typegpu-inspector/releases/tag/v0.9.0
+[0.8.4]: https://github.com/reczkok/typegpu-inspector/releases/tag/v0.8.4
 [0.8.3]: https://github.com/reczkok/typegpu-inspector/releases/tag/v0.8.3
 [0.8.2]: https://github.com/reczkok/typegpu-inspector/releases/tag/v0.8.2
 [0.8.1]: https://github.com/reczkok/typegpu-inspector/releases/tag/v0.8.1
