@@ -28,6 +28,8 @@ export type NormalizedInput = Required<
     | 'reuseBrowser'
   >
 > & {
+  symbolModulePath?: string | undefined;
+  symbolDeclarations?: number[] | undefined;
   cwd: string;
   diagnosticsOnly: boolean;
   modulePath?: string | undefined;
@@ -62,6 +64,8 @@ export function normalizeInput(input: InspectTypegpuModuleInput): NormalizedInpu
   const quiescent = input.quiescent ?? DEFAULT_QUIESCENT;
   const base = {
     cwd,
+    symbolModulePath: input.symbolModulePath,
+    symbolDeclarations: input.symbolDeclarations,
     exportName: input.exportName ?? 'inspect',
     timeoutMs: input.timeoutMs ?? DEFAULT_INSPECTION_TIMEOUT_MS,
     viteConfigPath: input.viteConfigPath

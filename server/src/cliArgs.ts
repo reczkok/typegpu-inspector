@@ -8,6 +8,9 @@ const FORMATS: readonly OutputFormat[] = ['text', 'json', 'github'];
 
 /** Runtime settings the CLI can override; absent fields keep the server defaults. */
 export type RuntimeOptions = {
+  instance?: number;
+  usage?: number;
+  contextFile?: string;
   projectRoot?: string;
   timeoutMs?: number;
   inspectorPackage?: string;
@@ -297,6 +300,9 @@ function buildProgram(io: ParseIo, version: string, emit: (command: CliCommand) 
 type GlobalCliOptions = { quiet?: boolean; color?: boolean };
 
 type RuntimeCliOptions = {
+  instance?: number;
+  usage?: number;
+  contextFile?: string;
   projectRoot?: string;
   timeoutMs?: number;
   inspectorPackage?: string;
@@ -330,6 +336,9 @@ type TargetedOptions = GlobalCliOptions & RuntimeCliOptions & {
 
 function withRuntimeOptions(command: Command): Command {
   return command
+    .option('--context-file <file>', 'JSON inspection fixture with module, setupBody, and per-target contexts')
+    .option('--usage <n>', 'Select one complete binding set from this run', nonnegativeInteger)
+    .option('--instance <n>', 'Inspect only this zero-based nested closure instance (default: all)', nonnegativeInteger)
     .option('--project-root <dir>', 'Project root the runtime infers config from (default: current directory)')
     .option('--timeout-ms <n>', 'Budget per module, session start excluded (default: 45000)', positiveInteger)
     .option('--feature <name>', 'WebGPU feature to request from the adapter; repeatable', collect)
@@ -354,6 +363,12 @@ function collect(value: string, previous: string[] | undefined): string[] {
   return [...(previous ?? []), value];
 }
 
+function nonnegativeInteger(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) throw new InvalidArgumentError('Expected a nonnegative integer.');
+  return parsed;
+}
+
 function positiveInteger(value: string): number {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) {
@@ -372,6 +387,9 @@ function globalOptions(options: GlobalCliOptions): GlobalOptions {
 
 function runtimeOptions(options: RuntimeCliOptions): RuntimeOptions {
   return {
+    ...(options.usage !== undefined ? { usage: options.usage } : {}),
+    ...(options.instance !== undefined ? { instance: options.instance } : {}),
+    ...(options.contextFile !== undefined ? { contextFile: options.contextFile } : {}),
     ...(options.projectRoot !== undefined ? { projectRoot: options.projectRoot } : {}),
     ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
     ...(options.inspectorPackage !== undefined ? { inspectorPackage: options.inspectorPackage } : {}),

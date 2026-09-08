@@ -162,6 +162,8 @@ function createDiagnosticsReport(report: TypeGpuInspectionReport) {
     targets: report.targets.map((target) =>
       omitUndefined({
         label: target.label,
+        parentLabel: target.parentLabel,
+        context: target.context,
         kind: target.kind,
         ok: target.ok,
         outcome: target.outcome,
@@ -198,6 +200,8 @@ function summarizeTarget(
   const compact = options.verbosity === 'summary';
   return omitUndefined({
     label: target.label,
+    parentLabel: target.parentLabel,
+    context: target.context,
     kind: target.kind,
     ok: target.ok,
     outcome: target.outcome,

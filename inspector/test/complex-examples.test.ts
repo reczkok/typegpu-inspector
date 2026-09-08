@@ -49,7 +49,7 @@ describe('complex examples', () => {
     expect(report.stats.computePipelineCount).toBe(3);
   });
 
-  maybeIt('auto-binds a bare function by borrowing from an exported bound sibling', async () => {
+  maybeIt('inspects a bare function in its exported bound sibling context', async () => {
     const report = await inspectTypegpuModule({
       cwd,
       source: { kind: 'modulePath', modulePath: 'examples/complex/slot-borrowed-shading.ts' },
@@ -57,17 +57,10 @@ describe('complex examples', () => {
     });
 
     expect(report.ok, JSON.stringify(report.targets, null, 2)).toBe(true);
-    expect(report.targets[0]?.label).toBe('bare shading');
+    expect(report.targets[0]?.label).toBe('bare shading [usage 0]');
     expect(report.targets[0]?.wgsl).toContain('normalize');
-    expect(report.targets[0]?.diagnostics).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          code: 'slot-bindings-auto-applied',
-          severity: 'note',
-          hint: expect.stringContaining('borrowed'),
-        }),
-      ]),
-    );
+    expect(report.targets[0]?.context?.association).toBe('direct');
+    expect(report.targets[0]?.ledger).toEqual(expect.arrayContaining([expect.objectContaining({ provider: 'observed-context' })]));
     expect(report.targets[1]?.ok).toBe(true);
   });
 

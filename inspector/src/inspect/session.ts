@@ -116,7 +116,11 @@ export class InspectorSession {
 
     this.activeRuns++;
     this.lastUsedAt = Date.now();
+    const previousSymbolModule = this.input.current?.symbolModulePath;
     this.input.current = input;
+    for (const path of new Set([previousSymbolModule, input.symbolModulePath])) {
+      if (path) this.server.moduleGraph.onFileChange(path);
+    }
     this.serverErrors.length = 0;
     this.invalidateChangedModules();
     this.server.moduleGraph.onFileChange(input.modulePath);

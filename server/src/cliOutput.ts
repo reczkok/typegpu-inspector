@@ -37,6 +37,8 @@ export type CliDiagnostic = CliLocation & {
 };
 
 export type CliTargetStatus = {
+  contextSuggestions?: InspectorTargetReport['contextSuggestions'];
+  context?: import('./protocol.js').InspectorTargetReport['context'];
   id: string;
   label: string;
   kind?: string;

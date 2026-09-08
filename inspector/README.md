@@ -64,7 +64,17 @@ typegpu-runtime-inspector-mcp@<version>` as a stdio command named
   name).
 - `symbols`: `modulePath` plus `targets`, selectors into the module's exports.
   `setupBody` runs before target creation; `includePrivate` also exposes
-  top-level locals.
+  top-level locals through references to the original module, preserving live
+  bindings and object identity. For a nested shader declaration, provide its
+  original zero-based source offset as `declaration` and optionally select a
+  zero-based `instance`. Without `instance`, reports cover all captured instances
+  and include `parentLabel` plus `context` metadata. The enclosing CPU scope must
+  execute during module import or explicit setup; GPU bodies are not instrumented.
+  A selector target's `context` accepts `label`, `arguments` (schema/refSchema/value
+  selector entries), and `with` (slot/value selector pairs), and disables automatic
+  binding inference. Missing bindings for nested instances are reported as blocked.
+  Neighboring callers are never imported automatically to find bindings;
+  `setupBody` can explicitly import a caller or provide the target context.
 
 A target's `kind` is `compute-pipeline`, `render-pipeline`, `resolvable`, or
 `resource`. `resource` produces structural reports for schemas, buffers,
@@ -90,12 +100,16 @@ TypeGPU monorepo, prefer one package-root alias
 (`{ "typegpu": "packages/typegpu/src" }`) over aliasing `typegpu/data`,
 `typegpu/std`, and `typegpu/common` separately.
 
-Unresolved slots, accessors, and helper arguments go through a provider chain:
-explicit `with`/`probeBindings`/`probeArguments` entries, then bindings the
-application itself made, then values borrowed or synthesized from module and
-import scope, then synthesized descriptor parts. Every decision lands in the
-target's `ledger`. `environment.autoBind: false` surfaces raw failures
-instead.
+Explicit contexts supply helper arguments and slot bindings. Otherwise, observed
+pipeline branches and bound functions supply complete binding sets, each with its
+own report and `context.usage` index. Selector `usage` chooses one set. A direct
+relationship uses `observed-context` provenance; sharing a slot only identifies a
+candidate, which remains assumption-qualified. Sets never borrow from each
+other, and missing values inside a set are not synthesized. Without a matching
+set, schema synthesis can still produce an explicitly qualified probe.
+`environment.autoBind: false` disables automatic context selection and synthesis.
+The editor and CLI share `--context-file` JSON fixtures and offer static importer
+suggestions for blocked targets; no neighboring module executes implicitly.
 
 Symbol discovery is exploratory: a target may compile with synthesized
 arguments, descriptor parts, or a binding borrowed from another caller. Such
@@ -196,3 +210,19 @@ docs examples through the inspector:
 TYPEGPU_DOCS_ROOT=/path/to/TypeGPU TYPEGPU_MCP_RUN_BROWSER_TESTS=1 \
   pnpm vitest run test/docs-survey.test.ts
 ```
+
+For an existing factory result, set `inspectMembers: true` on a selector target.
+The runtime enumerates actual shader/resource leaves in records and arrays.
+`member: ["passes", "0", "shade"]` selects one exact property path, including
+keys containing dots. `member: []` selects the root value. Combine a member with
+`context.arguments` or `context.with` to specialize that returned helper.
+Reports expose `context.resultPath`; recorded pipeline descriptors also provide
+`context.pipelineStages` for matching module-level stage bindings.
+
+Traversal never invokes getters or returned CPU functions. Getters and traversal
+limits are blocked reports; cycles terminate. Only enumerable string-keyed
+record/array properties are expanded (12 levels, 2,048 visited values, 128
+results). TypeGPU values are leaves; arbitrary class instances require an explicit
+selector/setup. Bare GPU functions are recognized by their own directive,
+not a directive inside a returned callback. This does not call uninstantiated
+factories or infer erased argument types for returned bare helpers.

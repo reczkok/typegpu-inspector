@@ -18,6 +18,9 @@ export type InspectReportOptions = z.input<typeof reportOptionsObjectSchema>;
 export type StaticAssetRoute = z.input<typeof staticAssetRouteSchema>;
 
 export type InspectTypegpuModuleInput = z.input<typeof moduleInputObjectSchema> & {
+  /** Internal: instrument this original module for private/nested symbol access. */
+  symbolModulePath?: string | undefined;
+  symbolDeclarations?: number[] | undefined;
   reuseBrowser?: boolean | undefined;
   dependencyResolution?: PackageResolutionOptions | undefined;
 };
@@ -99,11 +102,12 @@ export type TargetOutcome =
   | 'blocked';
 
 export type ProviderId =
+  | 'inspection-context'
+  | 'observed-context'
   | 'user-explicit'
   | 'recorded-app-bindings'
   | 'module-scope'
   | 'import-scope'
-  | 'importer-scope'
   | 'synthesis'
   | 'browser-native'
   | 'project-toolchain'
@@ -245,7 +249,25 @@ export type StatementMap = {
   failure?: StatementMapFailure | undefined;
 };
 
+export type ShaderInspectionContext = {
+  resultPath?: string[];
+  pipelineStages?: string[];
+  probe?: { origin: 'schema' | 'call-site'; line?: number; column?: number; missing?: Array<{ index: number; parameter: string; reason: string }> };
+  usage?: number;
+  bindingSource?: string;
+  association?: 'direct' | 'candidate';
+  modulePath?: string;
+  declaration?: number;
+  instance?: number;
+  sourceRevision?: string;
+  label?: string;
+  arguments?: Array<{ schema: string } | { refSchema: string } | { value: string }>;
+  with?: Array<{ slot: string; value: string }>;
+};
+
 export type TypeGpuTargetReport = {
+  parentLabel?: string | undefined;
+  context?: ShaderInspectionContext | undefined;
   label: string;
   kind: InspectionTargetKind;
   ok: boolean;

@@ -5,13 +5,13 @@ import { createFsModuleUrl } from './paths.ts';
  * 'typegpu' specifier that re-exports the real package and wraps ONLY the
  * public root API so the application's own slot bindings, pipeline creations,
  * and uniform initial values are recorded into a per-page registry the
- * requirement engine reads as the recorded-app-bindings provider.
+ * context selector reads without pooling unrelated bindings.
  *
  * Invariants:
  * - Values are never wrapped: pipelines, functions, slots, buffers keep their
  *   original identity (WeakMap metadata, slot equality). Only root/branch
- *   objects get a forwarding Proxy, and every intercepted method falls back
- *   to the direct call on any error.
+ *   objects get a forwarding Proxy. Application exceptions propagate without
+ *   calling the failing method a second time.
  * - The shim imports the real package by /@fs/ URL, which the alias table
  *   never matches — no recursion, and one shared module instance with the
  *   typegpu/data|std|common subpaths.
@@ -24,7 +24,6 @@ import * as __typegpuMcpRealNamespace from ${JSON.stringify(realUrl)};
 
 const __typegpuMcpRegistry = (globalThis.__typegpuMcpRecording ??= {
   roots: [],
-  slotBindings: [],
   pipelines: [],
   uniforms: [],
   frozen: false,
@@ -41,22 +40,21 @@ function __typegpuMcpRecord(collection, entry) {
 
 const __typegpuMcpRootHandlers = {
   with(target, pairs, args) {
-    __typegpuMcpRecord('slotBindings', [args[0], args[1]]);
     return __typegpuMcpWrapRoot(target.with(...args), [...pairs, [args[0], args[1]]]);
   },
   createComputePipeline(target, pairs, args) {
     const pipeline = target.createComputePipeline(...args);
-    __typegpuMcpRecord('pipelines', { kind: 'compute', descriptor: args[0], slotPairs: pairs, pipeline });
+    __typegpuMcpRecord('pipelines', { kind: 'compute', descriptor: { ...args[0] }, slotPairs: pairs, pipeline });
     return pipeline;
   },
   createRenderPipeline(target, pairs, args) {
     const pipeline = target.createRenderPipeline(...args);
-    __typegpuMcpRecord('pipelines', { kind: 'render', descriptor: args[0], slotPairs: pairs, pipeline });
+    __typegpuMcpRecord('pipelines', { kind: 'render', descriptor: { ...args[0] }, slotPairs: pairs, pipeline });
     return pipeline;
   },
   createGuardedComputePipeline(target, pairs, args) {
     const pipeline = target.createGuardedComputePipeline(...args);
-    __typegpuMcpRecord('pipelines', { kind: 'guarded-compute', slotPairs: pairs, pipeline });
+    __typegpuMcpRecord('pipelines', { kind: 'guarded-compute', descriptor: { compute: args[0] }, slotPairs: pairs, pipeline });
     return pipeline;
   },
   createUniform(target, pairs, args) {
@@ -80,7 +78,6 @@ const __typegpuMcpRootHandlers = {
       : transform;
     const branch = target.pipe(observed, ...args.slice(1));
     const addedPairs = added.filter((pair) => Array.isArray(pair) && pair.length >= 2);
-    for (const pair of addedPairs) __typegpuMcpRecord('slotBindings', [pair[0], pair[1]]);
     return __typegpuMcpWrapRoot(branch, [...pairs, ...addedPairs]);
   },
 };
@@ -93,13 +90,7 @@ function __typegpuMcpWrapRoot(root, pairs) {
         ? __typegpuMcpRootHandlers[property]
         : undefined;
       if (handler && typeof target[property] === 'function') {
-        return (...args) => {
-          try {
-            return handler(target, pairs, args);
-          } catch {
-            return target[property](...args);
-          }
-        };
+        return (...args) => handler(target, pairs, args);
       }
       const value = Reflect.get(target, property, target);
       return typeof value === 'function' ? value.bind(target) : value;

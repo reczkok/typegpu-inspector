@@ -105,6 +105,7 @@ export function mergeSettings(
     // on every change; an empty root must mean "unset", or every
     // `projectRoot ?? workspaceRoot` fallback silently degrades to "" and
     // path joins become relative to whatever cwd a process happens to have.
+    ...(typeof raw.contextFile === 'string' ? (raw.contextFile.trim() ? { contextFile: raw.contextFile } : {}) : base.contextFile ? { contextFile: base.contextFile } : {}),
     ...(typeof raw.projectRoot === 'string' && raw.projectRoot.trim() !== ''
       ? { projectRoot: raw.projectRoot }
       : typeof raw.projectRoot === 'string'

@@ -52,6 +52,7 @@ export function collectShapeProvenances(entries: LedgerEntry[]): string[] {
     .filter((entry) =>
       entry.status === 'satisfied' &&
       entry.discoveredBy === 'shape' &&
+      entry.provider !== 'inspection-context' &&
       typeof entry.provenance === 'string'
     )
     .map((entry) => entry.provenance as string);

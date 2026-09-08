@@ -70,7 +70,6 @@ function hasInspectionAssumptions(entries: LedgerEntry[] | undefined): boolean {
       entry.provider === 'synthesis' ||
       entry.provider === 'module-scope' ||
       entry.provider === 'import-scope' ||
-      entry.provider === 'importer-scope' ||
       entry.provider === 'recorded-app-bindings' ||
       (
         entry.provider === 'user-explicit' &&

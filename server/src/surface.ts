@@ -1,3 +1,5 @@
+import { findContextSuggestions } from './contextSuggestions.js';
+import { expandInstanceTargets } from './instanceTargets.js';
 import { createHash } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -142,6 +144,20 @@ export async function materializeInspection(
   output: InspectorOutput,
   requestedTargetIds?: readonly string[],
 ): Promise<DocumentInspection> {
+  const needsContext = (output.targets ?? []).filter(report =>
+    report.diagnostics?.some(diagnostic => ['slot-binding-required', 'selector-not-resolved', 'wrapper-required', 'reference-wrapper-required'].includes(diagnostic.code)));
+  if (needsContext.length > 0) {
+    const suggestions = await findContextSuggestions(workspaceRoot, modulePath).catch(() => ({ candidates: [], truncated: true }));
+    for (const report of needsContext) {
+      report.contextSuggestions = suggestions;
+      if (suggestions.candidates.length) report.diagnostics = [...(report.diagnostics ?? []), {
+        code: 'context-importer-suggestions', severity: 'note',
+        message: 'Static importer candidates are available for an explicit inspection fixture. These modules were not executed and may not call this shader.',
+        hint: suggestions.candidates.map(candidate => `${candidate.path}:${candidate.line}`).join(', ') + (suggestions.truncated ? ' (search limited)' : ''),
+      }];
+    }
+  }
+  const expandedRequested = expandInstanceTargets(discovered, output.targets ?? [], requestedTargetIds);
   const reports = new Map(
     (output.targets ?? []).map((report) => [report.label, report]),
   );
@@ -180,8 +196,7 @@ export async function materializeInspection(
     if (entry) targets.set(...entry);
   }
 
-  const requested = requestedTargetIds ??
-    discovered.targets.map((target) => target.id);
+  const requested = expandedRequested;
   const unreported = new Set(
     requested.filter((targetId) => !targets.has(targetId)),
   );
@@ -256,6 +271,16 @@ export function mergeDocumentInspections(
   if (!previous || previous.sourceVersion !== next.sourceVersion) return next;
 
   const targets = new Map(previous.targets);
+  const requested = new Set(requestedTargetIds);
+  const replacedLabels = new Set<string>();
+  for (const [id, target] of targets) {
+    const selector = target.target.selector;
+    if ((target.target.instanceParentId && requested.has(target.target.instanceParentId)) ||
+      ('selector' in selector && requested.has(id))) {
+      targets.delete(id);
+      replacedLabels.add(target.report.label);
+    }
+  }
   for (const [targetId, target] of next.targets) targets.set(targetId, target);
 
   const targetFailures = new Map(previous.targetFailures ?? []);
@@ -272,7 +297,9 @@ export function mergeDocumentInspections(
   return {
     sourceVersion: next.sourceVersion,
     completedAt: Math.max(previous.completedAt, next.completedAt),
-    output: mergeInspectorOutputs(previous.output, next.output),
+    output: mergeInspectorOutputs({ ...previous.output,
+      targets: (previous.output.targets ?? []).filter(report => !replacedLabels.has(report.label)),
+    }, next.output),
     targets,
     ...(next.failure ? { failure: next.failure } : {}),
     ...(targetFailures.size > 0 ? { targetFailures } : {}),
@@ -305,7 +332,7 @@ export function createHover(
       lines.push(
         '',
         `_Showing ${plural(synthesis.emitted, 'specialization')} inferred ` +
-          'from finite parameter types._',
+          (symbol.probeContext?.origin === 'call-site' ? 'from complete call-site resource tuples._' : 'from finite parameter types._'),
       );
     }
   }
@@ -370,6 +397,11 @@ export function createHover(
       } else if (isPipelineKind(target.report.kind)) {
         lines.push('', `_Using authored pipeline context \`${escapeInline(target.target.label)}\`._`);
       }
+    }
+    if (target.report.context) {
+      const context = target.report.context;
+      const details = [context.probe?.origin === 'call-site' ? `argument probe from call line ${context.probe.line ?? '?'}` : context.probe?.origin === 'schema' ? 'schema argument probe' : undefined, context.bindingSource, context.association === 'candidate' ? 'candidate; application usage unverified' : undefined, context.label, context.instance !== undefined ? `closure instance ${context.instance}` : undefined].filter(Boolean);
+      if (details.length > 0) lines.push('', `_Inspection context: ${details.map(value => escapeMarkdown(String(value))).join(' · ')}._`);
     }
     appendTarget(lines, target, inspection.output, options);
   }
@@ -3325,7 +3357,7 @@ function shortRole(role: TypeGpuRole): string {
 }
 
 function staticRoleDescription(role: TypeGpuRole): string {
-  if (role === 'pipeline-factory' || role === 'resource-factory') {
+  if (role === 'pipeline-factory' || role === 'resource-factory' || role === 'shader-factory') {
     return 'Detected as a factory, but safe inspection needs project-specific arguments. Hover or inspect a concrete value produced by this factory.';
   }
   return `Detected as ${humanRole(role)}, but no safe standalone runtime target was derived. Inspect the containing helper or pipeline for runtime details.`;

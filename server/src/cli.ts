@@ -292,7 +292,9 @@ async function inspectSelected(
     });
     if (targets.length === 0) continue;
     const module = await inspectModule(session, path, discovered, targets);
-    for (const target of targets) selected.push({ module, target });
+    for (const target of module.discovered.targets) {
+      if (module.targetIds.includes(target.id)) selected.push({ module, target });
+    }
   }
   return { selected, unmatched: requested.filter((name) => !matched.has(name)) };
 }
@@ -325,7 +327,8 @@ async function runWgsl(command: WgslCommand, io: CliIo): Promise<number> {
     const entries = picked.selected.map(({ module, target }): WgslEntry => {
       const response = generatedWgsl(1, module.discovered, module.inspection, target.id, new Set());
       const kind = module.inspection.targets.get(target.id)?.report.kind;
-      const head = { path: displayPath(module.path, io.cwd), label: target.label, ...(kind ? { kind } : {}) };
+      const context = module.inspection.targets.get(target.id)?.report.context;
+      const head = { path: displayPath(module.path, io.cwd), label: target.label, ...(context ? { context } : {}), ...(kind ? { kind } : {}) };
       if (!response.ok) {
         failures += 1;
         return { ...head, ok: false, reason: response.reason };

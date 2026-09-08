@@ -25,6 +25,7 @@ import {
   type CliTargetStatus,
   type TextStyle,
 } from './cliOutput.js';
+import { applyInspectionFixture } from './inspectionFixture.js';
 import { discoverTypeGpuModule, type DiscoveredModule, type InspectionTarget } from './discovery.js';
 import { describeTargets } from './editorRequests.js';
 import { collectImportedShaderSymbols, resolveImport } from './moduleGraph.js';
@@ -40,7 +41,7 @@ import {
 } from './surface.js';
 
 export type RuntimeLike = {
-  inspect(modulePath: string, targets: InspectionTarget[], signal?: AbortSignal): Promise<InspectorOutput>;
+  inspect(modulePath: string, targets: InspectionTarget[], signal?: AbortSignal, setupBody?: string): Promise<InspectorOutput>;
   /** Imports the module without targets and reports what happened. */
   evaluate(modulePath: string, signal?: AbortSignal): Promise<InspectorOutput>;
   close(): Promise<void>;
@@ -78,6 +79,9 @@ export type CliIo = {
 // --- session ----------------------------------------------------------------
 
 export type Session = {
+  instance?: number;
+  usage?: number;
+  contextFile?: string;
   io: CliIo;
   root: string;
   settings: InspectorSettings;
@@ -132,6 +136,9 @@ export function createSession(options: SessionOptions, io: CliIo): Session {
   const abort = new AbortController();
   let stopInterrupt: (() => void) | undefined;
   const session: Session = {
+    ...(options.runtime.instance !== undefined ? { instance: options.runtime.instance } : {}),
+    ...(options.runtime.usage !== undefined ? { usage: options.runtime.usage } : {}),
+    ...(options.runtime.contextFile !== undefined ? { contextFile: resolve(io.cwd, options.runtime.contextFile) } : {}),
     io,
     root,
     settings,
@@ -191,6 +198,30 @@ export async function inspectModule(
   targets: InspectionTarget[] = discovered.targets,
 ): Promise<InspectedModule> {
   const startedAt = Date.now();
+  const fixture = session.contextFile ? await applyInspectionFixture(session.contextFile, path, targets, discovered.targets) : undefined;
+  if (fixture) {
+    targets = fixture.targets;
+    for (const target of targets) {
+      const index = discovered.targets.findIndex(t => t.id === target.id);
+      if (index >= 0) discovered.targets[index] = target;
+    }
+  }
+  if (session.instance !== undefined) {
+    targets = targets.map(target => {
+      if (!('selector' in target.selector) || target.selector.declaration === undefined) return target;
+      const selected = { ...target, selector: { ...target.selector, instance: session.instance! } };
+      const index = discovered.targets.findIndex(t => t.id === target.id);
+      if (index >= 0) discovered.targets[index] = selected;
+      return selected;
+    });
+  }
+  if (session.usage !== undefined) {
+    targets = targets.map(target => 'selector' in target.selector ? { ...target, selector: { ...target.selector, usage: session.usage! } } : target);
+    for (const target of targets) {
+      const index = discovered.targets.findIndex(t => t.id === target.id);
+      if (index >= 0) discovered.targets[index] = target;
+    }
+  }
   const targetIds = targets.map((target) => target.id);
   const shown = displayPath(path, session.io.cwd);
   session.progress(
@@ -202,7 +233,7 @@ export async function inspectModule(
   let console: CliConsoleMessage[] = [];
   try {
     const output = await interruptible(
-      session.runtime.inspect(path, targets, session.abort.signal),
+      session.runtime.inspect(path, targets, session.abort.signal, fixture?.setupBody),
       session.abort.signal,
     );
     session.warmed = true;
@@ -215,7 +246,9 @@ export async function inspectModule(
     const message = errorMessage(error);
     inspection = { ...failedTargetInspection(1, targetIds, message), failure: message };
   }
-  return { path, discovered, targetIds, inspection, console, elapsedMs: Date.now() - startedAt };
+  return { path, discovered, targetIds: [...new Set([
+    ...inspection.targets.keys(), ...(inspection.unreported ?? []), ...(inspection.targetFailures?.keys() ?? []),
+  ])], inspection, console, elapsedMs: Date.now() - startedAt };
 }
 
 export type CheckOptions = {
@@ -259,6 +292,8 @@ export function fileResult(session: Session, module: InspectedModule, minSeverit
         ? outcome
         : target.status === 'ok' ? 'ok' : target.status === 'failed' ? 'failed' : 'not-inspected',
       ...(outcome ? { outcome } : {}),
+      ...(materialized?.report.contextSuggestions ? { contextSuggestions: materialized.report.contextSuggestions } : {}),
+      ...(materialized?.report.context ? { context: materialized.report.context } : {}),
       ...(notes?.length ? { notes } : {}),
       ...(target.wgslLines !== undefined ? { wgslLines: target.wgslLines } : {}),
       ...(generatedUri ? { generatedWgsl: displayPath(generatedUri, session.io.cwd) } : {}),

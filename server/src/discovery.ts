@@ -1,3 +1,7 @@
+import { discoverFactoryResults, attachFactoryResults } from './factoryResults.js';
+import { applyHelperPlans, type HelperDeclarations } from './helperPlanning.js';
+export { MAX_SYNTHESIZED_SPECIALIZATIONS } from './helperPlanning.js';
+import { isFnShellCall, isFnShellApplication, isTgpuFactoryCall, readCallee, calleeSegments, unwrap, hasOwnUseGpuDirective, expressionSelector } from './shaderSyntax.js';
 import ts from 'typescript';
 import type { Position, Range } from 'vscode-languageserver';
 import type { StatementPathSegment } from './protocol.js';
@@ -24,8 +28,8 @@ export type TypeGpuRole =
   | 'render-pipeline'
   | 'pipeline-factory'
   | 'resource-factory'
-  | 'pipeline-result'
-  | 'resource-result'
+  | 'shader-factory'
+  | 'factory-result'
   | 'unknown';
 
 export type DiscoveredSymbol = {
@@ -38,9 +42,8 @@ export type DiscoveredSymbol = {
   /** `'use gpu'` bodies, for statement-level mapping from the runtime's statement map. */
   shaderBodies?: ShaderBody[];
   targetIds: string[];
-  probeArguments?: string[];
   probeArgumentPlan?: ProbeArgumentPlanEntry[];
-  probeBindings?: ProbeBinding[];
+  probeContext?: ProbeContext;
   probeSpecializations?: ProbeSpecialization[];
   specializationSynthesis?: SpecializationSynthesis;
   pipelineSource?: PipelineSource;
@@ -88,8 +91,16 @@ export type ProbeArgumentPlanEntry =
   | { refSchema: string }
   | { value: string };
 
+export type ProbeContext = {
+  origin: 'schema' | 'call-site';
+  line?: number;
+  column?: number;
+  missing?: Array<{ index: number; parameter: string; reason: string }>;
+};
+
 export type ProbeSpecialization = {
-  probeArguments: string[];
+  probeArgumentPlan: ProbeArgumentPlanEntry[];
+  probeContext?: ProbeContext;
   signature: string;
 };
 
@@ -99,13 +110,6 @@ export type SpecializationSynthesis = {
   truncated: boolean;
 };
 
-/**
- * Each specialization becomes an independently resolved browser target. Keep
- * the default small: it is large enough for the common 2x2 and
- * 2x2x2 finite-generic cases without letting a broad union make every save
- * fan out into dozens of shader resolutions.
- */
-export const MAX_SYNTHESIZED_SPECIALIZATIONS = 8;
 
 export type InspectorSelector =
   | {
@@ -123,33 +127,27 @@ export type InspectorSelector =
   | {
       kind: 'compute-pipeline' | 'render-pipeline' | 'resolvable' | 'resource';
       selector: string;
+      inspectMembers?: boolean;
+      member?: string[];
+      declaration?: number;
+      instance?: number;
+      usage?: number;
+      context?: { label?: string; arguments?: ProbeArgumentPlanEntry[]; with?: Array<{ slot: string; value: string }> };
       unwrap?: boolean;
       label: string;
       probeArguments?: string[];
       probeArgumentPlan?: ProbeArgumentPlanEntry[];
+      probeContext?: ProbeContext;
       probeBindings?: ProbeBinding[];
     };
 
 export type InspectionTarget = {
+  instanceParentId?: string;
   id: string;
   label: string;
   selector: InspectorSelector;
   symbolNames: string[];
   pipelineSource?: PipelineSource;
-};
-
-type FactoryOutput = {
-  path: string[];
-  role: TypeGpuRole;
-  pipelineSource?: NonNullable<DiscoveredSymbol['pipelineSource']>;
-};
-
-type FactoryResultBinding = FactoryOutput & {
-  factoryName: string;
-  /** Concrete value produced by this factory call, before selecting an output leaf. */
-  resultSelector: string;
-  selector: string;
-  resultName: string;
 };
 
 /** A static import or re-export edge to another module. */
@@ -186,21 +184,18 @@ export function discoverTypeGpuModule(
   );
   const locals = new Map<string, Omit<DiscoveredSymbol, 'name' | 'targetIds'>>();
   const symbols: DiscoveredSymbol[] = [];
-  const probeBindingsByHelper = discoverZeroAccessorBindingsByHelper(sourceFile);
-  const contextualProbeInputs = discoverContextualProbeInputs(sourceFile);
-  const factoryOutputs = discoverFactoryOutputs(sourceFile);
-  const factoryResultBindings = discoverFactoryResultBindings(
-    sourceFile,
-    factoryOutputs,
-  );
-  const factoryResultRoles = summarizeFactoryResultRoles(factoryResultBindings);
+  const helperDeclarations: HelperDeclarations = new Map();
+  const factoryResults = discoverFactoryResults(sourceFile, node => {
+    const role = inferFunctionRole(node);
+    return role === 'pipeline-factory' || role === 'resource-factory' || role === 'shader-factory';
+  });
 
   for (const statement of sourceFile.statements) {
     if (ts.isVariableStatement(statement)) {
       for (const declaration of statement.declarationList.declarations) {
         if (!ts.isIdentifier(declaration.name)) {
           for (const identifier of bindingIdentifiers(declaration.name)) {
-            const role = factoryResultRoles.get(identifier.text);
+            const role = factoryResults.has(identifier.text) ? 'factory-result' as const : undefined;
             if (!role) continue;
             const discovered = {
               role,
@@ -218,7 +213,7 @@ export function discoverTypeGpuModule(
           continue;
         }
         const role =
-          factoryResultRoles.get(declaration.name.text) ??
+          (factoryResults.has(declaration.name.text) ? 'factory-result' as const : undefined) ??
           (declaration.initializer
             ? inferExpressionRole(declaration.initializer)
             : 'unknown' as TypeGpuRole);
@@ -228,14 +223,9 @@ export function discoverTypeGpuModule(
           ...(declaration.initializer && hasGeneratedShaderSource(role)
             ? shaderSourceFields(declaration.initializer, sourceFile)
             : {}),
-          ...(contextualProbeInputs.get(declaration.name.text) ??
-            probeArgumentsFromExpression(declaration.initializer, sourceFile)),
-          ...(role === 'shader-helper' &&
-              (probeBindingsByHelper.get(declaration.name.text)?.length ?? 0) > 0
-            ? { probeBindings: probeBindingsByHelper.get(declaration.name.text)! }
-            : {}),
           ...pipelineSourceFromExpression(declaration.initializer, sourceFile),
         };
+        if (declaration.initializer && hasGeneratedShaderSource(role)) helperDeclarations.set(declaration.name.text, declaration.initializer);
         locals.set(declaration.name.text, discovered);
         if (isExported(statement)) {
           symbols.push({
@@ -256,19 +246,8 @@ export function discoverTypeGpuModule(
         ...(hasGeneratedShaderSource(role) && statement.body
           ? shaderSourceFields(statement, sourceFile)
           : {}),
-        ...(contextualProbeInputs.get(statement.name.text) ??
-          probeArgumentsFromParameters(
-            statement.parameters,
-            sourceFile,
-            new Set(
-              statement.typeParameters?.map((parameter) => parameter.name.text) ?? [],
-            ),
-          )),
-        ...(role === 'shader-helper' &&
-            (probeBindingsByHelper.get(statement.name.text)?.length ?? 0) > 0
-          ? { probeBindings: probeBindingsByHelper.get(statement.name.text)! }
-          : {}),
       };
+      if (hasGeneratedShaderSource(role)) helperDeclarations.set(statement.name.text, statement);
       locals.set(statement.name.text, discovered);
       if (isExported(statement)) {
         symbols.push({
@@ -349,53 +328,10 @@ export function discoverTypeGpuModule(
       });
       symbol.targetIds.push(id);
     } else if (directRoles.has(symbol.role)) {
-      if (symbol.probeSpecializations?.length) {
-        for (
-          const [index, specialization] of symbol.probeSpecializations.entries()
-        ) {
-          const id = `resolvable:${symbol.name}:specialization:${index}`;
-          const label = `${symbol.name}(${specialization.signature})`;
-          targets.push({
-            id,
-            label,
-            selector: {
-              kind: 'resolvable',
-              selector: runtimeName,
-              unwrap: false,
-              label,
-              probeArguments: specialization.probeArguments,
-              ...(symbol.probeBindings?.length
-                ? { probeBindings: symbol.probeBindings }
-                : {}),
-            },
-            symbolNames: [symbol.name],
-          });
-          symbol.targetIds.push(id);
-        }
-      } else {
-        const id = `resolvable:${symbol.name}`;
-        targets.push({
-          id,
-          label: symbol.name,
-          selector: {
-            kind: 'resolvable',
-            selector: runtimeName,
-            unwrap: false,
-            label: symbol.name,
-            ...(symbol.probeArguments?.length
-              ? { probeArguments: symbol.probeArguments }
-              : {}),
-            ...(symbol.probeArgumentPlan?.length
-              ? { probeArgumentPlan: symbol.probeArgumentPlan }
-              : {}),
-            ...(symbol.probeBindings?.length
-              ? { probeBindings: symbol.probeBindings }
-              : {}),
-          },
-          symbolNames: [symbol.name],
-        });
-        symbol.targetIds.push(id);
-      }
+      const id = `resolvable:${symbol.name}`;
+      targets.push({ id, label: symbol.name, symbolNames: [symbol.name],
+        selector: { kind: 'resolvable', selector: runtimeName, unwrap: false, label: symbol.name } });
+      symbol.targetIds.push(id);
     } else if (resourceRoles.has(symbol.role)) {
       const id = `resource:${symbol.name}`;
       targets.push({
@@ -440,7 +376,7 @@ export function discoverTypeGpuModule(
     }
   }
 
-  attachFactoryResultTargets(symbols, targets, factoryResultBindings);
+  attachFactoryResults(symbols, targets, factoryResults);
   removeRedundantComputeTargets(symbols, targets);
 
   const vertices = symbols.filter(
@@ -495,507 +431,72 @@ export function discoverTypeGpuModule(
     }
   }
 
+  discoverNestedShaderSymbols(sourceFile, symbols, targets, helperDeclarations);
+  applyHelperPlans(sourceFile, helperDeclarations, symbols, targets);
+
   return {
-    symbols: symbols.filter((symbol) => symbol.role !== 'unknown'),
+    symbols: symbols.filter((symbol) => symbol.role !== 'unknown' && (symbol.role !== 'shader-factory' || symbol.targetIds.length > 0)),
     targets,
     imports: collectModuleImports(sourceFile),
   };
 }
 
-// Factory analysis is intentionally static and call-site driven. It describes
-// values the application already created, but never invokes a host factory.
-function discoverFactoryOutputs(
-  sourceFile: ts.SourceFile,
-): Map<string, FactoryOutput[]> {
-  const factories = new Map<string, ts.FunctionLikeDeclaration>();
-  for (const statement of sourceFile.statements) {
-    if (
-      ts.isFunctionDeclaration(statement) &&
-      statement.name &&
-      isFactoryRole(inferFunctionRole(statement))
-    ) {
-      factories.set(statement.name.text, statement);
-      continue;
-    }
-    if (!ts.isVariableStatement(statement)) continue;
-    for (const declaration of statement.declarationList.declarations) {
-      if (!ts.isIdentifier(declaration.name) || !declaration.initializer) continue;
-      const value = unwrap(declaration.initializer);
-      if (
-        (ts.isArrowFunction(value) || ts.isFunctionExpression(value)) &&
-        isFactoryRole(inferFunctionRole(value))
-      ) {
-        factories.set(declaration.name.text, value);
-      }
-    }
-  }
-
-  const outputs = new Map<string, FactoryOutput[]>();
-  for (let pass = 0; pass < factories.size + 1; pass += 1) {
-    let changed = false;
-    for (const [name, factory] of factories) {
-      const next = analyzeFactoryOutputs(factory, sourceFile, outputs);
-      if (
-        next.length > 0 &&
-        factoryOutputKey(next) !== factoryOutputKey(outputs.get(name) ?? [])
-      ) {
-        outputs.set(name, next);
-        changed = true;
-      }
-    }
-    if (!changed) break;
-  }
-  return outputs;
-}
-
-function analyzeFactoryOutputs(
-  factory: ts.FunctionLikeDeclaration,
-  sourceFile: ts.SourceFile,
-  knownFactories: Map<string, FactoryOutput[]>,
-): FactoryOutput[] {
-  if (!factory.body) return [];
-  const locals = collectFunctionLocalInitializers(factory.body);
-  if (!ts.isBlock(factory.body)) {
-    return describeFactoryExpression(
-      factory.body,
-      sourceFile,
-      locals,
-      knownFactories,
-      new Set(),
-    );
-  }
-  const returns: ts.Expression[] = [];
-
-  const visit = (node: ts.Node): void => {
-    if (node !== factory.body && ts.isFunctionLike(node)) return;
-    if (ts.isReturnStatement(node) && node.expression) {
-      returns.push(node.expression);
-      return;
-    }
-    node.forEachChild(visit);
-  };
-  visit(factory.body);
-
-  return mergeFactoryOutputs(
-    returns.flatMap((expression) =>
-      describeFactoryExpression(
-        expression,
-        sourceFile,
-        locals,
-        knownFactories,
-        new Set(),
-      )
-    ),
-  );
-}
-
-function collectFunctionLocalInitializers(
-  body: ts.ConciseBody,
-): Map<string, ts.Expression> {
-  const locals = new Map<string, ts.Expression>();
-  const visit = (node: ts.Node): void => {
-    if (node !== body && ts.isFunctionLike(node)) return;
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
-      locals.set(node.name.text, node.initializer);
-    }
-    node.forEachChild(visit);
-  };
-  visit(body);
-  return locals;
-}
-
-function describeFactoryExpression(
-  expression: ts.Expression,
-  sourceFile: ts.SourceFile,
-  locals: Map<string, ts.Expression>,
-  knownFactories: Map<string, FactoryOutput[]>,
-  resolving: Set<string>,
-): FactoryOutput[] {
-  const value = unwrap(expression);
-
-  if (ts.isObjectLiteralExpression(value)) {
-    const outputs: FactoryOutput[] = [];
-    for (const property of value.properties) {
-      if (ts.isShorthandPropertyAssignment(property)) {
-        outputs.push(
-          ...prefixFactoryOutputs(
-            property.name.text,
-            describeFactoryExpression(
-              property.name,
-              sourceFile,
-              locals,
-              knownFactories,
-              resolving,
-            ),
-          ),
-        );
-      } else if (ts.isPropertyAssignment(property)) {
-        const name = propertyNameText(property.name);
-        if (!name) continue;
-        outputs.push(
-          ...prefixFactoryOutputs(
-            name,
-            describeFactoryExpression(
-              property.initializer,
-              sourceFile,
-              locals,
-              knownFactories,
-              resolving,
-            ),
-          ),
-        );
-      }
-    }
-    return mergeFactoryOutputs(outputs);
-  }
-
-  if (ts.isArrayLiteralExpression(value)) {
-    return mergeFactoryOutputs(
-      value.elements.flatMap((element, index) =>
-        ts.isSpreadElement(element)
-          ? []
-          : prefixFactoryOutputs(
-              String(index),
-              describeFactoryExpression(
-                element,
-                sourceFile,
-                locals,
-                knownFactories,
-                resolving,
-              ),
-            )
-      ),
-    );
-  }
-
-  if (ts.isConditionalExpression(value)) {
-    return intersectFactoryOutputs(
-      describeFactoryExpression(
-        value.whenTrue,
-        sourceFile,
-        locals,
-        knownFactories,
-        new Set(resolving),
-      ),
-      describeFactoryExpression(
-        value.whenFalse,
-        sourceFile,
-        locals,
-        knownFactories,
-        new Set(resolving),
-      ),
-    );
-  }
-
-  if (ts.isIdentifier(value)) {
-    if (resolving.has(value.text)) return [];
-    const initializer = locals.get(value.text);
-    if (!initializer) return [];
-    const nextResolving = new Set(resolving);
-    nextResolving.add(value.text);
-    return describeFactoryExpression(
-      initializer,
-      sourceFile,
-      locals,
-      knownFactories,
-      nextResolving,
-    );
-  }
-
-  if (ts.isPropertyAccessExpression(value)) {
-    const base = describeFactoryExpression(
-      value.expression,
-      sourceFile,
-      locals,
-      knownFactories,
-      new Set(resolving),
-    );
-    return base
-      .filter((output) => output.path[0] === value.name.text)
-      .map((output) => ({ ...output, path: output.path.slice(1) }));
-  }
-
-  if (ts.isElementAccessExpression(value) && value.argumentExpression) {
-    const key = staticPropertyKey(value.argumentExpression);
-    if (key !== undefined) {
-      const base = describeFactoryExpression(
-        value.expression,
-        sourceFile,
-        locals,
-        knownFactories,
-        new Set(resolving),
-      );
-      return base
-        .filter((output) => output.path[0] === key)
-        .map((output) => ({ ...output, path: output.path.slice(1) }));
-    }
-  }
-
-  if (ts.isCallExpression(value)) {
-    const callee = readCallee(value.expression);
-    const known = callee && knownFactories.get(callee);
-    if (known) return known.map(cloneFactoryOutput);
-
-    if (ts.isPropertyAccessExpression(value.expression)) {
-      const chained = describeFactoryExpression(
-        value.expression.expression,
-        sourceFile,
-        locals,
-        knownFactories,
-        new Set(resolving),
-      ).filter((output) => isPipelineRole(output.role));
-      if (chained.length > 0) return chained;
-    }
-
-    const role = inferExpressionRole(value);
-    if (isInspectableFactoryOutputRole(role)) {
-      const pipelineSource = isPipelineRole(role)
-        ? pipelineSourceFromExpression(value, sourceFile).pipelineSource
-        : undefined;
-      return [{
-        path: [],
-        role,
-        ...(pipelineSource ? { pipelineSource } : {}),
-      }];
-    }
-  }
-
-  return [];
-}
-
-function discoverFactoryResultBindings(
-  sourceFile: ts.SourceFile,
-  factoryOutputs: Map<string, FactoryOutput[]>,
-): FactoryResultBinding[] {
-  const bindings: FactoryResultBinding[] = [];
-  for (const statement of sourceFile.statements) {
-    if (!ts.isVariableStatement(statement)) continue;
-    for (const declaration of statement.declarationList.declarations) {
-      if (!declaration.initializer) continue;
-      const calls = findFactoryResultCalls(
-        declaration.initializer,
-        factoryOutputs,
-        [],
-      );
-      for (const call of calls) {
-        bindings.push(
-          ...bindFactoryOutputs(
-            declaration.name,
-            call.path,
-            call.factoryName,
-            call.outputs,
-          ),
-        );
-      }
-    }
-  }
-  return dedupeFactoryBindings(bindings);
-}
-
-function findFactoryResultCalls(
-  expression: ts.Expression,
-  factoryOutputs: Map<string, FactoryOutput[]>,
-  path: string[],
-): Array<{ factoryName: string; path: string[]; outputs: FactoryOutput[] }> {
-  const value = unwrap(expression);
-  if (ts.isCallExpression(value)) {
-    const factoryName = readCallee(value.expression);
-    const outputs = factoryName
-      ? factoryOutputs.get(factoryName)
-      : undefined;
-    return factoryName && outputs?.length
-      ? [{ factoryName, path, outputs }]
-      : [];
-  }
-  if (ts.isArrayLiteralExpression(value)) {
-    return value.elements.flatMap((element, index) =>
-      ts.isSpreadElement(element)
-        ? []
-        : findFactoryResultCalls(
-            element,
-            factoryOutputs,
-            [...path, String(index)],
-          )
-    );
-  }
-  if (ts.isObjectLiteralExpression(value)) {
-    return value.properties.flatMap((property) => {
-      if (!ts.isPropertyAssignment(property)) return [];
-      const name = propertyNameText(property.name);
-      return name
-        ? findFactoryResultCalls(
-            property.initializer,
-            factoryOutputs,
-            [...path, name],
-          )
-        : [];
-    });
-  }
-  if (ts.isConditionalExpression(value)) {
-    return [
-      ...findFactoryResultCalls(value.whenTrue, factoryOutputs, path),
-      ...findFactoryResultCalls(value.whenFalse, factoryOutputs, path),
-    ];
-  }
-  return [];
-}
-
-function bindFactoryOutputs(
-  name: ts.BindingName,
-  callPath: string[],
-  factoryName: string,
-  outputs: FactoryOutput[],
-): FactoryResultBinding[] {
-  if (ts.isIdentifier(name)) {
-    return outputs.map((output) => ({
-      ...cloneFactoryOutput(output),
-      factoryName,
-      resultName: name.text,
-      resultSelector: [name.text, ...callPath].join('.'),
-      selector: [name.text, ...callPath, ...output.path].join('.'),
-    }));
-  }
-
-  if (callPath.length > 0) return [];
-  const bindings: FactoryResultBinding[] = [];
-  for (const element of name.elements) {
-    if (ts.isOmittedExpression(element)) continue;
-    if (element.dotDotDotToken || !ts.isIdentifier(element.name)) continue;
-    const sourceKey = ts.isObjectBindingPattern(name)
-      ? propertyNameText(element.propertyName ?? element.name)
-      : String(name.elements.indexOf(element));
-    if (sourceKey === undefined) continue;
-    for (const output of outputs) {
-      if (output.path[0] !== sourceKey) continue;
-      const remaining = output.path.slice(1);
-      bindings.push({
-        path: remaining,
-        role: output.role,
-        factoryName,
-        resultName: element.name.text,
-        resultSelector: element.name.text,
-        selector: [element.name.text, ...remaining].join('.'),
-        ...(output.pipelineSource
-          ? { pipelineSource: clonePipelineSource(output.pipelineSource) }
-          : {}),
-      });
-    }
-  }
-  return bindings;
-}
-
-function summarizeFactoryResultRoles(
-  bindings: FactoryResultBinding[],
-): Map<string, TypeGpuRole> {
-  const byResult = new Map<string, FactoryResultBinding[]>();
-  for (const binding of bindings) {
-    const current = byResult.get(binding.resultName) ?? [];
-    current.push(binding);
-    byResult.set(binding.resultName, current);
-  }
-
-  const roles = new Map<string, TypeGpuRole>();
-  for (const [name, results] of byResult) {
-    const uniqueRoles = new Set(results.map((result) => result.role));
-    if (results.length === 1 && results[0]!.selector === name) {
-      roles.set(name, results[0]!.role);
-    } else if ([...uniqueRoles].every(isPipelineRole)) {
-      roles.set(name, 'pipeline-result');
-    } else {
-      roles.set(name, 'resource-result');
-    }
-  }
-  return roles;
-}
-
-function attachFactoryResultTargets(
-  symbols: DiscoveredSymbol[],
-  targets: InspectionTarget[],
-  bindings: FactoryResultBinding[],
-): void {
-  const aggregated = new Set<FactoryResultBinding>();
-  const groups = new Map<string, FactoryResultBinding[]>();
-  for (const binding of bindings) {
-    const key = `${binding.factoryName}\0${binding.resultSelector}`;
-    const current = groups.get(key) ?? [];
-    current.push(binding);
-    groups.set(key, current);
-  }
-
-  for (const group of groups.values()) {
-    const first = group[0]!;
-    const isResourceBundle = group.every((binding) => !isPipelineRole(binding.role));
-    const hasNestedOutputs = group.some(
-      (binding) => binding.selector !== binding.resultSelector,
-    );
-    if (!isResourceBundle || (group.length === 1 && !hasNestedOutputs)) {
-      continue;
-    }
-
-    const label = `${first.factoryName} → ${first.resultSelector}`;
-    const target: InspectionTarget = {
-      id: `factory-result:${first.factoryName}:${first.resultSelector}`,
-      label,
-      selector: {
-        kind: 'resource',
-        selector: first.resultSelector,
-        label,
-      },
-      symbolNames: [],
+/** Nested CPU-created shader values are addressed by their original declaration offset. */
+function discoverNestedShaderSymbols(file: ts.SourceFile, symbols: DiscoveredSymbol[], targets: InspectionTarget[], declarations: HelperDeclarations): void {
+  const shaderRoles = new Set<TypeGpuRole>(['shader-helper', 'compute-entrypoint', 'vertex-entrypoint', 'fragment-entrypoint']);
+  const nested: Array<{ symbol: DiscoveredSymbol; target: InspectionTarget; offset: number; value: ts.Expression | ts.FunctionDeclaration }> = [];
+  const add = (name: ts.Identifier, value: ts.Expression | ts.FunctionDeclaration, scope: string[]) => {
+    const role = ts.isFunctionDeclaration(value) ? inferFunctionRole(value) : inferExpressionRole(value);
+    if (!shaderRoles.has(role)) return;
+    const qualified = [...scope, name.text].join('.');
+    const declaration = name.getStart(file);
+    const id = `nested:${declaration}`;
+    declarations.set(qualified, value);
+    const symbol: DiscoveredSymbol = {
+      name: qualified,
+      runtimeName: name.text,
+      role,
+      range: nodeRange(name, file),
+      ...shaderSourceFields(value, file),
+      targetIds: [id],
     };
+    symbols.push(symbol);
+    const target: InspectionTarget = { id, label: qualified, symbolNames: [qualified], selector: {
+      selector: qualified, declaration, label: qualified, kind: 'resolvable', unwrap: false,
+    } };
     targets.push(target);
-    for (const binding of group) {
-      aggregated.add(binding);
-      attachFactoryResultSymbols(symbols, target, binding);
+    nested.push({ symbol, target, offset: declaration, value });
+  };
+  const visit = (node: ts.Node, scope: string[]) => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer && scope.length > 0) add(node.name, node.initializer, scope);
+    const fn = ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isArrowFunction(node) || ts.isMethodDeclaration(node);
+    if (fn) {
+      const gpu = node.body && ts.isBlock(node.body) && node.body.statements.some((statement, index, statements) =>
+        ts.isExpressionStatement(statement) && ts.isStringLiteral(statement.expression) && statement.expression.text === 'use gpu' &&
+        statements.slice(0, index).every(s => ts.isExpressionStatement(s) && ts.isStringLiteral(s.expression)));
+      if (gpu) {
+        if (scope.length > 0 && ts.isFunctionDeclaration(node) && node.name) add(node.name, node, scope);
+        return;
+      }
+      const parent = node.parent;
+      const name = node.name?.getText(file) ??
+        (ts.isVariableDeclaration(parent) ? parent.name.getText(file) : `callback@${node.getStart(file)}`);
+      scope = [...scope, name];
     }
-  }
-
-  for (const binding of bindings) {
-    if (aggregated.has(binding)) continue;
-    const kind = isPipelineRole(binding.role)
-      ? binding.role
-      : 'resource';
-    let target = targets.find((candidate) =>
-      'selector' in candidate.selector &&
-      candidate.selector.selector === binding.selector &&
-      candidate.selector.kind === kind
-    );
-    if (!target) {
-      const label = `${binding.factoryName} → ${binding.selector}`;
-      target = {
-        id: `factory-result:${binding.factoryName}:${binding.selector}`,
-        label,
-        selector: {
-          kind,
-          selector: binding.selector,
-          label,
-        },
-        symbolNames: [],
-        ...(binding.pipelineSource
-          ? { pipelineSource: clonePipelineSource(binding.pipelineSource) }
-          : {}),
-      };
-      targets.push(target);
-    } else if (!target.pipelineSource && binding.pipelineSource) {
-      target.pipelineSource = clonePipelineSource(binding.pipelineSource);
-    }
-
-    attachFactoryResultSymbols(symbols, target, binding);
-    attachPipelineSourceSymbols(symbols, target, binding.pipelineSource);
-  }
-}
-
-function attachFactoryResultSymbols(
-  symbols: DiscoveredSymbol[],
-  target: InspectionTarget,
-  binding: FactoryResultBinding,
-): void {
-  for (const name of [binding.factoryName, binding.resultName]) {
-    if (!target.symbolNames.includes(name)) target.symbolNames.push(name);
-    const symbol = symbols.find((candidate) => candidate.name === name);
-    if (symbol && !symbol.targetIds.includes(target.id)) {
-      symbol.targetIds.push(target.id);
-    }
+    node.forEachChild(child => visit(child, scope));
+  };
+  visit(file, []);
+  const counts = new Map<string, number>();
+  for (const target of targets) counts.set(target.label, (counts.get(target.label) ?? 0) + 1);
+  for (const { symbol, target, offset, value } of nested) {
+    if ((counts.get(target.label) ?? 0) < 2) continue;
+    const { line, character } = file.getLineAndCharacterOfPosition(offset);
+    const label = `${target.label}@${line + 1}:${character + 1}`;
+    declarations.set(label, value);
+    symbol.name = label;
+    target.label = label;
+    target.symbolNames = [label];
+    target.selector = { ...target.selector, label };
   }
 }
 
@@ -1047,102 +548,6 @@ function removeRedundantComputeTargets(
   }
 }
 
-function isFactoryRole(role: TypeGpuRole): boolean {
-  return role === 'pipeline-factory' || role === 'resource-factory';
-}
-
-function isPipelineRole(
-  role: TypeGpuRole,
-): role is 'compute-pipeline' | 'render-pipeline' {
-  return role === 'compute-pipeline' || role === 'render-pipeline';
-}
-
-function isInspectableFactoryOutputRole(role: TypeGpuRole): boolean {
-  return isPipelineRole(role) || new Set<TypeGpuRole>([
-    'schema',
-    'bind-group-layout',
-    'vertex-layout',
-    'binding-resource',
-    'buffer-resource',
-    'texture-resource',
-    'texture-view',
-    'sampler-resource',
-    'bind-group',
-    'query-resource',
-    'gpu-variable',
-    'resource-collection',
-  ]).has(role);
-}
-
-function prefixFactoryOutputs(
-  prefix: string,
-  outputs: FactoryOutput[],
-): FactoryOutput[] {
-  return outputs.map((output) => ({
-    ...output,
-    path: [prefix, ...output.path],
-  }));
-}
-
-function intersectFactoryOutputs(
-  left: FactoryOutput[],
-  right: FactoryOutput[],
-): FactoryOutput[] {
-  const rightKeys = new Set(right.map(factoryOutputEntryKey));
-  return left
-    .filter((output) => rightKeys.has(factoryOutputEntryKey(output)))
-    .map(cloneFactoryOutput);
-}
-
-function mergeFactoryOutputs(outputs: FactoryOutput[]): FactoryOutput[] {
-  const seen = new Set<string>();
-  return outputs.filter((output) => {
-    const key = factoryOutputEntryKey(output);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-function dedupeFactoryBindings(
-  bindings: FactoryResultBinding[],
-): FactoryResultBinding[] {
-  const seen = new Set<string>();
-  return bindings.filter((binding) => {
-    const key = [
-      binding.factoryName,
-      binding.selector,
-      binding.role,
-      binding.resultName,
-    ].join(':');
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-function factoryOutputKey(outputs: FactoryOutput[]): string {
-  return outputs.map(factoryOutputEntryKey).sort().join('|');
-}
-
-function factoryOutputEntryKey(output: FactoryOutput): string {
-  return [
-    output.role,
-    output.path.join('.'),
-    JSON.stringify(output.pipelineSource ?? null),
-  ].join(':');
-}
-
-function cloneFactoryOutput(output: FactoryOutput): FactoryOutput {
-  return {
-    role: output.role,
-    path: [...output.path],
-    ...(output.pipelineSource
-      ? { pipelineSource: clonePipelineSource(output.pipelineSource) }
-      : {}),
-  };
-}
-
 function clonePipelineSource(source: PipelineSource): PipelineSource {
   return {
     ...source,
@@ -1150,14 +555,6 @@ function clonePipelineSource(source: PipelineSource): PipelineSource {
       ? { bindings: source.bindings.map((binding) => ({ ...binding })) }
       : {}),
   };
-}
-
-function staticPropertyKey(expression: ts.Expression): string | undefined {
-  const value = unwrap(expression);
-  if (ts.isStringLiteral(value) || ts.isNumericLiteral(value)) {
-    return value.text;
-  }
-  return undefined;
 }
 
 function bindingIdentifiers(name: ts.BindingName): ts.Identifier[] {
@@ -1196,7 +593,9 @@ function computeFunctionRole(node: ts.FunctionLikeDeclaration): TypeGpuRole {
   // Only a directive in this function's own prologue makes it a shader
   // helper. A CPU factory that merely defines 'use gpu' closures (geometry
   // builders, pipeline setup) cannot be called from a probe body.
-  return hasOwnUseGpuDirective(node) ? 'shader-helper' : 'unknown';
+  if (hasOwnUseGpuDirective(node)) return 'shader-helper';
+  return containsUseGpuDirective(node) || containsCall(node, callee => ['fn', 'computeFn', 'vertexFn', 'fragmentFn'].some(name => isTgpuFactoryCall(callee, name)))
+    ? 'shader-factory' : 'unknown';
 }
 
 function inferExpressionRole(expression: ts.Expression): TypeGpuRole {
@@ -1255,47 +654,6 @@ function computeExpressionRole(expression: ts.Expression): TypeGpuRole {
 }
 
 /** `tgpu.fn(...)` called directly, without the implementation call. */
-function isFnShellCall(value: ts.CallExpression): boolean {
-  const callee = unwrap(value.expression);
-  if (ts.isCallExpression(callee)) return false;
-  const name = readCallee(callee);
-  return name !== undefined && isTgpuFactoryCall(name, 'fn');
-}
-
-/** `shell(impl)` or `shell\`...\`` where `shell` is a top-level `tgpu.fn(...)` shell. */
-function isFnShellApplication(
-  value: ts.CallExpression | ts.TaggedTemplateExpression,
-): boolean {
-  return findFnShell(value) !== undefined;
-}
-
-const fnShellCache = new WeakMap<ts.SourceFile, Map<string, ts.CallExpression>>();
-
-/** The `tgpu.fn(...)` shell call behind the callee of `value`, if it names one. */
-function findFnShell(
-  value: ts.CallExpression | ts.TaggedTemplateExpression,
-): ts.CallExpression | undefined {
-  const callee = unwrap(ts.isCallExpression(value) ? value.expression : value.tag);
-  if (!ts.isIdentifier(callee)) return undefined;
-  const sourceFile = value.getSourceFile();
-  let shells = fnShellCache.get(sourceFile);
-  if (!shells) {
-    shells = new Map();
-    for (const statement of sourceFile.statements) {
-      if (!ts.isVariableStatement(statement)) continue;
-      for (const declaration of statement.declarationList.declarations) {
-        if (!ts.isIdentifier(declaration.name) || !declaration.initializer) continue;
-        const initializer = unwrap(declaration.initializer);
-        if (ts.isCallExpression(initializer) && isFnShellCall(initializer)) {
-          shells.set(declaration.name.text, initializer);
-        }
-      }
-    }
-    fnShellCache.set(sourceFile, shells);
-  }
-  return shells.get(callee.text);
-}
-
 function isResourceCollectionExpression(value: ts.Expression): boolean {
   if (ts.isArrayLiteralExpression(value) || ts.isObjectLiteralExpression(value)) {
     return true;
@@ -1360,11 +718,6 @@ function shortCallee(callee: string): string {
 }
 
 /** Matches `tgpu.<name>` written directly or through a bracket namespace. */
-function isTgpuFactoryCall(callee: string, name: string): boolean {
-  const parts = calleeSegments(callee);
-  return parts.length === 2 && parts[0] === 'tgpu' && parts[1] === name;
-}
-
 function collectCallees(node: ts.Node, output: string[]): void {
   if (ts.isCallExpression(node)) {
     const callee = readCallee(node.expression);
@@ -1594,800 +947,6 @@ function propertyNameText(name: ts.PropertyName): string | undefined {
   return undefined;
 }
 
-function expressionSelector(
-  expression: ts.Expression,
-  sourceFile: ts.SourceFile,
-): string | undefined {
-  const value = unwrap(expression);
-  if (ts.isIdentifier(value)) return value.text;
-  if (ts.isPropertyAccessExpression(value)) {
-    return value.getText(sourceFile);
-  }
-  return undefined;
-}
-
-function probeArgumentsFromExpression(
-  expression: ts.Expression | undefined,
-  sourceFile: ts.SourceFile,
-): { probeArguments?: string[] } {
-  if (!expression) return {};
-  const value = unwrap(expression);
-  if (ts.isArrowFunction(value) || ts.isFunctionExpression(value)) {
-    return probeArgumentsFromParameters(
-      value.parameters,
-      sourceFile,
-      new Set(
-        value.typeParameters?.map((parameter) => parameter.name.text) ?? [],
-      ),
-    );
-  }
-  if (ts.isCallExpression(value)) {
-    const isShellCallee = (callee: string | undefined): boolean =>
-      callee !== undefined && isTgpuFactoryCall(callee, 'fn');
-    const shellCall =
-      ts.isCallExpression(value.expression) &&
-        isShellCallee(readCallee(value.expression.expression))
-        ? value.expression
-        : isShellCallee(readCallee(value.expression))
-          ? value
-          : findFnShell(value);
-    const argList = shellCall?.arguments[0];
-    if (argList && ts.isArrayLiteralExpression(argList)) {
-      const selectors = argList.elements
-        .map((element) =>
-          ts.isSpreadElement(element)
-            ? undefined
-            : schemaSelectorFromExpression(element, sourceFile))
-        .filter((selector): selector is string => selector !== undefined);
-      return selectors.length === argList.elements.length && selectors.length > 0
-        ? { probeArguments: selectors }
-        : {};
-    }
-  }
-  return {};
-}
-
-function discoverZeroAccessorBindingsByHelper(
-  sourceFile: ts.SourceFile,
-): Map<string, ProbeBinding[]> {
-  const accessors = new Map<string, ProbeBinding>();
-  const helpers = new Map<string, ts.Node>();
-
-  for (const statement of sourceFile.statements) {
-    if (ts.isFunctionDeclaration(statement) && statement.name) {
-      if (inferFunctionRole(statement) === 'shader-helper') {
-        helpers.set(statement.name.text, statement);
-      }
-      continue;
-    }
-    if (ts.isVariableStatement(statement)) {
-      for (const declaration of statement.declarationList.declarations) {
-        if (!ts.isIdentifier(declaration.name) || !declaration.initializer) continue;
-        const value = unwrap(declaration.initializer);
-        const accessorCallee = ts.isCallExpression(value)
-          ? readCallee(value.expression)
-          : undefined;
-        if (
-          ts.isCallExpression(value) &&
-          accessorCallee !== undefined &&
-          isTgpuFactoryCall(accessorCallee, 'accessor') &&
-          value.arguments.length === 1
-        ) {
-          const schema = value.arguments[0] &&
-            schemaSelectorFromExpression(value.arguments[0], sourceFile);
-          if (schema) {
-            accessors.set(declaration.name.text, {
-              slot: declaration.name.text,
-              schema,
-            });
-          }
-        } else if (inferExpressionRole(value) === 'shader-helper') {
-          helpers.set(declaration.name.text, value);
-        }
-      }
-    }
-  }
-
-  const result = new Map<string, ProbeBinding[]>();
-  for (const helperName of helpers.keys()) {
-    const queue = [helperName];
-    const visited = new Set<string>();
-    const bindings = new Map<string, ProbeBinding>();
-
-    while (queue.length > 0) {
-      const current = queue.shift()!;
-      if (visited.has(current)) continue;
-      visited.add(current);
-      const node = helpers.get(current);
-      if (!node) continue;
-
-      walkIdentifiers(node, (identifier) => {
-        const accessor = accessors.get(identifier);
-        if (accessor) bindings.set(identifier, accessor);
-        if (helpers.has(identifier) && !visited.has(identifier)) {
-          queue.push(identifier);
-        }
-      });
-    }
-
-    if (bindings.size > 0) {
-      result.set(helperName, [...bindings.values()]);
-    }
-  }
-  return result;
-}
-
-function walkIdentifiers(node: ts.Node, visit: (identifier: string) => void): void {
-  if (ts.isIdentifier(node)) visit(node.text);
-  node.forEachChild((child) => walkIdentifiers(child, visit));
-}
-
-function probeArgumentsFromParameters(
-  parameters: ts.NodeArray<ts.ParameterDeclaration>,
-  sourceFile: ts.SourceFile,
-  typeParameterNames: ReadonlySet<string> = new Set(),
-): { probeArguments?: string[] } {
-  if (parameters.length === 0) return {};
-  const selectors = parameters.map((parameter) =>
-    schemaSelectorFromType(parameter.type, sourceFile, typeParameterNames));
-  return selectors.every((selector): selector is string => selector !== undefined)
-    ? { probeArguments: selectors }
-    : {};
-}
-
-function discoverContextualProbeInputs(
-  sourceFile: ts.SourceFile,
-): Map<
-  string,
-  {
-    probeArguments?: string[];
-    probeArgumentPlan?: ProbeArgumentPlanEntry[];
-    probeSpecializations?: ProbeSpecialization[];
-    specializationSynthesis?: SpecializationSynthesis;
-  }
-> {
-  type Helper = {
-    body: ts.ConciseBody;
-    parameters: ts.NodeArray<ts.ParameterDeclaration>;
-    typeParameters?: ts.NodeArray<ts.TypeParameterDeclaration> | undefined;
-  };
-
-  const helpers = new Map<string, Helper>();
-  for (const statement of sourceFile.statements) {
-    if (
-      ts.isFunctionDeclaration(statement) &&
-      statement.name &&
-      statement.body &&
-      inferFunctionRole(statement) === 'shader-helper'
-    ) {
-      helpers.set(statement.name.text, {
-        body: statement.body,
-        parameters: statement.parameters,
-        typeParameters: statement.typeParameters,
-      });
-      continue;
-    }
-    if (!ts.isVariableStatement(statement)) continue;
-    for (const declaration of statement.declarationList.declarations) {
-      if (!ts.isIdentifier(declaration.name) || !declaration.initializer) continue;
-      const value = unwrap(declaration.initializer);
-      if (
-        (ts.isArrowFunction(value) || ts.isFunctionExpression(value)) &&
-        inferFunctionRole(value) === 'shader-helper'
-      ) {
-        helpers.set(declaration.name.text, {
-          body: value.body,
-          parameters: value.parameters,
-          typeParameters: value.typeParameters,
-        });
-      }
-    }
-  }
-
-  const selectors = new Map<string, Array<string | undefined>>();
-  for (const [name, helper] of helpers) {
-    const typeParameterNames = new Set(
-      helper.typeParameters?.map((parameter) => parameter.name.text) ?? [],
-    );
-    selectors.set(
-      name,
-      helper.parameters.map((parameter) =>
-        schemaSelectorFromType(parameter.type, sourceFile, typeParameterNames)),
-    );
-  }
-
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const [name, helper] of helpers) {
-      const helperSelectors = selectors.get(name)!;
-      const numericAliases = collectNumericAliases(helper.body);
-      for (const [index, parameter] of helper.parameters.entries()) {
-        if (
-          helperSelectors[index] !== 'ctx.d.f32' ||
-          !ts.isIdentifier(parameter.name)
-        ) {
-          continue;
-        }
-        const inferred = inferNumberParameterSchema(
-          helper.body,
-          parameter.name.text,
-          selectors,
-          numericAliases,
-        );
-        if (inferred) {
-          helperSelectors[index] = inferred;
-          changed = true;
-        }
-      }
-    }
-  }
-
-  const callSiteValues = discoverCallSiteArgumentValues(sourceFile, helpers);
-  const result = new Map<
-    string,
-    {
-      probeArguments?: string[];
-      probeArgumentPlan?: ProbeArgumentPlanEntry[];
-      probeSpecializations?: ProbeSpecialization[];
-      specializationSynthesis?: SpecializationSynthesis;
-    }
-  >();
-
-  for (const [name, helper] of helpers) {
-    const synthesis = synthesizeProbeSpecializations(helper, sourceFile);
-    if (synthesis) {
-      if (synthesis.specializations.length === 1 && !synthesis.truncated) {
-        result.set(name, {
-          probeArguments: synthesis.specializations[0]!.probeArguments,
-        });
-      } else {
-        result.set(name, {
-          probeSpecializations: synthesis.specializations,
-          specializationSynthesis: {
-            emitted: synthesis.specializations.length,
-            limit: MAX_SYNTHESIZED_SPECIALIZATIONS,
-            truncated: synthesis.truncated,
-          },
-        });
-      }
-      continue;
-    }
-
-    const helperSelectors = selectors.get(name)!;
-    const refParameterIndexes = new Set(
-      helper.parameters.flatMap((parameter, index) =>
-        isNumberRefType(parameter.type, sourceFile) ? [index] : []
-      ),
-    );
-    if (
-      helperSelectors.length > 0 &&
-      refParameterIndexes.size === 0 &&
-      helperSelectors.every(
-        (selector): selector is string => selector !== undefined,
-      )
-    ) {
-      result.set(name, { probeArguments: helperSelectors });
-      continue;
-    }
-
-    const values = callSiteValues.get(name);
-    const plan = helper.parameters.map((parameter, index) => {
-      const schema = helperSelectors[index];
-      if (schema && refParameterIndexes.has(index)) {
-        return { refSchema: schema } satisfies ProbeArgumentPlanEntry;
-      }
-      if (schema) return { schema } satisfies ProbeArgumentPlanEntry;
-      const value = values?.[index];
-      if (value && isGpuResourceType(parameter.type, sourceFile)) {
-        return { value } satisfies ProbeArgumentPlanEntry;
-      }
-      return undefined;
-    });
-    if (
-      plan.length > 0 &&
-      plan.every(
-        (entry): entry is ProbeArgumentPlanEntry => entry !== undefined,
-      )
-    ) {
-      result.set(name, { probeArgumentPlan: plan });
-    }
-  }
-
-  return result;
-}
-
-function inferNumberParameterSchema(
-  node: ts.Node,
-  parameterName: string,
-  helperSelectors: Map<string, Array<string | undefined>>,
-  aliases: Map<string, ts.Expression>,
-): 'ctx.d.i32' | 'ctx.d.u32' | undefined {
-  if (
-    ts.isBinaryExpression(node) &&
-    isBitwiseOperator(node.operatorToken.kind) &&
-    (containsParameterReference(node.left, parameterName, aliases) ||
-      containsParameterReference(node.right, parameterName, aliases))
-  ) {
-    return 'ctx.d.u32';
-  }
-
-  if (
-    ts.isElementAccessExpression(node) &&
-    node.argumentExpression &&
-    isParameterReference(node.argumentExpression, parameterName)
-  ) {
-    return 'ctx.d.i32';
-  }
-
-  if (ts.isCallExpression(node)) {
-    const callee = readCallee(node.expression);
-    const short = callee?.split('.').at(-1);
-    if (
-      (short === 'u32' || short === 'i32') &&
-      node.arguments.some((argument) => containsParameterReference(argument, parameterName, aliases))
-    ) {
-      return short === 'u32' ? 'ctx.d.u32' : 'ctx.d.i32';
-    }
-    // `std.bitcast(from, to)(value)`: the parameter has the `from` schema.
-    const bitcastSource = bitcastSourceSchema(node);
-    if (
-      bitcastSource &&
-      node.arguments.length === 1 &&
-      isParameterReference(node.arguments[0]!, parameterName)
-    ) {
-      return bitcastSource;
-    }
-    const integerArgument =
-      short === 'textureSampleLevel' &&
-        node.arguments.length >= 5 &&
-        isClearlyScalarExpression(node.arguments[4]!)
-        ? node.arguments[3]
-        : short === 'textureSample' && node.arguments.length >= 4
-        ? node.arguments[3]
-        : short === 'textureLoad' && node.arguments.length >= 4
-        ? node.arguments[2]
-        : undefined;
-    if (
-      integerArgument &&
-      isParameterReference(integerArgument, parameterName)
-    ) {
-      return 'ctx.d.i32';
-    }
-
-    const calledHelper = callee && helperSelectors.get(callee);
-    if (calledHelper) {
-      for (const [index, argument] of node.arguments.entries()) {
-        const calledSchema = calledHelper[index];
-        if (
-          (calledSchema === 'ctx.d.i32' || calledSchema === 'ctx.d.u32') &&
-          isParameterReference(argument, parameterName)
-        ) {
-          return calledSchema;
-        }
-      }
-    }
-  }
-
-  let inferred: 'ctx.d.i32' | 'ctx.d.u32' | undefined;
-  ts.forEachChild(node, (child) => {
-    if (!inferred) {
-      inferred = inferNumberParameterSchema(child, parameterName, helperSelectors, aliases);
-    }
-  });
-  return inferred;
-}
-
-function bitcastSourceSchema(node: ts.CallExpression): 'ctx.d.i32' | 'ctx.d.u32' | undefined {
-  const inner = unwrap(node.expression);
-  if (!ts.isCallExpression(inner) || inner.arguments.length !== 2) return undefined;
-  if (readCallee(inner.expression)?.split('.').at(-1) !== 'bitcast') return undefined;
-  const from = readCallee(inner.arguments[0]!)?.split('.').at(-1);
-  return from === 'u32' ? 'ctx.d.u32' : from === 'i32' ? 'ctx.d.i32' : undefined;
-}
-
-function isBitwiseOperator(kind: ts.SyntaxKind): boolean {
-  return kind === ts.SyntaxKind.AmpersandToken ||
-    kind === ts.SyntaxKind.BarToken ||
-    kind === ts.SyntaxKind.CaretToken ||
-    kind === ts.SyntaxKind.LessThanLessThanToken ||
-    kind === ts.SyntaxKind.GreaterThanGreaterThanToken ||
-    kind === ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken;
-}
-
-function containsParameterReference(
-  node: ts.Node,
-  parameterName: string,
-  aliases: Map<string, ts.Expression>,
-  seen = new Set<string>(),
-): boolean {
-  if (ts.isIdentifier(node)) {
-    if (node.text === parameterName) return true;
-    const initializer = aliases.get(node.text);
-    if (initializer && !seen.has(node.text)) {
-      seen.add(node.text);
-      if (containsParameterReference(initializer, parameterName, aliases, seen)) return true;
-    }
-  }
-  // A call's result has its own type (`bitcast(f32, u32)(value)` is a u32
-  // whatever `value` is), so an operator on it says nothing about the parameter.
-  if (ts.isCallExpression(node)) return false;
-  return ts.forEachChild(node, (child) =>
-    containsParameterReference(child, parameterName, aliases, seen) || undefined
-  ) ?? false;
-}
-
-function collectNumericAliases(body: ts.ConciseBody): Map<string, ts.Expression> {
-  const aliases = new Map<string, ts.Expression>();
-  const visit = (node: ts.Node): void => {
-    if (
-      ts.isVariableDeclaration(node) &&
-      ts.isIdentifier(node.name) &&
-      node.initializer
-    ) {
-      aliases.set(node.name.text, node.initializer);
-    }
-    node.forEachChild(visit);
-  };
-  visit(body);
-  return aliases;
-}
-
-function isNumberRefType(
-  type: ts.TypeNode | undefined,
-  sourceFile: ts.SourceFile,
-): boolean {
-  if (!type) return false;
-  return /^(?:d\.)?ref<number>$/.test(type.getText(sourceFile).replace(/\s+/g, ''));
-}
-
-function discoverCallSiteArgumentValues(
-  sourceFile: ts.SourceFile,
-  helpers: Map<
-    string,
-    {
-      body: ts.ConciseBody;
-      parameters: ts.NodeArray<ts.ParameterDeclaration>;
-    }
-  >,
-): Map<string, Array<string | undefined>> {
-  const values = new Map<string, Array<string | undefined>>();
-  const topLevelNames = collectTopLevelRuntimeNames(sourceFile);
-
-  const visit = (node: ts.Node): void => {
-    if (ts.isCallExpression(node)) {
-      const helperName = readCallee(node.expression);
-      if (helperName) {
-        const helper = helpers.get(helperName);
-        if (helper) {
-          const current =
-            values.get(helperName) ??
-            new Array<string | undefined>(helper.parameters.length);
-          for (const [index, argument] of node.arguments.entries()) {
-            if (index >= helper.parameters.length || current[index]) continue;
-            const selector = expressionSelector(argument, sourceFile);
-            const root = selector?.split('.')[0];
-            if (root && topLevelNames.has(root)) {
-              current[index] = selector;
-            }
-          }
-          values.set(helperName, current);
-        }
-      }
-    }
-    node.forEachChild(visit);
-  };
-  sourceFile.forEachChild(visit);
-  return values;
-}
-
-function collectTopLevelRuntimeNames(sourceFile: ts.SourceFile): Set<string> {
-  const names = new Set<string>();
-  for (const statement of sourceFile.statements) {
-    if (ts.isVariableStatement(statement)) {
-      for (const declaration of statement.declarationList.declarations) {
-        if (ts.isIdentifier(declaration.name)) names.add(declaration.name.text);
-      }
-    } else if (
-      (ts.isFunctionDeclaration(statement) ||
-        ts.isClassDeclaration(statement) ||
-        ts.isEnumDeclaration(statement)) &&
-      statement.name
-    ) {
-      names.add(statement.name.text);
-    } else if (ts.isImportDeclaration(statement) && statement.importClause) {
-      const clause = statement.importClause;
-      if (clause.name && !clause.isTypeOnly) names.add(clause.name.text);
-      const bindings = clause.namedBindings;
-      if (bindings && ts.isNamespaceImport(bindings)) {
-        names.add(bindings.name.text);
-      } else if (bindings && ts.isNamedImports(bindings)) {
-        for (const element of bindings.elements) {
-          if (!element.isTypeOnly) names.add(element.name.text);
-        }
-      }
-    }
-  }
-  return names;
-}
-
-function isGpuResourceType(
-  type: ts.TypeNode | undefined,
-  sourceFile: ts.SourceFile,
-): boolean {
-  if (!type) return false;
-  const text = type.getText(sourceFile).replace(/\s+/g, '');
-  return /^(?:d\.)?(?:sampler|comparisonSampler|texture(?:Storage|Depth|Multisampled|External)?[A-Za-z0-9]*)(?:<.*>)?$/.test(
-    text,
-  );
-}
-
-function isClearlyScalarExpression(expression: ts.Expression): boolean {
-  const value = unwrap(expression);
-  if (ts.isNumericLiteral(value)) return true;
-  if (
-    ts.isPrefixUnaryExpression(value) &&
-    (value.operator === ts.SyntaxKind.PlusToken ||
-      value.operator === ts.SyntaxKind.MinusToken) &&
-    ts.isNumericLiteral(value.operand)
-  ) {
-    return true;
-  }
-  if (!ts.isCallExpression(value)) return false;
-  const callee = readCallee(value.expression)?.split('.').at(-1);
-  return callee === 'f32' || callee === 'i32' || callee === 'u32';
-}
-
-function isParameterReference(
-  expression: ts.Expression,
-  parameterName: string,
-): boolean {
-  const value = unwrap(expression);
-  if (ts.isIdentifier(value)) return value.text === parameterName;
-  return ts.isPropertyAccessExpression(value) &&
-    value.name.text === '$' &&
-    ts.isIdentifier(value.expression) &&
-    value.expression.text === parameterName;
-}
-
-function synthesizeProbeSpecializations(
-  helper: {
-    parameters: ts.NodeArray<ts.ParameterDeclaration>;
-    typeParameters?: ts.NodeArray<ts.TypeParameterDeclaration> | undefined;
-  },
-  sourceFile: ts.SourceFile,
-): {
-  specializations: ProbeSpecialization[];
-  truncated: boolean;
-} | undefined {
-  if (helper.parameters.length === 0) return undefined;
-
-  const typeParameters = helper.typeParameters ?? [];
-  const typeParameterNames = new Set(
-    typeParameters.map((parameter) => parameter.name.text),
-  );
-  const typeParameterChoices = new Map<string, string[]>();
-  let isPolymorphic = typeParameters.length > 0;
-
-  for (const parameter of typeParameters) {
-    const choices = schemaAlternativesFromType(
-      parameter.constraint,
-      sourceFile,
-      typeParameterNames,
-    );
-    if (!choices?.length) return undefined;
-    if (choices.length > 1) isPolymorphic = true;
-    typeParameterChoices.set(parameter.name.text, choices);
-  }
-
-  const specializations: ProbeSpecialization[] = [];
-  const seen = new Set<string>();
-  let truncated = false;
-
-  const addArguments = (probeArguments: string[]): void => {
-    const key = probeArguments.join('\u0000');
-    if (seen.has(key)) return;
-    seen.add(key);
-    if (specializations.length >= MAX_SYNTHESIZED_SPECIALIZATIONS) {
-      truncated = true;
-      return;
-    }
-    specializations.push({
-      probeArguments,
-      signature: probeArguments.map(probeSchemaDisplayName).join(', '),
-    });
-  };
-
-  const expandParameters = (
-    substitution: ReadonlyMap<string, string>,
-  ): void => {
-    const choices = helper.parameters.map((parameter) =>
-      schemaAlternativesFromType(
-        parameter.type,
-        sourceFile,
-        typeParameterNames,
-        substitution,
-      ));
-    if (choices.some((alternatives) => !alternatives?.length)) return;
-    if (choices.some((alternatives) => alternatives!.length > 1)) {
-      isPolymorphic = true;
-    }
-
-    const args: string[] = [];
-    const visit = (index: number): void => {
-      if (truncated) return;
-      if (index === choices.length) {
-        addArguments([...args]);
-        return;
-      }
-      for (const choice of choices[index]!) {
-        args.push(choice);
-        visit(index + 1);
-        args.pop();
-        if (truncated) return;
-      }
-    };
-    visit(0);
-  };
-
-  const substitution = new Map<string, string>();
-  const visitTypeParameters = (index: number): void => {
-    if (truncated) return;
-    if (index === typeParameters.length) {
-      expandParameters(substitution);
-      return;
-    }
-    const name = typeParameters[index]!.name.text;
-    for (const choice of typeParameterChoices.get(name) ?? []) {
-      substitution.set(name, choice);
-      visitTypeParameters(index + 1);
-      if (truncated) return;
-    }
-    substitution.delete(name);
-  };
-
-  visitTypeParameters(0);
-  return isPolymorphic && specializations.length > 0
-    ? { specializations, truncated }
-    : undefined;
-}
-
-function schemaAlternativesFromType(
-  type: ts.TypeNode | undefined,
-  sourceFile: ts.SourceFile,
-  typeParameterNames: ReadonlySet<string>,
-  substitution: ReadonlyMap<string, string> = new Map(),
-): string[] | undefined {
-  if (!type) return undefined;
-  if (ts.isParenthesizedTypeNode(type)) {
-    return schemaAlternativesFromType(
-      type.type,
-      sourceFile,
-      typeParameterNames,
-      substitution,
-    );
-  }
-  if (
-    ts.isTypeReferenceNode(type) &&
-    ts.isIdentifier(type.typeName) &&
-    typeParameterNames.has(type.typeName.text)
-  ) {
-    const selected = substitution.get(type.typeName.text);
-    return selected ? [selected] : undefined;
-  }
-  if (ts.isUnionTypeNode(type)) {
-    const members = type.types.map((member) =>
-      schemaAlternativesFromType(
-        member,
-        sourceFile,
-        typeParameterNames,
-        substitution,
-      ));
-    if (members.some((alternatives) => !alternatives?.length)) return undefined;
-    const alternatives = members.flatMap((member) => member!);
-    return alternatives.length > 0 ? [...new Set(alternatives)] : undefined;
-  }
-  const selector = schemaSelectorFromType(type, sourceFile, typeParameterNames);
-  return selector ? [selector] : undefined;
-}
-
-function probeSchemaDisplayName(selector: string): string {
-  return selector.replace(/^(?:ctx\.d\.|module\.)/, '');
-}
-
-function schemaSelectorFromType(
-  type: ts.TypeNode | undefined,
-  sourceFile: ts.SourceFile,
-  typeParameterNames: ReadonlySet<string> = new Set(),
-): string | undefined {
-  if (!type) return undefined;
-  if (isNumberRefType(type, sourceFile)) return 'ctx.d.f32';
-  if (type.kind === ts.SyntaxKind.NumberKeyword) return 'ctx.d.f32';
-  if (type.kind === ts.SyntaxKind.BooleanKeyword) return 'ctx.d.bool';
-
-  const text = type.getText(sourceFile).replace(/\s+/g, '');
-  const scalarOrVector = /^(?:d\.)?([fiu](?:16|32)|bool|v[234][fhiu]|m[234]x[234][fh])$/.exec(
-    text,
-  );
-  if (scalarOrVector) {
-    return `ctx.d.${runtimeSchemaName(scalarOrVector[1]!)}`;
-  }
-
-  // A module-rooted selector must name a binding the probe can turn into a
-  // value: a variable, or an import (the runtime re-imports a type-only
-  // import's value twin). An interface, type alias, class, or global
-  // (Float32Array) would reach the probe as undefined or a non-schema callable.
-  const infer = /^(?:d\.)?Infer(?:GPU)?<typeof([A-Za-z_$][\w$]*)>$/.exec(text);
-  if (infer) {
-    return runtimeValueNames(sourceFile).has(infer[1]!) ? `module.${infer[1]}` : undefined;
-  }
-
-  if (/^[A-Za-z_$][\w$]*$/.test(text)) {
-    return !typeParameterNames.has(text) && runtimeValueNames(sourceFile).has(text)
-      ? `module.${text}`
-      : undefined;
-  }
-  return undefined;
-}
-
-const runtimeValueNamesCache = new WeakMap<ts.SourceFile, Set<string>>();
-
-/** Top-level names a probe can resolve to a value: variables and imports. */
-function runtimeValueNames(sourceFile: ts.SourceFile): Set<string> {
-  const cached = runtimeValueNamesCache.get(sourceFile);
-  if (cached) return cached;
-  const names = new Set<string>();
-  const addBinding = (name: ts.BindingName): void => {
-    if (ts.isIdentifier(name)) {
-      names.add(name.text);
-      return;
-    }
-    for (const element of name.elements) {
-      if (ts.isBindingElement(element)) addBinding(element.name);
-    }
-  };
-  for (const statement of sourceFile.statements) {
-    if (ts.isVariableStatement(statement)) {
-      for (const declaration of statement.declarationList.declarations) {
-        addBinding(declaration.name);
-      }
-      continue;
-    }
-    if (ts.isImportDeclaration(statement)) {
-      const clause = statement.importClause;
-      if (!clause) continue;
-      if (clause.name) names.add(clause.name.text);
-      const bindings = clause.namedBindings;
-      if (!bindings) continue;
-      if (ts.isNamespaceImport(bindings)) {
-        names.add(bindings.name.text);
-        continue;
-      }
-      for (const element of bindings.elements) names.add(element.name.text);
-    }
-  }
-  runtimeValueNamesCache.set(sourceFile, names);
-  return names;
-}
-
-function schemaSelectorFromExpression(
-  expression: ts.Expression,
-  sourceFile: ts.SourceFile,
-): string | undefined {
-  const text = expression.getText(sourceFile).replace(/\s+/g, '');
-  if (/^d\.[A-Za-z_$][\w$]*$/.test(text)) {
-    return `ctx.${text}`;
-  }
-  if (/^[A-Za-z_$][\w$]*$/.test(text)) return `module.${text}`;
-  return undefined;
-}
-
-function runtimeSchemaName(typeName: string): string {
-  if (/^v[234][fhiu]$/.test(typeName)) return `vec${typeName.slice(1)}`;
-  if (/^m[234]x[234][fh]$/.test(typeName)) return `mat${typeName.slice(1)}`;
-  return typeName;
-}
-
 function pairRenderStages(
   vertices: DiscoveredSymbol[],
   fragments: DiscoveredSymbol[],
@@ -2451,63 +1010,6 @@ function roleFromFactoryChain(callee: string | undefined): TypeGpuRole | undefin
     return 'schema';
   }
   return roleFromCallee(callee);
-}
-
-function readCallee(expression: ts.Expression): string | undefined {
-  const value = unwrap(expression);
-  if (ts.isIdentifier(value)) return value.text;
-  if (ts.isTaggedTemplateExpression(value)) return readCallee(value.tag);
-  if (ts.isPropertyAccessExpression(value)) {
-    const left = readCallee(value.expression);
-    return left ? `${left}.${value.name.text}` : value.name.text;
-  }
-  // Bracket namespaces (`root['~unstable'].createRenderPipeline`) must keep the
-  // dotted shape so suffix matching still recognizes the constructor.
-  if (ts.isElementAccessExpression(value)) {
-    const left = readCallee(value.expression);
-    const segment = (value.argumentExpression &&
-      staticPropertyKey(value.argumentExpression)) ?? '?';
-    return left ? `${left}.${segment}` : segment;
-  }
-  if (ts.isCallExpression(value)) return readCallee(value.expression);
-  return undefined;
-}
-
-/**
- * Drops bracket-namespace segments (`~unstable`) so factory chains read the
- * same whether they were authored as `tgpu.fn` or `tgpu['~unstable'].fn`.
- */
-function calleeSegments(callee: string): string[] {
-  return callee.split('.').filter((part) => !part.startsWith('~'));
-}
-
-function unwrap(expression: ts.Expression): ts.Expression {
-  let current = expression;
-  while (
-    ts.isParenthesizedExpression(current) ||
-    ts.isAsExpression(current) ||
-    ts.isSatisfiesExpression(current) ||
-    ts.isNonNullExpression(current) ||
-    ts.isTypeAssertionExpression(current)
-  ) {
-    current = current.expression;
-  }
-  return current;
-}
-
-function hasOwnUseGpuDirective(node: ts.FunctionLikeDeclaration): boolean {
-  const body = node.body;
-  if (!body || !ts.isBlock(body)) return false;
-  for (const statement of body.statements) {
-    if (
-      !ts.isExpressionStatement(statement) ||
-      !ts.isStringLiteral(statement.expression)
-    ) {
-      return false;
-    }
-    if (statement.expression.text === 'use gpu') return true;
-  }
-  return false;
 }
 
 function containsUseGpuDirective(node: ts.Node): boolean {

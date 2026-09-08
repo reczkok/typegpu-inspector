@@ -1,3 +1,4 @@
+import { collectBindingContexts, expandBindingContexts } from './bindingContexts.ts';
 import { tgpu, type Configurable as TgpuConfigurable } from 'typegpu';
 import {
   MIN_BROWSER_WAIT_MS,
@@ -27,7 +28,7 @@ import {
   unavailableExtensionFeature,
   wgslExtensionsFor,
 } from './wgslExtensions.ts';
-import { collectShapeProvenances } from './engine/ledger.ts';
+import { collectShapeProvenances, toLedgerEntry } from './engine/ledger.ts';
 import type {
   EngineContext,
   LedgerEntry,
@@ -38,6 +39,8 @@ import {
   inferTargetKind,
   pipelineKindToResourceType,
   readResourceType,
+  readSlotName,
+  readAccessorSlot,
   readTypegpuInternalProperty,
   readTypegpuSoulProperty,
   readTypegpuFunctionKind,
@@ -68,6 +71,13 @@ import {
 } from './statementMap.ts';
 
 export type TypeGpuInspectionTarget = {
+  parentLabel?: string | undefined;
+  context?: import('../types.ts').ShaderInspectionContext | undefined;
+  autoBind?: boolean | undefined;
+  subject?: unknown;
+  usage?: number | undefined;
+  bindingProvider?: import('../types.ts').ProviderId | undefined;
+  bindings?: Array<[unknown, unknown]> | undefined;
   label?: string | undefined;
   kind?: InspectionTargetKind | undefined;
   value?: unknown;
@@ -94,14 +104,12 @@ export async function inspectPipelineTargets(
     waitBudget?: BrowserWaitBudget | undefined;
     bindingSources?: TaggedBindingSource[] | undefined;
     recorded?: RecordedBindingRegistry | undefined;
-    twins?: Array<[unknown, unknown]> | undefined;
     autoBind?: boolean | undefined;
   } = {},
 ): Promise<TypeGpuTargetReport[]> {
   const waitBudget = options.waitBudget ?? (() => MIN_BROWSER_WAIT_MS);
-  // Sibling target values participate as borrow sources so a bare fn can
-  // reuse a binding its already-bound sibling target carries. Sources are
-  // ranked module-scope before import-scope; first origin wins on duplicates.
+  // Sibling values expose bound helper contexts. Module sources take precedence
+  // over imports when the same object is reachable through multiple paths.
   const taggedSources: TaggedBindingSource[] = [
     ...(options.bindingSources ?? []).filter((source) => source.origin === 'module-scope'),
     ...targets
@@ -109,17 +117,20 @@ export async function inspectPipelineTargets(
       .filter((value) => value !== undefined)
       .map((value) => ({ value, origin: 'module-scope' as const })),
     ...(options.bindingSources ?? []).filter((source) => source.origin === 'import-scope'),
-    ...(options.bindingSources ?? []).filter((source) => source.origin === 'importer-scope'),
   ];
   const autoBind = options.autoBind !== false;
   const reports: TypeGpuTargetReport[] = [];
+  const contexts = collectBindingContexts(taggedSources, options.recorded);
+  const pending = targets.flatMap(target => expandBindingContexts(target, contexts, autoBind) ?? [target]);
 
-  for (const [index, target] of targets.entries()) {
+  for (const [index, target] of pending.entries()) {
     const callStart = recorder.calls.length;
     const recorderSequence = currentRecorderSequence();
     let targetValue = target.value;
     const report: TypeGpuTargetReport = {
       label: target.label ?? `target ${index + 1}`,
+      parentLabel: target.parentLabel,
+      context: target.context,
       kind: target.kind ?? inferTargetKind(target.value),
       ok: false,
       diagnostics: [],
@@ -131,11 +142,19 @@ export async function inspectPipelineTargets(
     // pipeline resolution, and the pipeline re-creation all share the
     // requirements satisfied along the way, and nothing leaks across targets.
     const engine = createEngineContext({
-      enabled: autoBind,
+      enabled: target.autoBind ?? autoBind,
       sources: taggedSources,
       recorded: options.recorded,
-      twins: options.twins,
     });
+    for (const [slot, value] of target.bindings ?? []) {
+      const entry = {
+        requirement: { kind: 'slot-value' as const, key: `context-binding:${readSlotName(readAccessorSlot(slot) ?? slot)}`, subject: slot, discoveredBy: 'shape' as const, detail: { slotName: readSlotName(readAccessorSlot(slot) ?? slot) } },
+        provision: { value, provider: target.bindingProvider ?? 'inspection-context' as const,
+          provenance: target.context?.bindingSource ? `Complete binding set from ${target.context.bindingSource}; ${target.context.association === 'direct' ? 'direct shader relationship' : 'candidate relationship, application usage unverified'}.` : 'Explicit inspection context binding.' },
+      };
+      engine.satisfied.push(entry);
+      if (target.bindingProvider) engine.ledger.push(toLedgerEntry(entry.requirement, entry.provision));
+    }
     const synthesisNotes = collectShapeProvenances(target.ledger ?? []);
     if (synthesisNotes.length > 0) {
       report.diagnostics = [
@@ -247,7 +266,11 @@ export async function inspectPipelineTargets(
       if (report.diagnostics?.length === 0) {
         delete report.diagnostics;
       }
-      reports.push(report);
+      // A missing slot identifies potentially relevant sets, not a proven call path.
+      // Retry each whole set separately; disable synthesis inside these contexts.
+      const candidates = expandBindingContexts(target, contexts, autoBind, [...engine.attemptedSubjects]);
+      if (candidates) pending.push(...candidates);
+      else reports.push(report);
     }
   }
 
@@ -630,7 +653,7 @@ async function validateResolvableTarget(
   if (bindGroupLayouts.length > 0) {
     report.bindGroupLayouts = bindGroupLayouts;
   }
-  const autoBoundSlots = satisfiedSlotValues(engineCtx);
+  const autoBoundSlots = satisfiedSlotValues(engineCtx).filter(entry => entry.provision.provider !== 'inspection-context' && entry.provision.provider !== 'observed-context');
   if (autoBoundSlots.length > 0) {
     addTargetDiagnostics(report, [createAutoBindingsNote(autoBoundSlots)]);
   }

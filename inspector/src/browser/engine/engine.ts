@@ -9,7 +9,6 @@ import { summarizeTargetValue } from '../typegpuIntrospection.ts';
 import { extractFromFailure } from './discovery.ts';
 import { toLedgerEntry, toUnsatisfiedEntry } from './ledger.ts';
 import {
-  buildTwinMap,
   collectBindingSources,
   createProviderChain,
   satisfyRequirement,
@@ -27,15 +26,13 @@ export function createEngineContext(options: {
   enabled: boolean;
   sources: TaggedBindingSource[];
   recorded?: RecordedBindingRegistry | undefined;
-  twins?: Array<[unknown, unknown]> | undefined;
 }): EngineContext {
   return {
     enabled: options.enabled,
     providers: createProviderChain(),
     providerContext: {
-      sources: collectBindingSources(options.sources),
+      sources: options.enabled ? collectBindingSources(options.sources) : [],
       recorded: options.recorded,
-      ...(options.twins?.length ? { twins: buildTwinMap(options.twins) } : {}),
     },
     satisfied: [],
     ledger: [],

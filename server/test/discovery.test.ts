@@ -158,7 +158,7 @@ describe('discoverTypeGpuModule', () => {
 
     for (const name of ['sampleSprite', 'blendSprite', 'renderPreview']) {
       expect(
-        result.symbols.find((symbol) => symbol.name === name)?.probeArguments,
+        result.symbols.find((symbol) => symbol.name === name)?.probeArgumentPlan?.map(entry => 'schema' in entry ? entry.schema : undefined),
       ).toEqual(['ctx.d.vec2f', 'ctx.d.i32']);
     }
   });
@@ -190,7 +190,7 @@ describe('discoverTypeGpuModule', () => {
 
     expect(
       result.symbols.find((symbol) => symbol.name === 'sampleOffset')
-        ?.probeArguments,
+        ?.probeArgumentPlan?.map(entry => 'schema' in entry ? entry.schema : undefined),
     ).toEqual(['ctx.d.vec2f', 'ctx.d.f32']);
   });
 
@@ -208,12 +208,12 @@ describe('discoverTypeGpuModule', () => {
     expect(result.symbols[0]).toMatchObject({
       name: 'sigmoidOp',
       role: 'shader-helper',
-      probeArguments: ['ctx.d.vec4f', 'ctx.d.f32'],
+      probeArgumentPlan: [{ schema: 'ctx.d.vec4f' }, { schema: 'ctx.d.f32' }],
     });
     expect(result.targets[0]?.selector).toMatchObject({
       kind: 'resolvable',
       selector: 'sigmoidOp',
-      probeArguments: ['ctx.d.vec4f', 'ctx.d.f32'],
+      probeArgumentPlan: [{ schema: 'ctx.d.vec4f' }, { schema: 'ctx.d.f32' }],
     });
   });
 
@@ -233,11 +233,11 @@ describe('discoverTypeGpuModule', () => {
       name: 'evolveVec',
       probeSpecializations: [
         {
-          probeArguments: ['ctx.d.vec2f', 'ctx.d.vec2f'],
+          probeArgumentPlan: [{ schema: 'ctx.d.vec2f' }, { schema: 'ctx.d.vec2f' }],
           signature: 'vec2f, vec2f',
         },
         {
-          probeArguments: ['ctx.d.vec4f', 'ctx.d.vec4f'],
+          probeArgumentPlan: [{ schema: 'ctx.d.vec4f' }, { schema: 'ctx.d.vec4f' }],
           signature: 'vec4f, vec4f',
         },
       ],
@@ -256,14 +256,14 @@ describe('discoverTypeGpuModule', () => {
         label: 'evolveVec(vec2f, vec2f)',
         selector: {
           label: 'evolveVec(vec2f, vec2f)',
-          probeArguments: ['ctx.d.vec2f', 'ctx.d.vec2f'],
+          probeArgumentPlan: [{ schema: 'ctx.d.vec2f' }, { schema: 'ctx.d.vec2f' }],
         },
       },
       {
         label: 'evolveVec(vec4f, vec4f)',
         selector: {
           label: 'evolveVec(vec4f, vec4f)',
-          probeArguments: ['ctx.d.vec4f', 'ctx.d.vec4f'],
+          probeArgumentPlan: [{ schema: 'ctx.d.vec4f' }, { schema: 'ctx.d.vec4f' }],
         },
       },
     ]);
@@ -327,8 +327,10 @@ describe('discoverTypeGpuModule', () => {
 
     expect(result.symbols.map(({ name, role }) => ({ name, role }))).toEqual([
       { name: 'helper', role: 'shader-helper' },
+      { name: 'spring.centerAt', role: 'shader-helper' },
     ]);
-    expect(result.targets.map((target) => target.id)).toEqual(['resolvable:helper']);
+    expect(result.targets[0]?.id).toBe('resolvable:helper');
+    expect(result.targets[1]?.selector).toMatchObject({ selector: 'spring.centerAt', declaration: expect.any(Number) });
   });
 
   it('only synthesizes probe arguments from names the probe can resolve to a value', () => {
@@ -373,7 +375,7 @@ describe('discoverTypeGpuModule', () => {
     );
 
     const probeArguments = (name: string) =>
-      result.symbols.find((symbol) => symbol.name === name)?.probeArguments;
+      result.symbols.find((symbol) => symbol.name === name)?.probeArgumentPlan?.map(entry => 'schema' in entry ? entry.schema : undefined);
     expect(probeArguments('fromInterface')).toBeUndefined();
     expect(probeArguments('fromTypeAlias')).toBeUndefined();
     expect(probeArguments('fromGlobal')).toBeUndefined();
@@ -402,7 +404,7 @@ describe('discoverTypeGpuModule', () => {
       { name: 'raw', role: 'shader-helper' },
     ]);
     expect(
-      result.symbols.find((symbol) => symbol.name === 'checkers')?.probeArguments,
+      result.symbols.find((symbol) => symbol.name === 'checkers')?.probeArgumentPlan?.map(entry => 'schema' in entry ? entry.schema : undefined),
     ).toEqual(['ctx.d.vec2f', 'ctx.d.vec3f']);
   });
 
@@ -423,7 +425,7 @@ describe('discoverTypeGpuModule', () => {
     );
 
     const probeArguments = (name: string) =>
-      result.symbols.find((symbol) => symbol.name === name)?.probeArguments;
+      result.symbols.find((symbol) => symbol.name === name)?.probeArgumentPlan?.map(entry => 'schema' in entry ? entry.schema : undefined);
     expect(probeArguments('orderedFloatBits')).toEqual(['ctx.d.f32']);
     expect(probeArguments('floatFromBits')).toEqual(['ctx.d.u32']);
   });
@@ -439,8 +441,8 @@ describe('discoverTypeGpuModule', () => {
       `,
     );
 
-    expect(result.symbols[0]?.probeArguments).toBeUndefined();
-    expect(result.targets[0]?.selector).not.toHaveProperty('probeArguments');
+    expect(result.symbols[0]?.probeArgumentPlan?.map(entry => 'schema' in entry ? entry.schema : undefined)).toBeUndefined();
+    expect(result.targets[0]?.selector).not.toHaveProperty('probeArgumentPlan');
   });
 
   it('recognizes InferGPU struct inputs as zero-value schemas', () => {
@@ -461,7 +463,7 @@ describe('discoverTypeGpuModule', () => {
     expect(
       result.symbols.find((symbol) => symbol.name === 'evalNetwork'),
     ).toMatchObject({
-      probeArguments: ['module.Genome', 'ctx.d.vec4f'],
+      probeArgumentPlan: [{ schema: 'module.Genome' }, { schema: 'ctx.d.vec4f' }],
     });
   });
 
@@ -527,7 +529,7 @@ describe('discoverTypeGpuModule', () => {
       {
         kind: 'resolvable',
         selector: 'helper',
-        probeArguments: ['ctx.d.f32'],
+        probeArgumentPlan: [{ schema: 'ctx.d.f32' }],
       },
       {
         kind: 'render-pipeline',
@@ -536,7 +538,7 @@ describe('discoverTypeGpuModule', () => {
       {
         kind: 'resolvable',
         selector: 'helper',
-        probeArguments: ['ctx.d.f32'],
+        probeArgumentPlan: [{ schema: 'ctx.d.f32' }],
       },
       {
         kind: 'render-pipeline',
@@ -581,52 +583,16 @@ describe('discoverTypeGpuModule', () => {
       `,
     );
 
-    expect(
-      result.symbols.find((symbol) => symbol.name === 'makeTexture')?.targetIds,
-    ).toEqual([
-      'factory-result:makeTexture:textures.0',
-      'factory-result:makeTexture:textures.1',
+    expect(result.symbols.find(symbol => symbol.name === 'makeTexture')?.targetIds).toEqual(['factory-result:textures']);
+    expect(result.symbols.find(symbol => symbol.name === 'textures')).toMatchObject({ role: 'factory-result', targetIds: ['factory-result:textures'] });
+    expect(result.targets.filter(target => target.id.startsWith('factory-result:')).map(target => target.selector)).toEqual([
+      { selector: 'textures', inspectMembers: true, kind: 'resolvable', label: 'makeTexture → textures' },
+      { selector: 'pipelineSet', inspectMembers: true, kind: 'resolvable', label: 'makePipelines → pipelineSet' },
+      { selector: 'layout', inspectMembers: true, kind: 'resolvable', label: 'makeBundle → layout' },
+      { selector: 'pipeline', inspectMembers: true, kind: 'resolvable', label: 'makeBundle → pipeline' },
     ]);
-    expect(
-      result.symbols.find((symbol) => symbol.name === 'textures'),
-    ).toMatchObject({
-      role: 'resource-result',
-      targetIds: [
-        'factory-result:makeTexture:textures.0',
-        'factory-result:makeTexture:textures.1',
-      ],
-    });
-
-    expect(
-      result.targets
-        .filter((target) => target.symbolNames.includes('makePipelines'))
-        .map((target) => target.selector),
-    ).toEqual([
-      {
-        kind: 'compute-pipeline',
-        selector: 'pipelineSet.gpu-optimized',
-        label: 'makePipelines → pipelineSet.gpu-optimized',
-      },
-      {
-        kind: 'render-pipeline',
-        selector: 'pipelineSet.render',
-        label: 'makePipelines → pipelineSet.render',
-      },
-    ]);
-
-    expect(
-      result.symbols.find((symbol) => symbol.name === 'makeBundle')?.targetIds,
-    ).toEqual(['resource:layout', 'pipeline:pipeline']);
-    expect(
-      result.symbols.find((symbol) => symbol.name === 'layout'),
-    ).toMatchObject({ role: 'bind-group-layout', targetIds: ['resource:layout'] });
-    expect(
-      result.symbols.find((symbol) => symbol.name === 'pipeline'),
-    ).toMatchObject({ role: 'render-pipeline', targetIds: ['pipeline:pipeline'] });
-    expect(
-      result.symbols.find((symbol) => symbol.name === 'uncalledDispatchFactory')
-        ?.targetIds,
-    ).toEqual([]);
+    expect(result.symbols.find(symbol => symbol.name === 'makeBundle')?.targetIds).toEqual(['factory-result:layout', 'factory-result:pipeline']);
+    expect(result.symbols.find(symbol => symbol.name === 'uncalledDispatchFactory')?.targetIds).toEqual([]);
   });
 
   it('inspects a resource-factory bundle through one concrete result target', () => {
@@ -650,24 +616,25 @@ describe('discoverTypeGpuModule', () => {
       `,
     );
 
-    const targetId = 'factory-result:createResources:resources';
+    const targetId = 'factory-result:resources';
     expect(
       result.symbols.find((symbol) => symbol.name === 'createResources'),
     ).toMatchObject({ role: 'resource-factory', targetIds: [targetId] });
     expect(
       result.symbols.find((symbol) => symbol.name === 'resources'),
-    ).toMatchObject({ role: 'resource-result', targetIds: [targetId] });
+    ).toMatchObject({ role: 'factory-result', targetIds: [targetId] });
     expect(
       result.targets.filter((target) => target.id.startsWith('factory-result:')),
     ).toEqual([{
       id: targetId,
       label: 'createResources → resources',
       selector: {
-        kind: 'resource',
+        kind: 'resolvable',
+        inspectMembers: true,
         selector: 'resources',
         label: 'createResources → resources',
       },
-      symbolNames: ['createResources', 'resources'],
+      symbolNames: ['resources', 'createResources'],
     }]);
   });
 
@@ -750,7 +717,7 @@ describe('discoverTypeGpuModule', () => {
     ]);
   });
 
-  it('uses a concrete factory pipeline as the inspection context for its stages', () => {
+  it('keeps stage probes independent of factory return-shape guesses', () => {
     const result = discoverTypeGpuModule(
       '/project/overlay.ts',
       `
@@ -772,33 +739,24 @@ describe('discoverTypeGpuModule', () => {
       `,
     );
 
-    expect(
-      result.symbols.find((symbol) => symbol.name === 'overlayFrag')?.targetIds,
-    ).toEqual(['pipeline:renderPipeline']);
-    expect(
-      result.targets.find((target) => target.id === 'pipeline:renderPipeline')
-        ?.symbolNames,
-    ).toEqual([
-      'renderPipeline',
-      'createRenderPipeline',
-      'overlayVertex',
-      'overlayFrag',
-    ]);
-    expect(
-      result.targets.find((target) => target.id === 'pipeline:renderPipeline')
-        ?.pipelineSource,
-    ).toEqual({
-      kind: 'render-pipeline',
-      vertex: 'overlayVertex',
-      fragment: 'overlayFrag',
-      bindings: [{
-        source: 'sceneDataAccess',
-        value: 'sceneDataUniform',
-      }],
-    });
-    expect(
-      result.targets.some((target) => target.id === 'resolvable:overlayFrag'),
-    ).toBe(false);
+    const actual = result.targets.find(target => target.id === 'factory-result:renderPipeline');
+    expect(actual?.selector).toMatchObject({ selector: 'renderPipeline', inspectMembers: true });
+    expect(actual?.pipelineSource).toBeUndefined(); // Actual branch and stages are runtime facts.
+    expect(actual?.symbolNames).toEqual(['renderPipeline', 'createRenderPipeline']);
+    expect(result.symbols.find(symbol => symbol.name === 'overlayFrag')?.targetIds).toEqual(['render:overlayVertex+overlayFrag']);
+  });
+
+  it('follows factory and result aliases without guessing returned members or executing callbacks', () => {
+    const result = discoverTypeGpuModule('/aliases.ts', `
+      function make() { return tgpu.fn([], d.f32)(() => { 'use gpu'; return 1; }); }
+      const alias = make;
+      const bundle = { first: alias() };
+      const again = bundle;
+      const { first: selected } = again;
+      const delayed = () => make();
+      const irrelevant = [1].map(make => make());
+    `);
+    expect(result.targets.filter(target => target.id.startsWith('factory-result:')).map(target => 'selector' in target.selector && target.selector.selector)).toEqual(['bundle', 'again', 'selected']);
   });
 
   it('pairs render stages by name instead of producing a Cartesian product', () => {
@@ -910,7 +868,7 @@ describe('discoverTypeGpuModule', () => {
       result.symbols.find((symbol) => symbol.name === 'shellHelper'),
     ).toMatchObject({
       role: 'shader-helper',
-      probeArguments: ['ctx.d.f32'],
+      probeArgumentPlan: [{ schema: 'ctx.d.f32' }],
     });
   });
 
@@ -1045,7 +1003,7 @@ describe('discoverTypeGpuModule', () => {
     ).toMatchObject({ kind: 'resolvable', selector: 'gravity' });
   });
 
-  it('derives zero-valued accessor bindings for shellless helper probes', () => {
+  it('leaves accessor bindings to runtime identity-based planning', () => {
     const result = discoverTypeGpuModule(
       '/project/struct-helper.ts',
       `
@@ -1060,23 +1018,17 @@ describe('discoverTypeGpuModule', () => {
     );
 
     const shade = result.symbols.find((symbol) => symbol.name === 'shade');
+    expect(shade).not.toHaveProperty('probeBindings');
+    expect(result.targets[0]?.selector).not.toHaveProperty('probeBindings');
     expect(shade).toMatchObject({
       role: 'shader-helper',
-      probeArguments: ['module.HitInfo'],
-      probeBindings: [{
-        slot: 'hitAccess',
-        schema: 'module.HitInfo',
-      }],
+      probeArgumentPlan: [{ schema: 'module.HitInfo' }],
     });
     expect(result.targets.find((target) => target.id === 'resolvable:shade')?.selector)
       .toMatchObject({
         kind: 'resolvable',
         selector: 'shade',
-        probeArguments: ['module.HitInfo'],
-        probeBindings: [{
-          slot: 'hitAccess',
-          schema: 'module.HitInfo',
-        }],
+        probeArgumentPlan: [{ schema: 'module.HitInfo' }],
       });
   });
 });

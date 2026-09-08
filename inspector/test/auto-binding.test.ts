@@ -1,12 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { tgpu, d } from 'typegpu';
 import {
-  buildTwinMap,
   collectBindingSources,
   createProviderChain,
   satisfyRequirement,
 } from '../src/browser/engine/providers.ts';
-import { readAccessorSlot } from '../src/browser/typegpuIntrospection.ts';
 import type { Requirement, TaggedBindingSource } from '../src/browser/engine/types.ts';
 import {
   createAutoBindingsNote,
@@ -99,7 +97,7 @@ describe('slot-value provider chain', () => {
     }));
   });
 
-  it('prefers a borrowed real value over an accessor zero value', () => {
+  it('keeps placeholder synthesis separate from bound function contexts', () => {
     const access = tgpu.accessor(d.f32).$name('force');
     const impl = tgpu.fn([], d.f32)(() => {
       'use gpu';
@@ -112,12 +110,11 @@ describe('slot-value provider chain', () => {
     const bound = consumer.with(access, impl);
 
     const provision = satisfy(slotRequirement(access.slot, 'force'), moduleScope([access, bound]));
-    expect(provision?.provider).toBe('module-scope');
-    expect(provision?.value).toBe(impl);
-    expect(provision?.provenance).toContain('borrowed from a bound function');
+    expect(provision?.provider).toBe('synthesis');
+    expect(provision?.value).toBe(1);
   });
 
-  it('borrows from a bound function when no accessor matches', () => {
+  it('does not take individual bindings out of a bound function', () => {
     const slot = tgpu.slot<number>().$name('scale');
     const consumer = tgpu.fn([], d.f32)(() => {
       'use gpu';
@@ -126,11 +123,10 @@ describe('slot-value provider chain', () => {
     const bound = consumer.with(slot, 42);
 
     const provision = satisfy(slotRequirement(slot, 'scale'), moduleScope([bound]));
-    expect(provision?.provider).toBe('module-scope');
-    expect(provision?.value).toBe(42);
+    expect(provision).toBeUndefined();
   });
 
-  it('borrows from render-pipeline-shaped slot bindings and reports source origin', () => {
+  it('does not take individual bindings out of render pipelines', () => {
     const slot = tgpu.slot<number>().$name('mode');
     // A non-plain prototype, like a real pipeline instance: plain records get
     // flattened by collectBindingSources, other objects are included directly.
@@ -146,13 +142,10 @@ describe('slot-value provider chain', () => {
     const provision = satisfy(slotRequirement(slot, 'mode'), [
       { value: pipelineLike, origin: 'import-scope', label: './pipes.ts' },
     ]);
-    expect(provision?.provider).toBe('import-scope');
-    expect(provision?.value).toBe(3);
-    expect(provision?.provenance).toContain('render pipeline');
-    expect(provision?.provenance).toContain("./pipes.ts");
+    expect(provision).toBeUndefined();
   });
 
-  it('never zero-synthesizes mutable accessors but still borrows for them', () => {
+  it('requires a complete context for mutable accessors', () => {
     const mutableAccess = tgpu.mutableAccessor(d.f32).$name('state');
     const consumer = tgpu.fn([], d.f32)(() => {
       'use gpu';
@@ -167,8 +160,7 @@ describe('slot-value provider chain', () => {
       slotRequirement(mutableAccess.slot, 'state'),
       moduleScope([mutableAccess, bound]),
     );
-    expect(provision?.provider).toBe('module-scope');
-    expect(provision?.value).toBe(5);
+    expect(provision).toBeUndefined();
   });
 
   it('fails soft on a non-callable accessor schema', () => {
@@ -186,33 +178,15 @@ describe('slot-value provider chain', () => {
       slotRequirement(slot, 'weird'),
       moduleScope([brokenAccessorLike, bound]),
     );
-    expect(provision?.value).toBe(9);
+    expect(provision).toBeUndefined();
   });
 
-  it('matches a recorded binding made on the twin of a pasted slot', () => {
-    const pastedSlot = tgpu.slot<number>();
-    const realSlot = tgpu.slot<number>();
-    const provision = satisfyRequirement(
-      slotRequirement(pastedSlot, 'shadeSlot'),
-      createProviderChain(),
-      {
-        sources: [],
-        recorded: { slotBindings: [[realSlot, 7]], pipelines: [], uniforms: [] },
-        twins: buildTwinMap([[pastedSlot, realSlot]]),
-      },
-    );
-    expect(provision?.provider).toBe('recorded-app-bindings');
-    expect(provision?.value).toBe(7);
-  });
-
-  it('pairs the slots behind twin accessors', () => {
-    const pasted = tgpu.accessor(d.f32);
-    const real = tgpu.accessor(d.f32);
-    const twins = buildTwinMap([[pasted, real]]);
-    expect(twins.get(readAccessorSlot(pasted))).toBe(readAccessorSlot(real));
-    expect(twins.get(real)).toBe(pasted);
-    // Nothing links a value to itself or to a primitive.
-    expect(buildTwinMap([[pasted, pasted], [pasted, 1]]).size).toBe(0);
+  it('never borrows a binding from a different slot identity', () => {
+    const selected = tgpu.slot<number>();
+    const unrelated = tgpu.slot<number>();
+    expect(satisfyRequirement(slotRequirement(selected, 'slot'), createProviderChain(), {
+      sources: [], recorded: { pipelines: [{ kind: 'compute', slotPairs: [[unrelated, 7]], pipeline: {} }], uniforms: [] },
+    })).toBeUndefined();
   });
 
   it('returns undefined when nothing matches', () => {

@@ -82,6 +82,7 @@ its settings UI.
 | `features` | not exposed | `[]` | WebGPU features requested from the adapter |
 | `hover`, `inlayHints`, `diagnostics`, `documentLinks`, `sourceMapping`, `schemaLayoutHealth`, `schemaPackingSuggestions` | same names, prefixed | `true` | One switch per editor surface |
 | `inspectorPackage` | `typegpuInspector.inspectorPackage` | `"bundled"` | `"bundled"` or an npm package name |
+| `contextFile` | `typegpuInspector.contextFile` | `""` | JSON inspection fixture, relative to the project root; shared with CLI `--context-file` |
 | `projectRoot` | `typegpuInspector.projectRoot` | `""` | Override workspace-root inference |
 
 `typegpuInspector.serverPath` is VS Code only and points at a local language
@@ -231,6 +232,83 @@ Colors follow the terminal and `NO_COLOR`; progress goes to stderr and
 2 usage or environment failure. Installed as a dev dependency, the binary is
 `typegpu-inspector` in `package.json` scripts.
 
+### Private helpers and specialization contexts
+
+Private symbols are inspected through references in the original module. A
+shader helper declared inside a CPU factory is listed as `factory.helper`.
+When that declaration executes more than once, the inspector compiles each
+captured shader separately and labels the results `[instance 0]`, `[instance 1]`,
+and so on. Instances keep the closures and slot identities created by the app.
+The JSON report includes the source revision and instance index.
+
+Use `--instance 1` to select one instance. Indices follow execution order and
+apply to that run, so give important specializations a reproducible fixture:
+
+```json
+{
+  "module": "./src/blur.ts",
+  "setupBody": "module.makeBlur(3); module.makeBlur(7);",
+  "targets": {
+    "makeBlur.helper": { "label": "radius 7", "instance": 1 }
+  }
+}
+```
+
+With that file saved as `blur.inspection.json`:
+
+```sh
+typegpu-inspector wgsl src/blur.ts -t makeBlur.helper --context-file blur.inspection.json
+```
+
+This example assumes the app has not already called `makeBlur`. Setup runs
+after the module import; existing calls contribute instances too. A factory
+that never executes produces a blocked result with a setup hint. The inspector
+does not invoke CPU factories automatically.
+
+Each target context can also supply `arguments` (an array of `{ "value":
+"setup.input" }`, `{ "schema": "ctx.d.vec3f" }`, or `{ "refSchema":
+"ctx.d.vec3f" }`) and `with` (an array of `{ "slot": "module.quality",
+"value": "setup.quality" }`). Setup can return the referenced values. Schema
+arguments create zero values; reference schemas create mutable reference
+locals. Explicit contexts disable automatic binding inference for that target.
+The editor uses the same fixture through `contextFile` (VS Code:
+`typegpuInspector.contextFile`). Other modules are inspected normally. Save the
+shader file after changing the fixture to rebuild its contexts.
+
+Bindings observed on a pipeline or bound function stay together as a complete
+set. The inspector produces separate `[usage N]` results for distinct sets;
+`--usage N` (or `"usage": N` in a fixture) selects one. Usage indices are local
+to the run; reproducible fixtures should prefer explicit `with` values.
+Usage selection and explicit `with` are mutually exclusive. Closure `instance`
+and binding `usage` are independent and can be selected together.
+
+Reports distinguish a direct shader relationship (`association: "direct"`)
+from a set that merely binds a required slot (`association: "candidate"`).
+Candidates remain `passed-with-assumptions` even when they compile. Missing
+bindings inside a selected set remain blocked; no other set or schema default
+fills them in. Schema-only probes remain available when no set matches.
+
+When a helper is blocked, the editor and CLI suggest static module importers,
+including aliases and barrel exports. These are leads, not proven shader call
+sites. The search reads at most 1,000 source files of at most 1 MB each and
+returns up to 20 leads, marking limited results as `truncated`. It never executes
+those modules. Load a chosen caller explicitly in fixture setup, for example
+`await import('./configured-pipeline.ts');`, or supply the needed values directly.
+
+Inferred helper arguments use one plan format. Complete sampler/texture argument
+tuples from different calls produce separate probes, labeled by source location;
+partial calls never fill one another's missing arguments. Reports expose the
+plan's source and missing inputs in `context.probe`. These probes remain
+assumption-qualified. See the [helper planning coverage matrix](HELPER_PLANNING.md).
+
+Nested capture currently covers named shader variable declarations and GPU
+function declarations in CPU function blocks. Shader functions declared inside
+another GPU body are inspected through the enclosing shader. Returned bundles are enumerated from actual runtime values as described below.
+Other anonymous or unreachable values need an accessible target or explicit probe.
+An imported module must be able to run in the inspection browser. Partial
+inspection selects what to compile; it still executes the selected module's
+initialization.
+
 In a React Native project, name the shader modules rather than a directory:
 `App.tsx` and anything else that imports `react-native` at runtime cannot
 run in the inspector's browser, and the check says which import pulled the
@@ -309,3 +387,46 @@ reviewed the changes, and tested them.
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+### Factory results
+
+Discovery identifies bindings initialized from local TypeGPU factory calls and
+result aliases. It no longer predicts factory return shapes. Inspecting a result
+walks its actual records and arrays and reports the shaders, pipelines, schemas,
+and resources present in that run. Computed property names, destructuring, and
+conditional branches therefore use their actual values and object identities.
+
+The editor can select the resulting members independently. A reusable CLI/editor
+fixture can select an exact property path and specialize a returned helper:
+
+```json
+{
+  "module": "./src/shaders.ts",
+  "targets": {
+    "bundle": {
+      "member": ["odd.key", "0"],
+      "arguments": [{ "schema": "ctx.d.f32" }]
+    }
+  }
+}
+```
+
+Each array index is a string; a property containing a dot remains one segment.
+`member: []` selects the result itself. Reports retain the path in
+`context.resultPath`. Without an argument/binding context, a member selection
+keeps normal observed binding discovery enabled. Supply a member before applying
+specialization arguments or bindings to a bundle.
+
+Traversal preserves aliases, terminates cycles, and does not invoke getters or
+returned CPU functions. It covers enumerable string-keyed properties of records
+and arrays, with limits of 12 nesting levels, 2,048 visited values, and 128
+results. Getters and exceeded limits produce blocked results alongside successful
+members. Arbitrary class instances and symbol-keyed members are outside this
+traversal; expose their shader values through explicit setup.
+
+Returned parameterized bare helpers still need a probe argument context; their
+named nested declarations can also use the existing source argument planner.
+Pipeline-stage links use recorded descriptors and object identity after runtime
+inspection. Before then, stage probes remain independently available. Factories
+that have not run still need explicit setup; no neighboring modules are executed
+to create their results.

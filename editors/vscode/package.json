@@ -277,7 +277,7 @@
         "typegpuInspector.inlayHints": {
           "type": "boolean",
           "default": true,
-          "description": "Show compact ✓/✗ inlay hints in the buffer."
+          "description": "Show compact \u2713/\u2717 inlay hints in the buffer."
         },
         "typegpuInspector.diagnostics": {
           "type": "boolean",
@@ -318,6 +318,11 @@
           "type": "string",
           "default": "",
           "description": "Absolute path to a language server build to use instead of the bundled one (for development)."
+        },
+        "typegpuInspector.contextFile": {
+          "type": "string",
+          "default": "",
+          "description": "Inspection context fixture, relative to projectRoot or the workspace. Uses the same JSON format as CLI --context-file. Reinspect after changing the fixture."
         }
       }
     },

@@ -385,6 +385,9 @@ export async function inspectTypegpuSymbols(
 
   const report = await inspectTypegpuModule({
     cwd: normalized.cwd,
+    symbolModulePath: normalized.includePrivate ? normalized.modulePath : undefined,
+    symbolDeclarations: normalized.targets.flatMap(target =>
+      'selector' in target && target.declaration !== undefined ? [target.declaration] : []),
     source: {
       kind: 'inlineCode',
       inlineCode: symbolModule.inlineCode,

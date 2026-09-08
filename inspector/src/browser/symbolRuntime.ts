@@ -8,8 +8,7 @@ import {
 } from './engine/synthesis.ts';
 import type { LedgerEntry } from './engine/types.ts';
 
-// Generated inspection modules import the zero-value helpers from this module
-// (GENERATED_TOP_LEVEL_BINDINGS contract) — keep re-exporting them here.
+// Generated GPU call wrappers import the zero-value helpers from this module.
 export { createZeroValue, unwrapZeroValueSchema };
 
 type SelectorRoots = Record<string, unknown> & {

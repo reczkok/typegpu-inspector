@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { inferTargetOutcome } from '../src/browser/outcome.ts';
 
 describe('inferTargetOutcome', () => {
-  it.each(['module-scope', 'import-scope', 'importer-scope', 'recorded-app-bindings'] as const)(
+  it.each(['module-scope', 'import-scope', 'recorded-app-bindings'] as const)(
     'qualifies bindings borrowed from %s as inspection assumptions', (provider) => {
       expect(inferTargetOutcome({
         ok: true,

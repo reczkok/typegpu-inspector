@@ -48,20 +48,18 @@ export type SatisfiedRequirement = {
 
 export type TaggedBindingSource = {
   value: unknown;
-  origin: Extract<ProviderId, 'module-scope' | 'import-scope' | 'importer-scope'>;
+  origin: Extract<ProviderId, 'module-scope' | 'import-scope'>;
   /** Optional display label, e.g. the import specifier a namespace came from. */
   label?: string | undefined;
 };
 
 /**
  * What the recording shim observed the application itself doing during module
- * import and setup: every root.with pair, pipeline creation, and uniform
- * initial value. Values are the application's real objects.
+ * import and setup: complete pipeline binding sets and uniform initial values. Values are the application's real objects.
  */
 export type RecordedBindingRegistry = {
   roots?: unknown[];
   usedInspectorDevice?: boolean;
-  slotBindings: Array<[unknown, unknown]>;
   pipelines: Array<{
     kind: string;
     descriptor?: unknown;
@@ -77,13 +75,7 @@ export type ProviderContext = {
   sources: TaggedBindingSource[];
   /** Present when the recording shim captured application activity. */
   recorded?: RecordedBindingRegistry | undefined;
-  /**
-   * Same declaration, two module instances: private inspection pastes the
-   * module source, so a slot it declares exists once for the targets and once
-   * for the importers that bound it. Maps each to the other (accessors and
-   * their slots alike) so bindings match across the pair.
-   */
-  twins?: Map<unknown, unknown> | undefined;
+
 };
 
 /**

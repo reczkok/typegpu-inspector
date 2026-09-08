@@ -3,6 +3,13 @@ import { defaultSettings, settingsBounds } from '../src/protocol.js';
 import { mergeSettings, unwrapSettings, type SettingsWarning } from '../src/settings.js';
 
 describe('mergeSettings', () => {
+  it('sets, preserves, and clears the shared fixture setting', () => {
+    const configured = mergeSettings({ contextFile: 'inspect.json' });
+    expect(configured.contextFile).toBe('inspect.json');
+    expect(mergeSettings({}, configured).contextFile).toBe('inspect.json');
+    expect(mergeSettings({ contextFile: '' }, configured).contextFile).toBeUndefined();
+  });
+
   it('returns defaults for an empty payload', () => {
     expect(mergeSettings(undefined)).toEqual(defaultSettings);
     expect(mergeSettings({})).toEqual(defaultSettings);

@@ -42,7 +42,7 @@
     "check": "pnpm typecheck && pnpm test",
     "prepublishOnly": "pnpm build",
     "start": "tsx src/index.ts",
-    "test:browser": "TYPEGPU_MCP_RUN_BROWSER_TESTS=1 vitest run test/browser-smoke.test.ts test/complex-examples.test.ts",
+    "test:browser": "TYPEGPU_MCP_RUN_BROWSER_TESTS=1 vitest run test/browser-smoke.test.ts test/complex-examples.test.ts test/symbol-access-browser.test.ts test/optimizer-browser.test.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --exclude test/browser-smoke.test.ts --exclude test/complex-examples.test.ts --exclude test/docs-survey.test.ts"
   },
@@ -51,6 +51,7 @@
     "confbox": "^0.2.4",
     "exsolve": "^1.0.8",
     "jsonc-parser": "3.3.1",
+    "magic-string": "0.30.21",
     "pkg-types": "^2.3.1",
     "playwright-chromium": "^1.61.0",
     "typegpu": "0.12.3",

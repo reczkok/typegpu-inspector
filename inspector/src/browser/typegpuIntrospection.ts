@@ -150,23 +150,17 @@ export function readTypegpuSoulProperty(
   }
 }
 
-export function readTypegpuInternalProperty(
-  value: unknown,
-  property: string,
-): unknown | undefined {
-  if (!value || (typeof value !== 'object' && typeof value !== 'function')) {
-    return undefined;
-  }
+export function readTypegpuSymbol(value: unknown, name: string): unknown {
+  if (!value || (typeof value !== 'object' && typeof value !== 'function')) return undefined;
   try {
-    const internal = Object.getOwnPropertySymbols(value)
-      .find((symbol) => String(symbol).endsWith(':$internal)'));
-    if (!internal) return undefined;
-    const record = (value as Record<symbol, unknown>)[internal];
-    if (!record || typeof record !== 'object') return undefined;
-    return (record as Record<string, unknown>)[property];
-  } catch {
-    return undefined;
-  }
+    const symbol = Object.getOwnPropertySymbols(value).find(key => String(key).endsWith(`:${name})`));
+    return symbol ? (value as Record<symbol, unknown>)[symbol] : undefined;
+  } catch { return undefined; }
+}
+
+export function readTypegpuInternalProperty(value: unknown, property: string): unknown {
+  const internal = readTypegpuSymbol(value, '$internal');
+  return internal && typeof internal === 'object' ? (internal as Record<string, unknown>)[property] : undefined;
 }
 
 export function isTypegpuShaderResolvableLike(value: unknown): boolean {
@@ -368,4 +362,29 @@ export function isThreeNodeLikeSummary(summary: unknown): boolean {
     typeof summary.constructor === 'string' &&
     THREE_NODE_CONSTRUCTOR_PATTERN.test(summary.constructor)
   );
+}
+
+const resourceTypes = new Set(['uniform', 'readonly', 'mutable', 'texture-view', 'sampler', 'sampler-comparison', 'accessor', 'mutable-accessor', 'var', 'buffer', 'texture', 'bind-group', 'bind-group-layout', 'vertex-layout', 'slot', 'query-set', 'root', 'guarded-compute-pipeline']);
+
+/** Read markers through data descriptors, never user accessors. */
+function dataProperty(value: object, key: PropertyKey): unknown {
+  for (let current: object | null = value, depth = 0; current && depth < 8; current = Object.getPrototypeOf(current), depth++) {
+    const descriptor = Object.getOwnPropertyDescriptor(current, key);
+    if (descriptor) return 'value' in descriptor ? descriptor.value : undefined;
+  }
+  return undefined;
+}
+
+export function resultMemberKind(value: object): InspectionTargetKind | undefined {
+  const resourceType = dataProperty(value, 'resourceType');
+  if (typeof resourceType === 'string') {
+    if (isPipelineResourceType(resourceType)) return resourceType;
+    if (resourceTypes.has(resourceType)) return 'resource';
+    if (isShaderResolvableResourceType(resourceType)) return 'resolvable';
+  }
+  const schemaType = dataProperty(value, 'type');
+  if (typeof schemaType === 'string' && /^(?:bool|f32|f16|i32|u32|vec[234][fhiu]?|mat[234]x[234][fh]?|struct|array|atomic|ptr|decorated|unstruct|disarray)$/.test(schemaType)) return 'resource';
+  if (Object.getOwnPropertySymbols(value).some(key => String(key).endsWith(':$resolve)') && typeof dataProperty(value, key) === 'function')) return 'resolvable';
+  if (typeof value === 'function' && /^(?:(?:async\s+)?function(?:\s+[\w$]+)?\s*\([^)]*\)|(?:async\s+)?(?:\([^)]*\)|[\w$]+)\s*=>|[\w$]+\s*\([^)]*\))\s*\{\s*(["'])use gpu\1(?:\s*;|\s*})/.test(Function.prototype.toString.call(value))) return 'resolvable';
+  return undefined;
 }

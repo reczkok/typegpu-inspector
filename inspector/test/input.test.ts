@@ -218,14 +218,10 @@ describe('normalizeSymbolInput', () => {
     );
     expect(result.inlineCode).toContain('/src/browser/symbolRuntime.ts');
     expect(result.inlineCode).toContain('exportedHelper');
-    expect(result.inlineCode).toContain('createComputePipeline');
-    expect(result.inlineCode).toContain('create: __typegpuMcpPreparedCompute1.create');
-    expect(result.inlineCode).toContain('recreate: __typegpuMcpPreparedCompute1.recreate');
-    expect(result.inlineCode).toContain('createRenderPipeline');
-    expect(result.inlineCode).toContain('recreate: __typegpuMcpPreparedRender2.recreate');
-    expect(result.inlineCode).toContain('try {');
-    expect(result.inlineCode).toContain('targets.push({ label:');
-    expect(result.inlineCode).toContain('error });');
+    expect(result.inlineCode).toContain('/src/browser/symbolTargets.ts');
+    expect(result.inlineCode).toContain('"kind":"compute-pipeline","compute":"exportedCompute"');
+    expect(result.inlineCode).toContain('"kind":"render-pipeline","vertex":"exportedVertex"');
+    expect(result.inlineCode).not.toContain('targets.push(');
     expect(result.inlineCode).toContain('const setupRoots = setup && typeof setup ===');
     expect(result.inlineCode).toContain(
       'async function __typegpuEditorInspect({ root, device, tgpu, d, std, common })',
@@ -258,7 +254,7 @@ describe('normalizeSymbolInput', () => {
     expect(result.inlineCode).not.toContain('await import("typegpu")');
   });
 
-  it('pairs pasted exports with the real module when a binding importer exists', () => {
+  it('never imports a neighboring caller to discover bindings', () => {
     const cwd = resolve(import.meta.dirname, '..');
     const result = buildSymbolInspectionModule(
       normalizeSymbolInput({
@@ -269,11 +265,9 @@ describe('normalizeSymbolInput', () => {
       }),
     );
 
-    expect(result.inlineCode).toContain('__typegpuMcpImporter0 = await import("/@fs/');
-    expect(result.inlineCode).toContain('__typegpuMcpRealModule = await import("/@fs/');
-    expect(result.inlineCode).toContain(
-      '__typegpuMcpTwins: [[__typegpuMcpScope["shadeSlot"], __typegpuMcpRealModule?.["shadeSlot"]], [__typegpuMcpScope["shadedFragment"], __typegpuMcpRealModule?.["shadedFragment"]]]',
-    );
+    expect(result.inlineCode).not.toContain('pasted-slot-importer');
+    expect(result.inlineCode).not.toContain('__typegpuMcpRealModule');
+    expect(result.inlineCode).not.toContain('__typegpuMcpTwins');
 
     const withoutImporters = buildSymbolInspectionModule(
       normalizeSymbolInput({
@@ -284,7 +278,7 @@ describe('normalizeSymbolInput', () => {
       }),
     );
     expect(withoutImporters.inlineCode).not.toContain('__typegpuMcpRealModule');
-    expect(withoutImporters.inlineCode).toContain('__typegpuMcpTwins: []');
+    expect(withoutImporters.inlineCode).not.toContain('__typegpuMcpTwins');
   });
 
   it('exposes all runtime locals as a module-scope source under includePrivate', () => {
@@ -298,11 +292,8 @@ describe('normalizeSymbolInput', () => {
       }),
     );
 
-    expect(result.inlineCode).toContain('const __typegpuMcpScope = {');
-    expect(result.inlineCode).toContain(
-      '"paramsAccess": (typeof paramsAccess === \'undefined\' ? undefined : paramsAccess)',
-    );
-    expect(result.inlineCode).toContain("{ origin: 'module-scope', value: __typegpuMcpScope }");
+    expect(result.inlineCode).toContain('__typegpuMcpModuleScope(');
+    expect(result.inlineCode).toContain("{ origin: 'module-scope', value: __typegpuEditorInspectedModule }");
   });
 
   it('generates editor probes and render defaults', () => {
@@ -330,8 +321,8 @@ describe('normalizeSymbolInput', () => {
     expect(result.inlineCode).toContain("'use gpu';");
     expect(result.inlineCode).toContain('tgpu.fn([])');
     expect(result.inlineCode).toContain('ctx.d.vec4f');
-    expect(result.inlineCode).toContain('.ledger');
-    expect(result.inlineCode).toContain('true);');
+    expect(result.inlineCode).toContain('ledger:');
+    expect(result.inlineCode).toContain('__typegpuMcpPrepareTargets(');
   });
 
   it('resolves concise d.* probe schemas against the inspection context', () => {
@@ -380,9 +371,7 @@ describe('normalizeSymbolInput', () => {
       }),
     );
 
-    expect(result.inlineCode).toContain(
-      '"linearSampler": linearSampler',
-    );
+    expect(result.inlineCode).toContain('__typegpuMcpModuleScope(');
     expect(result.inlineCode).toContain(
       'const __typegpuMcpProbeValue0_1 = __typegpuMcpReadSelector(inspectedModule, "linearSampler", "targets[0].probeArgumentPlan[1].value", roots);',
     );
@@ -395,7 +384,7 @@ describe('normalizeSymbolInput', () => {
     );
   });
 
-  it('can inline a source module and expose selected private declarations', () => {
+  it('imports a private source module without pasting its declarations', () => {
     const cwd = resolve(import.meta.dirname, '..');
     const result = buildSymbolInspectionModule(
       normalizeSymbolInput({
@@ -412,10 +401,8 @@ describe('normalizeSymbolInput', () => {
       }),
     );
 
-    expect(result.inlineCode).toContain('const privateHelper = tgpu.fn');
-    expect(result.inlineCode).toContain(
-      'const __typegpuEditorInspectedModule = { "privateHelper": privateHelper }',
-    );
+    expect(result.inlineCode).not.toContain('const privateHelper = tgpu.fn');
+    expect(result.inlineCode).toContain('__typegpuMcpModuleScope(');
     expect(result.inlineCode).not.toContain(
       'import * as __typegpuEditorInspectedModule',
     );
@@ -442,9 +429,7 @@ describe('normalizeSymbolInput', () => {
       }),
     );
 
-    expect(result.inlineCode).toContain(
-      'const __typegpuEditorInspectedModule = { "privateHelper": privateHelper, "AccessorParams": AccessorParams, "paramsAccess": paramsAccess }',
-    );
+    expect(result.inlineCode).toContain('__typegpuMcpModuleScope(');
     expect(result.inlineCode).toContain(
       '__typegpuMcpProbe0 = __typegpuMcpProbe0.with(__typegpuMcpProbeSlot0_0, __typegpuMcpCreateZeroValue(__typegpuMcpProbeBindingSchema0_0, "targets[0].probeBindings[0].schema"));',
     );
@@ -529,10 +514,7 @@ return { value };
       }),
     );
 
-    expect(result.inlineCode).toContain('__typegpuMcpCreateRenderPipeline');
-    expect(result.inlineCode).toContain(
-      '__typegpuMcpCreateRenderPipeline(root, tgpu, d, inspectedModule',
-    );
+    expect(result.inlineCode).toContain('"kind":"render-pipeline","vertex":"exportedVertex"');
     expect(result.inlineCode).toContain('"slot":"paramsAccess"');
     expect(result.inlineCode).toContain('"value":"setup.params"');
   });
@@ -573,8 +555,7 @@ return { value };
       }),
     );
 
-    expect(result.inlineCode).toContain('targets[0].attribs.color');
-    expect(result.inlineCode).toContain('"color": __typegpuMcpAttribs0_0');
+    expect(result.inlineCode).toContain('"attribs":{"color":"exportedAttributedVertexLayout.attrib"}');
   });
 
   it('guards unresolvable private roots instead of emitting bare identifiers', () => {
@@ -591,10 +572,8 @@ return { value };
       }),
     );
 
-    expect(result.inlineCode).toContain(
-      `"neverDeclared": (typeof neverDeclared === 'undefined' ? undefined : neverDeclared)`,
-    );
-    expect(result.inlineCode).toContain('"privateHelper": privateHelper');
+    expect(result.inlineCode).toContain('"selector":"neverDeclared.field"');
+    expect(result.inlineCode).toContain('__typegpuMcpModuleScope(');
     expect(result.inlineCode).not.toContain('{ "neverDeclared": neverDeclared');
   });
 
@@ -611,11 +590,11 @@ return { value };
       }),
     );
 
-    expect(result.inlineCode).toContain('"privateHelper": privateHelper');
-    expect(result.inlineCode).toContain('"attributedVertexLayout": attributedVertexLayout');
+    expect(result.inlineCode).toContain('__typegpuMcpModuleScope(');
+    expect(result.inlineCode).toContain('inspectedModule.attributedVertexLayout');
   });
 
-  it('keeps the inspect export when the inlined module declares its own inspect', () => {
+  it('keeps the wrapper inspect export independent of the original module', () => {
     const cwd = resolve(import.meta.dirname, '..');
     const result = buildSymbolInspectionModule(
       normalizeSymbolInput({
@@ -626,14 +605,14 @@ return { value };
       }),
     );
 
-    expect(result.inlineCode).toContain('"privateHelper": privateHelper');
+    expect(result.inlineCode).toContain('__typegpuMcpModuleScope(');
     expect(result.inlineCode).not.toContain('import * as __typegpuEditorInspectedModule');
     expect(result.inlineCode).toContain('async function __typegpuEditorInspect(');
     expect(result.inlineCode).toContain('export { __typegpuEditorInspect as inspect };');
     expect(result.inlineCode).not.toContain('export async function inspect(');
   });
 
-  it('falls back to module import when the inlined module already exports inspect', () => {
+  it('retains private access when the original module exports inspect', () => {
     const cwd = resolve(import.meta.dirname, '..');
     const result = buildSymbolInspectionModule(
       normalizeSymbolInput({
@@ -644,12 +623,12 @@ return { value };
       }),
     );
 
-    expect(result.inlineCode).toContain('import * as __typegpuEditorInspectedModule from "/@fs/');
+    expect(result.inlineCode).toContain('import * as __typegpuMcpExports from "/@fs/');
     expect(result.inlineCode).not.toContain('const __typegpuEditorInspectedModule = {');
     expect(result.inlineCode).toContain('export { __typegpuEditorInspect as inspect };');
   });
 
-  it('falls back to module import when the inlined module declares a generated binding', () => {
+  it('retains private access despite generated binding names in the original module', () => {
     const cwd = resolve(import.meta.dirname, '..');
     const result = buildSymbolInspectionModule(
       normalizeSymbolInput({
@@ -660,7 +639,7 @@ return { value };
       }),
     );
 
-    expect(result.inlineCode).toContain('import * as __typegpuEditorInspectedModule from "/@fs/');
+    expect(result.inlineCode).toContain('import * as __typegpuMcpExports from "/@fs/');
     expect(result.inlineCode).not.toContain('const __typegpuEditorInspectedModule = { spoofed');
   });
 
@@ -735,11 +714,9 @@ return { value };
       }),
     );
 
-    expect(inferred.inlineCode).toContain('targets.push({ label: "exportedCompute", error: error });');
-    expect(inferred.inlineCode).not.toContain('kind: "resolvable"');
-    expect(explicit.inlineCode).toContain(
-      'targets.push({ label: "exportedCompute", kind: "compute-pipeline", error: error });',
-    );
+    expect(inferred.inlineCode).toContain('"selector":"exportedCompute","label":"exportedCompute"');
+    expect(inferred.inlineCode).not.toContain('"kind":');
+    expect(explicit.inlineCode).toContain('"selector":"exportedCompute","kind":"compute-pipeline"');
   });
 });
 

@@ -4,7 +4,6 @@ import { createServer as createNetServer } from 'node:net';
 import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createLogger, createServer, type InlineConfig, type Logger, type PluginOption, type ViteDevServer } from 'vite';
-import ts from 'typescript';
 import { DependencyOptimizationError, SessionInfrastructureError } from '../shared.ts';
 import type { StaticAssetRoute } from '../types.ts';
 import type { PreparedInput } from './input.ts';
@@ -17,6 +16,7 @@ import {
   resolveTypegpuInternalPath,
 } from './paths.ts';
 import { describeDependencyFailure, isDependencyOptimizationError, stripAnsi } from './optimizerFailure.ts';
+import { instrumentSymbols } from './instrumentSymbols.ts';
 import { buildRecordingShimModule } from './recordingShim.ts';
 
 const INLINE_MODULE_QUERY = 'typegpu-mcp-inline';
@@ -88,6 +88,17 @@ export async function createInspectorViteServer(
     logLevel: 'error',
     customLogger: createCapturingLogger(failures),
     plugins: [
+      {
+        name: 'typegpu-inspector-symbol-access',
+        enforce: 'pre',
+        transform(code, id) {
+          const selected = getInput().symbolModulePath;
+          if (!selected || id.includes('?') || !existsSync(id) || realpathSync(id) !== realpathSync(selected)) return;
+          return instrumentSymbols(selected, code,
+            createFsModuleUrl(resolve(getPackageRoot(), 'src/browser/symbolRegistry.ts')),
+            getInput().symbolDeclarations ?? []);
+        },
+      },
       createHarnessPlugin(),
       createProjectPublicAssetPlugin(input.cwd),
       createStaticAssetPlugin(input.staticAssetRoutes),
@@ -149,10 +160,11 @@ export async function createInspectorViteServer(
       },
     },
     optimizeDeps: {
-      // The harness entry does not import the inspected app, so scan the real
-      // module to discover CommonJS dependencies such as React.
-      entries: [input.modulePath],
-      include: input.inlineCode ? collectOptimizerIncludes(input.modulePath, input.inlineCode) : [],
+      // Discover dependencies as the harness and inspected module request them.
+      // Vite's speculative scan can reject without settling dependency requests,
+      // which also prevents server.close() from completing after a build failure.
+      entries: [],
+      include: [],
       exclude: [...TYPEGPU_OPTIMIZE_DEP_EXCLUDES],
     },
   };
@@ -331,70 +343,6 @@ function createHarnessPlugin(): PluginOption {
       });
     },
   };
-}
-
-/**
- * Bare specifiers an inline module imports at runtime, for
- * `optimizeDeps.include`: the scanner only sees the on-disk entry, not the
- * generated module. Type-only imports are erased before the module runs, so
- * they stay out; prebundling them would drag in packages (React Native, say)
- * that the browser build cannot parse.
- */
-export function collectOptimizerIncludes(modulePath: string, source: string): string[] {
-  const scriptKind = modulePath.endsWith('.tsx') || modulePath.endsWith('.jsx')
-    ? ts.ScriptKind.TSX
-    : ts.ScriptKind.TS;
-  const sourceFile = ts.createSourceFile(
-    modulePath,
-    source,
-    ts.ScriptTarget.Latest,
-    false,
-    scriptKind,
-  );
-  const imports = new Set<string>();
-  const add = (specifier: string) => {
-    if (
-      specifier.startsWith('.') ||
-      specifier.startsWith('/') ||
-      specifier.startsWith('#') ||
-      TYPEGPU_OPTIMIZE_DEP_EXCLUDES.some((excluded) =>
-        specifier === excluded || specifier.startsWith(`${excluded}/`)
-      )
-    ) return;
-    imports.add(specifier);
-    if (specifier === 'react') {
-      imports.add('react/jsx-runtime');
-      imports.add('react/jsx-dev-runtime');
-    }
-  };
-  const visit = (node: ts.Node): void => {
-    if (
-      ts.isImportDeclaration(node) &&
-      ts.isStringLiteralLike(node.moduleSpecifier)
-    ) {
-      if (!isTypeOnlyImport(node)) add(node.moduleSpecifier.text);
-    } else if (
-      ts.isCallExpression(node) &&
-      node.expression.kind === ts.SyntaxKind.ImportKeyword &&
-      node.arguments[0] &&
-      ts.isStringLiteralLike(node.arguments[0])
-    ) {
-      add(node.arguments[0].text);
-    }
-    node.forEachChild(visit);
-  };
-  sourceFile.forEachChild(visit);
-  return [...imports];
-}
-
-/** `import type … from` and `import { type A } from` leave nothing behind at runtime. */
-function isTypeOnlyImport(node: ts.ImportDeclaration): boolean {
-  const clause = node.importClause;
-  if (!clause) return false;
-  if (clause.isTypeOnly) return true;
-  const bindings = clause.namedBindings;
-  if (clause.name || !bindings || !ts.isNamedImports(bindings)) return false;
-  return bindings.elements.length > 0 && bindings.elements.every((element) => element.isTypeOnly);
 }
 
 export async function startInspectorViteServer(

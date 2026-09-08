@@ -26,11 +26,12 @@ export class RuntimeInspectorClient {
     modulePath: string,
     targets: InspectionTarget[],
     signal?: AbortSignal,
+    setupBody?: string,
   ): Promise<InspectorOutput> {
     this.cancelIdleClose();
     try {
       signal?.throwIfAborted();
-      const first = await this.inspectOnce(modulePath, targets, signal);
+      const first = await this.inspectOnce(modulePath, targets, signal, setupBody);
       const firstCoverage = coveredTargets(first, targets);
       if (firstCoverage.size === targets.length || targets.length === 0) {
         return first;
@@ -42,7 +43,7 @@ export class RuntimeInspectorClient {
         signal?.throwIfAborted();
         await this.resetConnection();
         signal?.throwIfAborted();
-        const retry = await this.inspectOnce(modulePath, targets, signal);
+        const retry = await this.inspectOnce(modulePath, targets, signal, setupBody);
         if (coveredTargets(retry, targets).size === 0) {
           const returned = describeReturnedTargets(retry);
           throw new Error(
@@ -57,7 +58,7 @@ export class RuntimeInspectorClient {
       // without tearing the session down, and merge what comes back.
       const missing = targets.filter((target) => !firstCoverage.has(target.label));
       signal?.throwIfAborted();
-      const retry = await this.inspectOnce(modulePath, missing, signal);
+      const retry = await this.inspectOnce(modulePath, missing, signal, setupBody);
       return mergeTargetReports(first, retry);
     } catch (error) {
       if (signal?.aborted || isAbortError(error)) throw error;
@@ -66,7 +67,7 @@ export class RuntimeInspectorClient {
       await this.resetConnection();
       try {
         signal?.throwIfAborted();
-        return await this.inspectOnce(modulePath, targets, signal);
+        return await this.inspectOnce(modulePath, targets, signal, setupBody);
       } catch (retryError) {
         const stderr = lastStderrReport(this.stderrTail);
         throw new Error(
@@ -152,6 +153,7 @@ export class RuntimeInspectorClient {
     modulePath: string,
     targets: InspectionTarget[],
     signal?: AbortSignal,
+    setupBody?: string,
   ): Promise<InspectorOutput> {
     const settings = this.settings();
     const client = await this.connect();
@@ -165,6 +167,7 @@ export class RuntimeInspectorClient {
             modulePath,
             targets: targets.map((target) => target.selector),
             includePrivate: true,
+            ...(setupBody !== undefined ? { setupBody } : {}),
           },
           project: {
             root: settings.projectRoot ?? this.workspaceRoot,
@@ -762,11 +765,14 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function coveredTargets(
+export function coveredTargets(
   output: InspectorOutput,
   targets: InspectionTarget[],
 ): Set<string> {
-  const returned = new Set(returnedTargetLabels(output));
+  const returned = new Set([
+    ...returnedTargetLabels(output),
+    ...(output.targets ?? []).flatMap(report => report.parentLabel ? [report.parentLabel] : []),
+  ]);
   return new Set(
     targets
       .map((target) => target.label)

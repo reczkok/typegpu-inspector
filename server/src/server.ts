@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { resolve } from 'node:path';
+import { applyInspectionFixture } from './inspectionFixture.js';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   createConnection,
@@ -253,7 +255,12 @@ documents.onDidSave(({ document }) => {
 function inspectSavedDocument(document: TextDocument): void {
   let state = ensureFreshState(document);
   if (state) {
-    state = { ...state, savedVersion: document.version };
+    // A new run can create a different number of closures even without a text edit.
+    // Start from declarations again rather than the previous run's instance list.
+    const fileName = fileNameFromUri(document.uri);
+    state = { ...state, savedVersion: document.version,
+      ...(fileName ? { discovered: discoverTypeGpuModule(fileName, document.getText()) } : {}),
+    };
     states.set(document.uri, state);
   }
   if (settings.inspectOn === 'save' || settings.inspectOn === 'save-and-hover') {
@@ -606,7 +613,16 @@ async function inspectDocument(
           targetIds: requestedTargetIds,
           priority,
         },
-        (signal) => inspector.inspect(modulePath, targets, signal),
+        async (signal) => {
+          const fixture = settings.contextFile
+            ? await applyInspectionFixture(resolve(settings.projectRoot ?? workspaceRoot, settings.contextFile), modulePath, targets, discovered.targets, true)
+            : undefined;
+          if (fixture) for (const target of fixture.targets) {
+            const index = discovered.targets.findIndex(t => t.id === target.id);
+            if (index >= 0) discovered.targets[index] = target;
+          }
+          return inspector.inspect(modulePath, fixture?.targets ?? targets, signal, fixture?.setupBody);
+        },
       );
       if (result.status === 'superseded') {
         sendInspectionStatus({ state: 'idle', uri: document.uri });

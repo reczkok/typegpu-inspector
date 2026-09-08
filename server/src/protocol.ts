@@ -42,6 +42,7 @@ export type InspectorSettings = {
   strictNames: boolean;
   features: string[];
   projectRoot?: string;
+  contextFile?: string;
   hover: boolean;
   inlayHints: boolean;
   diagnostics: boolean;
@@ -149,6 +150,9 @@ export type InspectorLedgerEntry = {
 };
 
 export type InspectorTargetReport = {
+  parentLabel?: string;
+  contextSuggestions?: import('./contextSuggestions.js').ContextSuggestions;
+  context?: { resultPath?: string[]; pipelineStages?: string[]; probe?: import('./discovery.js').ProbeContext; usage?: number; bindingSource?: string; association?: 'direct' | 'candidate'; modulePath?: string; declaration?: number; instance?: number; sourceRevision?: string; label?: string; arguments?: unknown[]; with?: unknown[] };
   label: string;
   kind: string;
   ok: boolean;

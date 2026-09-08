@@ -1630,13 +1630,18 @@ describe('browser harness', () => {
     expect(report.stats.renderPipelineCount).toBe(1);
   });
 
-  maybeIt('borrows an importer binding for a slot the pasted module declares', async () => {
-    const report = await inspectTypegpuSymbols({
+  maybeIt('requires explicit setup to use bindings from a neighboring caller', async () => {
+    const options = {
       cwd: resolve(import.meta.dirname, '..'),
       modulePath: 'test/fixtures/pasted-slot-provider.ts',
       includePrivate: true,
-      targets: [{ label: 'pasted shaded fragment', selector: 'shadedFragment', kind: 'resolvable', unwrap: false }],
+      targets: [{ label: 'pasted shaded fragment', selector: 'shadedFragment', kind: 'resolvable' as const, unwrap: false }],
       timeoutMs: 30_000,
+    };
+    const blocked = await inspectTypegpuSymbols(options);
+    expect(blocked.targets[0]?.outcome).toBe('blocked');
+    const report = await inspectTypegpuSymbols({ ...options,
+      setupBody: 'await import("./pasted-slot-importer.ts");',
     });
 
     expect(report.ok, JSON.stringify(report.targets, null, 2)).toBe(true);
@@ -1646,7 +1651,7 @@ describe('browser harness', () => {
         expect.objectContaining({
           kind: 'slot-value',
           status: 'satisfied',
-          provider: 'recorded-app-bindings',
+          provider: 'observed-context',
           detail: expect.objectContaining({ slotName: 'shadeSlot' }),
         }),
       ]),

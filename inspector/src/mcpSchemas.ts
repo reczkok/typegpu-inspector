@@ -431,8 +431,24 @@ const selectorTargetBaseSchema = {
 
 export const selectorTargetSchema = z.object({
   ...selectorTargetBaseSchema,
-  selector: z.string().describe('Dot-path selector from the inspected module, or setup./ctx.'),
+  selector: z.string().describe('Dot-path selector from the inspected module, or setup./ctx.; display name when declaration is supplied.'),
+  inspectMembers: z.boolean().optional().describe('Enumerate actual shader and resource members of a returned record or array without invoking getters or CPU functions.'),
+  member: z.array(z.string()).optional().describe('Exact own-property path within a result. Keys containing dots remain one path segment.'),
+  declaration: z.number().int().nonnegative().optional().describe('Original source offset of a nested binding identifier. Requires includePrivate.'),
+  usage: z.number().int().nonnegative().optional().describe('Select a complete observed binding set by its index in this run. Candidate contexts do not prove the helper is used by that pipeline.'),
+  instance: z.number().int().nonnegative().optional().describe('Zero-based nested closure instance. Omit to inspect every captured instance independently.'),
+  context: z.object({
+    label: z.string().optional(),
+    arguments: z.array(probeArgumentPlanEntrySchema).optional(),
+    with: z.array(symbolBindingSchema).optional(),
+  }).optional().describe('Explicit helper specialization. Disables automatic binding and replaces inferred probe arguments/bindings.'),
   kind: targetKindSchema.optional(),
+  probeContext: z.object({
+    origin: z.enum(['schema', 'call-site']),
+    line: z.number().int().positive().optional(),
+    column: z.number().int().positive().optional(),
+    missing: z.array(z.object({ index: z.number().int().nonnegative(), parameter: z.string(), reason: z.string() })).optional(),
+  }).optional().describe('Source-derived probe provenance and missing inputs, supplied by the helper planner.'),
   probeArguments: z
     .array(z.string())
     .optional()
@@ -547,7 +563,7 @@ export const agentTargetSchema = z.discriminatedUnion('kind', [
       .optional()
       .default(false)
       .describe(
-        'Expose selected top-level local declarations by inlining the module into the generated editor probe.',
+        'Expose original private bindings and executed nested closures through development-only module instrumentation.',
       ),
   }),
 ]);
@@ -712,7 +728,7 @@ export const symbolInputSchema = {
     .optional()
     .default(false)
     .describe(
-      'Inline the source module and expose selected top-level local declarations to the inspection wrapper. Intended for editor integrations that inspect non-exported shaders and pipelines.',
+      'Instrument the original module to expose private bindings and nested closure instances without copying its source into the probe.',
     ),
   ...runtimeOptionsSchema,
   ...reportOptionsSchema,

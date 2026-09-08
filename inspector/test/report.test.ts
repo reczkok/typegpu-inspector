@@ -15,6 +15,21 @@ import type { RecordedGpuCall, TypeGpuInspectionReport } from '../src/types.ts';
 const SAMPLE_WGSL = '@compute @workgroup_size(1) fn main() { let value = 1u; }';
 
 describe('formatInspectionReport', () => {
+  it('preserves closure identity in every report format', () => {
+    const report = sampleReport();
+    const context = { modulePath: '/src/shader.ts', declaration: 120, instance: 1, sourceRevision: 'abc' };
+    Object.assign(report.targets[0]!, { parentLabel: 'factory.helper', context });
+    for (const options of [
+      { verbosity: 'summary' as const },
+      { verbosity: 'normal' as const },
+      { verbosity: 'full' as const },
+      { diagnosticsOnly: true },
+    ]) {
+      const formatted = formatInspectionReport(report, options) as { targets: Array<Record<string, unknown>> };
+      expect(formatted.targets[0]).toMatchObject({ parentLabel: 'factory.helper', context });
+    }
+  });
+
   it('returns a compact summary by default', () => {
     const report = sampleReport();
     report.ledger = [{

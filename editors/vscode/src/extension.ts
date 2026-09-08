@@ -113,6 +113,7 @@ const SETTING_KEYS = [
   'schemaPackingSuggestions',
   'inspectorPackage',
   'projectRoot',
+  'contextFile',
 ] as const;
 
 function serverModule(context: ExtensionContext): string {
