@@ -22,31 +22,16 @@ import {
 } from 'vscode';
 import type { LanguageClient } from 'vscode-languageclient/node';
 
+import { targetSelectionKey, findEditorTarget, targetContextLabel, targetStatusLabel, type TargetRef, type SourceRange as LspRange, type TargetsResponse, type WgslResponse, type ReportResponse } from '../../../server/src/editorProtocol';
+import { EditorSelection } from '../../../server/src/editorSelection';
+export type { TargetRef } from '../../../server/src/editorProtocol';
+
 export const WGSL_SCHEME = 'typegpu-wgsl';
 const LIVE_PATH = '/TypeGPU WGSL.wgsl';
 const REPORT_PATH = '/TypeGPU Report.md';
 const FOLLOW_DEBOUNCE_MS = 120;
 
-export type TargetRef = { uri: string; targetId: string };
-
-type LspRange = { start: { line: number; character: number }; end: { line: number; character: number } };
-
-type TargetsResponse = {
-  version: number;
-  stale: boolean;
-  symbols: Array<{ name: string; range: LspRange; targetIds: string[] }>;
-  targets: Array<{ id: string; label: string; status: string; wgslLines?: number }>;
-};
-
-type WgslResponse =
-  | { ok: true; label: string; wgsl: string; stale: boolean; messages: Array<{ type: string; message: string; range?: LspRange }> }
-  | { ok: false; label?: string; reason: string };
-
-type ReportResponse =
-  | { ok: true; label: string; markdown: string; stale: boolean }
-  | { ok: false; label?: string; reason: string };
-
-type ViewMeta = { ref: TargetRef; label: string; stale: boolean; ok: boolean; reason?: string };
+type ViewMeta = { ref: TargetRef; label: string; stale: boolean; ok: boolean; reason?: string; detail?: string };
 
 /**
  * Generated WGSL and inspection reports as read-only virtual documents. The
@@ -61,7 +46,10 @@ export class WgslPreview implements TextDocumentContentProvider, CodeLensProvide
   public readonly onDidChangeCodeLenses = this.lensesChanged.event;
   private readonly diagnostics = languages.createDiagnosticCollection('TypeGPU WGSL');
   private readonly views = new Map<string, ViewMeta>();
-  private readonly targetsCache = new Map<string, TargetsResponse>();
+  private readonly selection = new EditorSelection();
+  private sourceUri: string | undefined;
+  private revision = 0;
+  private followRevision = 0;
   private live: TargetRef | undefined;
   private followTimer: NodeJS.Timeout | undefined;
   private readonly disposables: Disposable[];
@@ -78,6 +66,8 @@ export class WgslPreview implements TextDocumentContentProvider, CodeLensProvide
         this.diagnostics.delete(document.uri);
       }),
       this.diagnostics,
+      this.contentChanged,
+      this.lensesChanged,
     ];
   }
 
@@ -95,6 +85,7 @@ export class WgslPreview implements TextDocumentContentProvider, CodeLensProvide
       preview: false,
     });
     if (source) await this.follow(source);
+    if (!this.live) await this.selectTarget();
   }
 
   /** Opens the cursor-following report in the built-in Markdown preview. */
@@ -106,7 +97,10 @@ export class WgslPreview implements TextDocumentContentProvider, CodeLensProvide
   }
 
   public async openPinned(ref: TargetRef): Promise<void> {
-    const label = await this.labelFor(ref);
+    const snapshot = await this.targetsFor(ref.uri);
+    const target = snapshot ? findEditorTarget(snapshot, ref) : undefined;
+    if (target) ref = { ...ref, targetId: target.id, targetKey: targetSelectionKey(target) };
+    const label = target?.label ?? ref.targetId;
     await window.showTextDocument(pinnedUri(ref, label), {
       viewColumn: ViewColumn.Beside,
       preserveFocus: true,
@@ -117,7 +111,10 @@ export class WgslPreview implements TextDocumentContentProvider, CodeLensProvide
   public async peek(ref: TargetRef): Promise<void> {
     const editor = window.activeTextEditor;
     if (!editor) return this.openPinned(ref);
-    const label = await this.labelFor(ref);
+    const snapshot = await this.targetsFor(ref.uri);
+    const target = snapshot ? findEditorTarget(snapshot, ref) : undefined;
+    if (target) ref = { ...ref, targetId: target.id, targetKey: targetSelectionKey(target) };
+    const label = target?.label ?? ref.targetId;
     await commands.executeCommand(
       'editor.action.peekLocations',
       editor.document.uri,
@@ -130,7 +127,8 @@ export class WgslPreview implements TextDocumentContentProvider, CodeLensProvide
   /** Jumps from a generated-WGSL document back to the TypeGPU symbol it came from. */
   public async revealSource(ref: TargetRef): Promise<void> {
     const targets = await this.targetsFor(ref.uri);
-    const symbol = targets?.symbols.find((entry) => entry.targetIds.includes(ref.targetId));
+    const target = targets ? findEditorTarget(targets, ref) : undefined;
+    const symbol = targets?.symbols.find((entry) => entry.targetIds.includes(target?.id ?? ref.targetId));
     const sourceUri = Uri.parse(ref.uri);
     const existing = window.visibleTextEditors.find(
       (editor) => editor.document.uri.toString() === sourceUri.toString(),
@@ -143,20 +141,24 @@ export class WgslPreview implements TextDocumentContentProvider, CodeLensProvide
 
   /** Called when an inspection of `sourceUri` finishes. */
   public refresh(sourceUri: string): void {
-    this.targetsCache.clear();
+    this.revision++;
+    this.followRevision++;
     for (const document of workspace.textDocuments) {
       if (document.uri.scheme !== WGSL_SCHEME) continue;
       const ref = this.refFor(document.uri);
-      if (ref?.uri === sourceUri) this.contentChanged.fire(document.uri);
+      if (ref?.uri === sourceUri || (!ref && this.sourceUri === sourceUri)) this.contentChanged.fire(document.uri);
     }
+    const source = window.visibleTextEditors.find(editor => editor.document.uri.toString() === sourceUri);
+    if (source) this.scheduleFollow(source);
   }
 
   public async provideTextDocumentContent(uri: Uri): Promise<string> {
+    const revision = this.revision;
     if (uri.path === REPORT_PATH) return this.provideReport();
     const ref = this.refFor(uri);
     if (!ref) {
       this.setView(uri, undefined);
-      return '// Move the cursor onto a TypeGPU symbol to show its generated WGSL here.\n';
+      return '// Select a TypeGPU specialization to inspect its generated WGSL.\n';
     }
     const client = this.client();
     if (!client) {
@@ -166,7 +168,9 @@ export class WgslPreview implements TextDocumentContentProvider, CodeLensProvide
     const response = await client.sendRequest<WgslResponse | null>('typegpu/wgsl', {
       textDocument: { uri: ref.uri },
       targetId: ref.targetId,
+      targetKey: ref.targetKey,
     });
+    if (revision !== this.revision || client !== this.client()) return this.provideTextDocumentContent(uri);
     if (!response) {
       this.setView(uri, undefined);
       return '// The source file is not open in this window.\n';
@@ -175,11 +179,16 @@ export class WgslPreview implements TextDocumentContentProvider, CodeLensProvide
       this.setView(uri, { ref, label: response.label ?? ref.targetId, stale: false, ok: false, reason: response.reason });
       return `// ${response.label ?? ref.targetId}: ${response.reason}\n`;
     }
-    this.setView(uri, { ref, label: response.label, stale: response.stale, ok: true }, response.messages);
+    this.setView(uri, {
+      ref, label: response.label, stale: response.stale, ok: true,
+      detail: [targetStatusLabel({ status: response.refreshing ? 'inspecting' : 'ok', outcome: response.outcome }),
+        response.inputSummary, targetContextLabel(response.context), `source v${response.sourceVersion}`].filter(Boolean).join(' · '),
+    }, response.messages);
     return response.wgsl;
   }
 
   private async provideReport(): Promise<string> {
+    const revision = this.revision;
     const ref = this.live;
     const client = this.client();
     if (!ref || !client) {
@@ -188,11 +197,15 @@ export class WgslPreview implements TextDocumentContentProvider, CodeLensProvide
     const response = await client.sendRequest<ReportResponse | null>('typegpu/report', {
       textDocument: { uri: ref.uri },
       targetId: ref.targetId,
+      targetKey: ref.targetKey,
     });
+    if (revision !== this.revision || client !== this.client()) return this.provideReport();
     if (!response) return '_The source file is not open in this window._\n';
     const targets = await this.targetsFor(ref.uri);
-    const symbol = targets?.symbols.find((entry) => entry.targetIds.includes(ref.targetId));
+    const target = targets ? findEditorTarget(targets, ref) : undefined;
+    const symbol = targets?.symbols.find((entry) => entry.targetIds.includes(target?.id ?? ref.targetId));
     const sourceUri = Uri.parse(ref.uri);
+    if (revision !== this.revision || client !== this.client()) return this.provideReport();
     const line = (symbol?.range.start.line ?? 0) + 1;
     const origin = `[${path.basename(sourceUri.fsPath)}:${line}](${sourceUri.toString()}#L${line})`;
     if (!response.ok) {
@@ -204,14 +217,15 @@ export class WgslPreview implements TextDocumentContentProvider, CodeLensProvide
 
   public provideCodeLenses(document: TextDocument): CodeLens[] {
     const meta = this.views.get(document.uri.toString());
-    if (!meta) return [];
+    if (!meta) return [new CodeLens(new Range(0, 0, 0, 0), { title: 'Select specialization', command: 'typegpuInspector.selectTarget' })];
     const isLive = document.uri.path === LIVE_PATH;
     const sourceFile = path.basename(Uri.parse(meta.ref.uri).fsPath);
     const title = [
       `$(symbol-method) ${meta.label}`,
       sourceFile,
+      meta.detail,
       ...(meta.stale ? ['from previous save'] : []),
-    ].join(' · ');
+    ].filter(Boolean).join(' · ');
     const head = new Range(0, 0, 0, 0);
     const lenses = [
       new CodeLens(head, {
@@ -222,6 +236,7 @@ export class WgslPreview implements TextDocumentContentProvider, CodeLensProvide
       }),
     ];
     if (isLive) {
+      lenses.push(new CodeLens(head, { title: 'Select specialization', command: 'typegpuInspector.selectTarget' }));
       lenses.push(new CodeLens(head, {
         title: '$(pin) Pin',
         tooltip: 'Keep this target open in its own tab while the live view moves on',
@@ -261,11 +276,13 @@ export class WgslPreview implements TextDocumentContentProvider, CodeLensProvide
     const query = new URLSearchParams(uri.query);
     const source = query.get('uri');
     const targetId = query.get('target');
-    return source && targetId ? { uri: source, targetId } : undefined;
+    const targetKey = query.get('key');
+    return source && targetId ? { uri: source, targetId, ...(targetKey ? { targetKey } : {}) } : undefined;
   }
 
   private scheduleFollow(editor: TextEditor): void {
     if (editor.document.uri.scheme !== 'file' || !this.isLiveVisible()) return;
+    this.followRevision++;
     if (this.followTimer) clearTimeout(this.followTimer);
     this.followTimer = setTimeout(() => {
       this.followTimer = undefined;
@@ -288,45 +305,69 @@ export class WgslPreview implements TextDocumentContentProvider, CodeLensProvide
     return liveEditor || reportOpen;
   }
 
-  private async follow(editor: TextEditor): Promise<void> {
-    if (editor.document.uri.scheme !== 'file') return;
-    const targets = await this.targetsFor(editor.document.uri.toString());
-    if (!targets) return;
-    const cursor = editor.selection.active;
-    const symbol = targets.symbols.find((entry) => toRange(entry.range).contains(cursor));
-    if (!symbol) return;
-    const byId = new Map(targets.targets.map((target) => [target.id, target]));
-    // Prefer a target that has (or will have) WGSL over a plain resource.
-    const targetId = symbol.targetIds.find((id) => (byId.get(id)?.wgslLines ?? 0) > 0) ??
-      symbol.targetIds[0];
-    if (!targetId) return;
-    const ref = { uri: editor.document.uri.toString(), targetId };
-    if (this.live?.uri === ref.uri && this.live.targetId === ref.targetId) return;
+  public async selectTarget(): Promise<void> {
+    const active = window.activeTextEditor;
+    const uri = active?.document.uri.scheme === 'file' ? active.document.uri.toString() : this.sourceUri;
+    if (!uri) return;
+    const snapshot = await this.targetsFor(uri);
+    if (!snapshot?.targets.length) {
+      void window.showInformationMessage('No TypeGPU targets yet. Save the source file to inspect it.');
+      return;
+    }
+    const picked = await window.showQuickPick(snapshot.targets.filter(target => target.kind !== 'resource').map(target => ({
+      label: target.label,
+      description: `${targetStatusLabel(target)}${snapshot.stale ? ' · previous save' : ''}`,
+      detail: [target.inputSummary, targetContextLabel(target.context), target.requirementSummary].filter(Boolean).join(' · ') || target.diagnostics?.find(diagnostic => diagnostic.severity !== 'note')?.message,
+      targetId: target.id,
+      targetKey: targetSelectionKey(target),
+    })), { title: 'TypeGPU: Select specialization', matchOnDescription: true, matchOnDetail: true });
+    if (!picked) return;
+    const current = await this.targetsFor(uri);
+    const selected = current ? findEditorTarget(current, picked) : undefined;
+    if (!current || !selected) {
+      void window.showInformationMessage('That specialization changed during inspection. Select it again.');
+      return;
+    }
+    this.followRevision++;
+    this.selection.select(uri, current, selected.id);
+    this.sourceUri = uri;
+    this.setLive({ uri, targetId: selected.id, targetKey: targetSelectionKey(selected) });
+    await window.showTextDocument(liveUri(), { viewColumn: ViewColumn.Beside, preserveFocus: true, preview: false });
+  }
+
+  private setLive(ref: TargetRef | undefined): void {
+    if (this.live?.uri === ref?.uri && this.live?.targetId === ref?.targetId && this.live?.targetKey === ref?.targetKey) return;
     this.live = ref;
+    this.revision++;
     this.contentChanged.fire(liveUri());
     this.contentChanged.fire(reportUri());
   }
 
-  private async targetsFor(uri: string): Promise<TargetsResponse | undefined> {
-    const client = this.client();
-    if (!client) return undefined;
-    const document = workspace.textDocuments.find((entry) => entry.uri.toString() === uri);
-    const key = `${uri}@${document?.version ?? -1}`;
-    const cached = this.targetsCache.get(key);
-    if (cached) return cached;
-    const response = await client.sendRequest<TargetsResponse | null>('typegpu/targets', {
-      textDocument: { uri },
-    });
-    if (!response) return undefined;
-    this.targetsCache.clear();
-    this.targetsCache.set(key, response);
-    return response;
+  private async follow(editor: TextEditor): Promise<void> {
+    if (editor.document.uri.scheme !== 'file') return;
+    const revision = ++this.followRevision;
+    const version = editor.document.version;
+    const cursor = editor.selection.active;
+    const uri = editor.document.uri.toString();
+    const targets = await this.targetsFor(uri);
+    if (revision !== this.followRevision || version !== editor.document.version || !targets) return;
+    this.sourceUri = uri;
+    // Pick the innermost declaration when source ranges overlap.
+    const symbol = targets.symbols.filter(entry => toRange(entry.range).contains(cursor)).sort((a, b) =>
+      (a.range.end.line - a.range.start.line) - (b.range.end.line - b.range.start.line) ||
+      (a.range.end.character - a.range.start.character) - (b.range.end.character - b.range.start.character)
+    )[0];
+    if (!symbol) return;
+    this.setLive(this.selection.resolve(uri, targets, symbol));
   }
 
-  private async labelFor(ref: TargetRef): Promise<string> {
-    const targets = await this.targetsFor(ref.uri);
-    return targets?.targets.find((target) => target.id === ref.targetId)?.label ?? ref.targetId;
+  private async targetsFor(uri: string): Promise<TargetsResponse | undefined> {
+    return (await this.client()?.sendRequest<TargetsResponse | null>('typegpu/targets', {
+      textDocument: { uri },
+    })) ?? undefined;
   }
+
+
 }
 
 function liveUri(): Uri {
@@ -342,7 +383,7 @@ function pinnedUri(ref: TargetRef, label: string): Uri {
   return Uri.from({
     scheme: WGSL_SCHEME,
     path: `/${fileName}`,
-    query: new URLSearchParams({ uri: ref.uri, target: ref.targetId }).toString(),
+    query: new URLSearchParams({ uri: ref.uri, target: ref.targetId, ...(ref.targetKey ? { key: ref.targetKey } : {}) }).toString(),
   });
 }
 
@@ -367,5 +408,6 @@ function compilerSeverity(type: string): DiagnosticSeverity {
 export function isTargetRef(value: unknown): value is TargetRef {
   return typeof value === 'object' && value !== null &&
     typeof (value as TargetRef).uri === 'string' &&
-    typeof (value as TargetRef).targetId === 'string';
+    typeof (value as TargetRef).targetId === 'string' &&
+    ((value as TargetRef).targetKey === undefined || typeof (value as TargetRef).targetKey === 'string');
 }

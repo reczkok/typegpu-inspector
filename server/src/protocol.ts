@@ -146,13 +146,14 @@ export type InspectorLedgerEntry = {
   discoveredBy?: 'shape' | 'failure';
   provider?: string;
   provenance?: string;
+  valueSummary?: unknown;
   detail?: Record<string, unknown>;
 };
 
 export type InspectorTargetReport = {
   parentLabel?: string;
   contextSuggestions?: import('./contextSuggestions.js').ContextSuggestions;
-  context?: { resultPath?: string[]; pipelineStages?: string[]; probe?: import('./discovery.js').ProbeContext; usage?: number; bindingSource?: string; association?: 'direct' | 'candidate'; modulePath?: string; declaration?: number; instance?: number; sourceRevision?: string; label?: string; arguments?: unknown[]; with?: unknown[] };
+  context?: { captured?: Record<string, string | number | boolean | null>; resultPath?: string[]; pipelineStages?: string[]; probe?: import('./discovery.js').ProbeContext; usage?: number; bindingSource?: string; association?: 'direct' | 'candidate'; modulePath?: string; declaration?: number; instance?: number; sourceRevision?: string; label?: string; arguments?: unknown[]; with?: unknown[] };
   label: string;
   kind: string;
   ok: boolean;

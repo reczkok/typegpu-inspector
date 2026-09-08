@@ -3,7 +3,7 @@
 // Usage: node scripts/release-smoke.mjs <server.cjs> <isolated-project> <output-dir>
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -60,6 +60,25 @@ async function cli(name, args, expectedExit = 0) {
   return parsed;
 }
 
+const compositionPath = join(fixtures, 'composition.ts');
+await writeFile(compositionPath, `import { d, tgpu } from 'typegpu';
+const make = (offset: number) => (value: d.v2f) => { 'use gpu'; return value.x + offset; };
+const returned = make(7);
+const isPinned = (index: number) => { 'use gpu'; return index % 8 === 0; };
+const compute = tgpu.computeFn({ workgroupSize: [1], in: { gid: d.builtin.globalInvocationId } })(({ gid }) => {
+  'use gpu'; const i = gid.x; isPinned(i);
+});
+`);
+const returned = await cli('returned-helper', ['wgsl', compositionPath, '-t', 'make → returned']);
+assert.equal(returned.length, 1);
+assert.match(returned[0].wgsl, /value: vec2f/);
+assert.match(returned[0].wgsl, /7f/);
+const caller = await cli('numeric-caller', ['wgsl', compositionPath, '-t', 'isPinned']);
+assert.match(caller[0].wgsl, /index: u32/);
+assert.equal(caller[0].context.probe.origin, 'call-site');
+const pipeline = await cli('numeric-pipeline', ['wgsl', compositionPath, '-t', 'compute']);
+assert.equal(/fn isPinned\([^}]+}/.exec(caller[0].wgsl)?.[0], /fn isPinned\([^}]+}/.exec(pipeline[0].wgsl)?.[0]);
+
 const listed = await cli('targets', ['targets', shaderPath]);
 assert(listed.targets.some(t => t.label === 'privateHelper'));
 assert(listed.targets.some(t => t.label === 'makeBlur.helper'));
@@ -82,7 +101,7 @@ await cli('recovery', ['check', shaderPath, '-t', 'privateHelper']);
 console.log('Packaged CLI: private/nested WGSL, explicit context, compiler error, recovery passed');
 
 const child = spawn(process.execPath, [entry, '--stdio'], { cwd: project, env, stdio: ['pipe', 'pipe', 'pipe'] });
-const requests = new Map(), diagnostics = new Map();
+const requests = new Map(), diagnostics = new Map(), shownDocuments = [];
 let buffer = Buffer.alloc(0), nextId = 1, stderr = '', closing = false;
 child.stderr.on('data', chunk => { stderr += chunk; });
 function send(message) {
@@ -119,7 +138,8 @@ child.stdout.on('data', chunk => {
     buffer = buffer.subarray(end + 4 + length);
     if (message.method) {
       if (message.method === 'textDocument/publishDiagnostics') diagnostics.set(message.params.uri, message.params.diagnostics);
-      if (message.id !== undefined) send({ id: message.id, result: null });
+      if (message.method === 'window/showDocument') shownDocuments.push(message.params);
+      if (message.id !== undefined) send({ id: message.id, result: message.method === 'window/showDocument' ? { success: true } : null });
     } else {
       const pending = requests.get(message.id);
       if (!pending) continue;
@@ -132,20 +152,22 @@ child.stdout.on('data', chunk => {
 
 const uri = pathToFileURL(shaderPath).href;
 const doc = { uri };
-async function settled(documentUri, version) {
+async function settled(documentUri, version, selectedLabel) {
   const deadline = Date.now() + 45_000;
   while (Date.now() < deadline) {
     const state = await request('typegpu/targets', { textDocument: { uri: documentUri } });
-    if (state?.version === version && !state.stale && state.targets.length && state.targets.every(t => ['ok', 'failed'].includes(t.status))) return state;
+    const targets = selectedLabel ? state?.targets.filter(target => target.label === selectedLabel) : state?.targets;
+    if (state?.version === version && !state.stale && targets?.length && targets.every(t => ['ok', 'failed'].includes(t.status))) return state;
     await delay(100);
   }
   throw new Error(`Inspection did not finish: ${documentUri}\n${stderr}`);
 }
-async function saved(source, version) {
+async function saved(source, version, trigger, selectedLabel) {
   await writeFile(shaderPath, source);
   notify('textDocument/didChange', { textDocument: { uri, version }, contentChanges: [{ text: source }] });
   notify('textDocument/didSave', { textDocument: doc });
-  return settled(uri, version);
+  if (trigger) await trigger();
+  return settled(uri, version, selectedLabel);
 }
 async function wgsl(state, label) {
   const target = state.targets.find(t => t.label === label);
@@ -171,24 +193,86 @@ try {
   const secondClosure = await wgsl(initial, 'makeBlur.helper [instance 1]');
   assert.equal(firstClosure.result.wgsl, nested[0].wgsl);
   assert.equal(secondClosure.result.wgsl, nested[1].wgsl);
+  assert.equal(firstClosure.target.inputSummary, 'Captured: radius = 3');
+  assert.equal(secondClosure.target.inputSummary, 'Captured: radius = 7');
+  assert.equal(secondClosure.result.inputSummary, 'Captured: radius = 7');
   evidence.lsp.initial = initial;
 
+  // Shader browsing stays in the editor protocol; clean declarations get no menu clutter.
+  const symbol = initial.symbols.find(s => s.name === 'makeBlur.helper');
+  const actions = await request('textDocument/codeAction', { textDocument: doc, range: symbol.range, context: { diagnostics: [] } });
+  assert.deepEqual(actions, []);
+  const selected = secondClosure.target;
+  const context = selected.context;
+  const selectedRef = {
+    targetId: selected.id, label: selected.label,
+    targetKey: JSON.stringify([selected.label, context?.instance, context?.usage, context?.resultPath, context?.label]),
+  };
+  const links = await request('textDocument/documentLink', { textDocument: doc });
+  const generatedUri = links.find(link => link.tooltip === `Open generated WGSL for ${selected.label}`).target;
+  assert.match(await readFile(new URL(generatedUri), 'utf8'), /return 7/);
+  const hover = await request('textDocument/hover', { textDocument: doc, position: symbol.range.start });
+  assert(!hover.contents.value.includes('All shaders'));
+  assert(hover.contents.value.includes('Instance 0') && hover.contents.value.includes('Instance 1'));
+  assert.equal((hover.contents.value.match(/```wgsl/g) ?? []).length, 2);
+  assert(hover.contents.value.includes('return 3') && hover.contents.value.includes('return 7'));
+  assert(hover.contents.value.includes('Captured: radius = 3') && hover.contents.value.includes('Captured: radius = 7'));
+  assert(hover.contents.value.includes(`[Open WGSL](<${generatedUri}>)`));
+
+  const shifted = '// offset changed above nested declaration\n' + good;
+  notify('textDocument/didChange', { textDocument: { uri, version: 2 }, contentChanges: [{ text: shifted }] });
+  const stale = await request('typegpu/wgsl', { textDocument: doc, ...selectedRef });
+  assert(stale.ok && stale.stale && stale.sourceVersion === 1);
+  assert.match(stale.wgsl, /return 7/);
+  notify('workspace/didChangeConfiguration', { settings: { inspectOn: 'hover' } });
+  const moved = await saved(shifted, 3, () => request('typegpu/wgsl', { textDocument: doc, ...selectedRef }), selectedRef.label);
+  notify('workspace/didChangeConfiguration', { settings: { inspectOn: 'save' } });
+  const movedShader = await request('typegpu/wgsl', { textDocument: doc, ...selectedRef });
+  assert(movedShader.ok && !movedShader.stale && movedShader.sourceVersion === 3);
+  assert.match(movedShader.wgsl, /return 7/);
+  const movedLinks = await request('textDocument/documentLink', { textDocument: doc });
+  assert.equal(movedLinks.find(link => link.tooltip === `Open generated WGSL for ${selected.label}`).target, generatedUri);
+
+
+  const nestedError = shifted.replace(
+    "tgpu.fn([], d.f32)(() => { 'use gpu'; return d.f32(radius); })",
+    'tgpu.fn([], d.f32)`() -> f32 { return definitely_missing_symbol; }`',
+  );
+  await saved(nestedError, 4);
+  const selectedError = await request('typegpu/wgsl', { textDocument: doc, ...selectedRef });
+  assert(selectedError.ok && selectedError.outcome === 'failed');
+  assert(selectedError.messages.some(message => message.type === 'error' && message.range));
+  assert((diagnostics.get(generatedUri) ?? []).some(diagnostic => diagnostic.severity === 1));
+  const errorActions = await request('textDocument/codeAction', {
+    textDocument: doc, range: symbol.range, context: { diagnostics: diagnostics.get(uri) ?? [] },
+  });
+  assert(errorActions.length && errorActions.every(action => action.command.command === 'typegpuInspector.openGeneratedWgsl'));
+  await request('workspace/executeCommand', errorActions[0].command);
+  assert(shownDocuments.at(-1).selection, 'Compiler action navigates to the generated error range');
+
+  await saved(shifted, 5);
+  assert.equal((diagnostics.get(generatedUri) ?? []).length, 0);
+  assert.match(await readFile(new URL(generatedUri), 'utf8'), /return 7/);
+
+  assert.match((await request('typegpu/wgsl', { textDocument: doc, ...selectedRef })).wgsl, /return 7/);
+  evidence.lsp.specializationWorkflow = { selectedRef, generatedUri, stale, moved, selectedError };
+
   notify('workspace/didChangeConfiguration', { settings: { contextFile: contextPath } });
-  const configured = await saved(good + '\n', 2);
+  const configured = await saved(good + '\n', 6);
   const contextShader = await wgsl(configured, 'makeBlur.helper');
   assert.equal(contextShader.result.wgsl, specialized[0].wgsl);
   const report = await request('typegpu/report', { textDocument: doc, targetId: contextShader.target.id });
   assert(report.ok && report.markdown.includes('radius 11') && report.markdown.includes('closure instance 2'));
   evidence.lsp.context = { targets: configured, wgsl: contextShader.result, report };
 
-  const failed = await saved(invalid, 3);
+  const failed = await saved(invalid, 7);
   const errorShader = await wgsl(failed, 'privateHelper');
   assert.equal(errorShader.target.status, 'failed');
   assert(errorShader.result.messages.some(m => m.type === 'error' && m.message.includes('definitely_missing_symbol') && m.range));
   assert((diagnostics.get(uri) ?? []).some(d => d.severity === 1 && d.message.includes('definitely_missing_symbol')));
   evidence.lsp.compilerError = { wgsl: errorShader.result, diagnostics: diagnostics.get(uri) };
 
-  const recovered = await saved(good, 4);
+  const recovered = await saved(good, 8);
   assert(recovered.targets.every(t => t.status === 'ok'));
   assert.equal((await wgsl(recovered, 'privateHelper')).result.wgsl, plain[0].wgsl);
   assert(!(diagnostics.get(uri) ?? []).some(d => d.severity === 1));
@@ -201,7 +285,7 @@ try {
   assert.equal(broken.targets[0].status, 'failed');
   const failure = await request('typegpu/report', { textDocument: { uri: brokenUri }, targetId: broken.targets[0].id });
   assert(JSON.stringify(failure).includes('release-broken'), JSON.stringify(failure));
-  const afterDependencyFailure = await saved(good + '\n', 5);
+  const afterDependencyFailure = await saved(good + '\n', 9);
   assert(afterDependencyFailure.targets.every(t => t.status === 'ok'));
   assert.equal((await wgsl(afterDependencyFailure, 'privateHelper')).result.wgsl, plain[0].wgsl);
   evidence.lsp.dependencyRecovery = { failure, recovered: afterDependencyFailure };

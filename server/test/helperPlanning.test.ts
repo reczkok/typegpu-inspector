@@ -106,3 +106,74 @@ it.each(['js', 'jsx', 'mjs', 'cjs'])('binds JavaScript %s modules without crashi
   });
   expect(() => discoverTypeGpuModule(`/project/eslint.config.${extension}`, `import plugin from 'typegpu'; export default [plugin];`)).not.toThrow();
 });
+
+describe('caller-derived numeric schemas', () => {
+  const inputs = (source: string) => {
+    const result = discover(`import { d, tgpu } from 'typegpu';\n${source}`);
+    return result.targets.filter(target => target.symbolNames.includes('helper')).map(target => target.selector);
+  };
+  const parameters = (targets: ReturnType<typeof inputs>) => targets.map(target => 'probeArgumentPlan' in target ? target.probeArgumentPlan : undefined);
+
+  it('keeps complete typed constructor tuples and deduplicates repeated calls', () => {
+    const targets = inputs(`
+      const helper = (a: number, b: number) => { 'use gpu'; return a + b; };
+      const caller = () => { 'use gpu'; helper(d.u32(1), d.i32(2)); helper(d.i32(3), d.u32(4)); helper(d.u32(5), d.i32(6)); };
+    `);
+    expect(parameters(targets)).toEqual([
+      [{ schema: 'ctx.d.u32' }, { schema: 'ctx.d.i32' }],
+      [{ schema: 'ctx.d.i32' }, { schema: 'ctx.d.u32' }],
+    ]);
+    expect(targets.every(target => 'probeContext' in target && target.probeContext?.origin === 'call-site')).toBe(true);
+  });
+
+  it.each([
+    `({ gid }) => { 'use gpu'; const i = gid.x; const alias = i; helper(alias); }`,
+    `input => { 'use gpu'; helper(input.gid.y); }`,
+    `({ gid: invocation }) => { 'use gpu'; helper(invocation.z); }`,
+  ])('follows builtin input and local const aliases: %s', callback => {
+    const targets = inputs(`
+      function helper(index: number) { 'use gpu'; return index % 8; }
+      const entry = tgpu.computeFn({ workgroupSize: [1], in: { gid: d.builtin.globalInvocationId } })(${callback});
+    `);
+    expect(parameters(targets)).toEqual([[{ schema: 'ctx.d.u32' }]]);
+    expect(targets[0]).toMatchObject({ probeContext: { origin: 'call-site' } });
+  });
+
+  it('recognizes imported namespace aliases and scalar vertex inputs', () => {
+    const result = discover(`import gpu, { d as data } from 'typegpu';
+      const helper = (index: number) => { 'use gpu'; return index; };
+      const vertex = gpu.vertexFn({ in: { index: data.builtin.vertexIndex } })(({ index }) => { 'use gpu'; return helper(index); });`);
+    expect(result.symbols.find(symbol => symbol.name === 'helper')?.probeArgumentPlan).toEqual([{ schema: 'ctx.d.u32' }]);
+  });
+
+  it.each([
+    `const cpu = d.u32(4); const caller = () => { 'use gpu'; helper(cpu); };`,
+    `const caller = () => { 'use gpu'; let value = d.u32(4); helper(value); };`,
+    `const caller = () => { 'use gpu'; const d = { u32: (x: number) => x }; helper(d.u32(4)); };`,
+    `const caller = (helper: (x: number) => number) => { 'use gpu'; helper(d.u32(4)); };`,
+    `function cpu() { return helper(d.u32(4)); }`,
+    `const caller = () => { 'use gpu'; return (() => helper(d.u32(4)))(); };`,
+    `const entry = tgpu.computeFn({ in: { gid: d.builtin.globalInvocationId }, ...unknown })(({ gid }) => { 'use gpu'; helper(gid.x); });`,
+  ])('keeps the schema fallback without definite shader evidence: %s', caller => {
+    const targets = inputs(`const helper = (x: number) => { 'use gpu'; return x; }; ${caller}`);
+    expect(parameters(targets)).toEqual([[{ schema: 'ctx.d.f32' }]]);
+    expect(targets[0]).toMatchObject({ probeContext: { origin: 'schema' } });
+  });
+
+  it('retains a labelled schema probe when other callers are unresolved', () => {
+    const targets = inputs(`
+      const helper = (x: number) => { 'use gpu'; return x; };
+      const caller = (unknown: number) => { 'use gpu'; helper(d.u32(1)); helper(unknown + 1); };
+    `);
+    expect(parameters(targets)).toEqual([[{ schema: 'ctx.d.u32' }], [{ schema: 'ctx.d.f32' }]]);
+    expect(targets[1]).toMatchObject({ label: 'helper(f32 · schema probe)', probeContext: { origin: 'schema' } });
+  });
+
+  it('caps caller combinations using the existing specialization limit', () => {
+    const calls = ['u32', 'i32', 'f32'].flatMap(a => ['u32', 'i32', 'f32'].map(b => `helper(d.${a}(1), d.${b}(1));`)).join('\n');
+    const result = discover(`import {d} from 'typegpu';
+      const helper = (a: number, b: number) => { 'use gpu'; return a + b; };
+      const caller = () => { 'use gpu'; ${calls} };`);
+    expect(result.symbols.find(symbol => symbol.name === 'helper')?.specializationSynthesis).toEqual({ emitted: 8, limit: 8, truncated: true });
+  });
+});

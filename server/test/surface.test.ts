@@ -8,14 +8,12 @@ import { toCliDiagnostics } from '../src/cliOutput.js';
 import {
   appendHover,
   createCodeActions,
-  createDetailLevelActions,
   createDiagnostics,
   createFindingHover,
   defaultSurfaceOptions,
   createDocumentLinks,
   createHover,
   createInlayHints,
-  createInlayDetailLevelActions,
   defaultMaxColumnsForClient,
   failedTargetInspection,
   materializeInspection,
@@ -1201,31 +1199,6 @@ fn main() {
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0]?.range.start.line).toBe(5);
     expect(diagnostics[0]?.range.end.line).toBe(5);
-  });
-
-  it('offers verbosity switch actions for the other levels only', () => {
-    const actions = createDetailLevelActions('standard');
-    expect(actions.map((action) => action.command?.arguments?.[0])).toEqual([
-      'wgsl',
-      'compact',
-      'deep',
-    ]);
-    for (const action of actions) {
-      expect(action.command?.command).toBe('typegpuInspector.setHoverDetailLevel');
-      expect(action.kind).toBe('source.typegpuInspector');
-      expect(action.title).toContain('TypeGPU hover detail');
-    }
-  });
-
-  it('offers an independent inlay-density switcher', () => {
-    const actions = createInlayDetailLevelActions('compact');
-    expect(actions.map((action) => action.command?.arguments?.[0])).toEqual([
-      'summary',
-      'detailed',
-    ]);
-    expect(actions.every((action) =>
-      action.command?.command === 'typegpuInspector.setInlayDetailLevel'
-    )).toBe(true);
   });
 
   it('presents exact runtime render pipeline state', async () => {

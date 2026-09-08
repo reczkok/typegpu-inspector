@@ -43,6 +43,54 @@ browser('original symbol compilation', () => {
     expect(other.targets[0]?.compilationMessages?.some(message => message.type === 'error')).toBe(true);
   }, 60_000);
 
+  it('probes factory-returned closures with inferred arguments and preserves their real pipeline bodies', async () => {
+    const path = 'test/fixtures/returned-helper.ts';
+    const discovered = discoverTypeGpuModule(resolve(cwd, path), readFileSync(resolve(cwd, path), 'utf8'));
+    const targets = discovered.targets.map(target => target.selector);
+    const report = await inspectTypegpuSymbols({ ...options, modulePath: path, targets });
+    expect(report.ok, JSON.stringify(report.targets)).toBe(true);
+    const at = (label: string) => report.targets.find(target => target.label === label)!;
+    const wide = at('make → wide');
+    const narrow = at('make → narrow');
+    expect(wide.wgsl).toContain('+ 17f');
+    expect(narrow.wgsl).toContain('+ 3f');
+    expect(at('make → alias').wgsl).toBe(wide.wgsl);
+    expect(at('calls').wgsl).toContain('return 2u');
+    expect(wide.context?.probe?.origin).toBe('call-site');
+    const bodies = (code: string) => [...code.matchAll(/fn \w+(\(uv: vec2f, scale: f32\) -> f32 \{[^}]*\})/g)].map(match => match[1]);
+    const pipelineBodies = bodies(at('compute').wgsl!);
+    expect(pipelineBodies).toHaveLength(2);
+    expect(pipelineBodies).toContain(bodies(wide.wgsl!)[0]);
+    expect(pipelineBodies).toContain(bodies(narrow.wgsl!)[0]);
+    const selected = discovered.targets.find(target => target.id === 'factory-result:wide')!.selector;
+    const explicit = await inspectTypegpuSymbols({ ...options, modulePath: path,
+      targets: [{ ...selected, context: { arguments: [{ schema: 'ctx.d.vec2i' }, { schema: 'ctx.d.f32' }] } }],
+    });
+    expect(explicit.ok, JSON.stringify(explicit.targets)).toBe(true);
+    expect(explicit.targets[0]?.wgsl).toContain('uv: vec2i');
+  }, 60_000);
+
+  it('matches caller numeric specializations and exposes failures hidden by a different schema probe', async () => {
+    const path = 'test/fixtures/caller-schemas.ts';
+    const discovered = discoverTypeGpuModule(resolve(cwd, path), readFileSync(resolve(cwd, path), 'utf8'));
+    const report = await inspectTypegpuSymbols({ ...options, modulePath: path, targets: discovered.targets.map(target => target.selector) });
+    const at = (label: string) => report.targets.find(target => target.label === label)!;
+    expect(at('isPinned').outcome).toBe('passed-with-assumptions');
+    expect(at('isPinned').context?.probe?.origin).toBe('call-site');
+    const body = (code: string) => /fn isPinned\([^}]+}/.exec(code)?.[0];
+    expect(body(at('isPinned').wgsl!)).toContain('index: u32');
+    expect(body(at('isPinned').wgsl!)).toBe(body(at('compute').wgsl!));
+    expect(at('identity(u32)').wgsl).toContain('value: u32');
+    expect(at('identity(f32)').wgsl).toContain('value: f32');
+    expect(at('invalidForFloat').ok, JSON.stringify(at('invalidForFloat'))).toBe(false);
+    expect(at('invalidForFloat').compilationMessages?.some(message => message.type === 'error')).toBe(true);
+    expect(at('invalidCompute').ok).toBe(false);
+    const explicit = await inspectTypegpuSymbols({ ...options, modulePath: path, targets: [
+      { selector: 'invalidForFloat', kind: 'resolvable', context: { arguments: [{ schema: 'ctx.d.i32' }] } },
+    ] });
+    expect(explicit.ok, JSON.stringify(explicit.targets)).toBe(true);
+  }, 60_000);
+
   it('compiles discovered plans for private composition, generic variants, accessors, and captured schemas', async () => {
     const path = 'test/fixtures/helper-planning.ts';
     const source = readFileSync(resolve(cwd, path), 'utf8');
@@ -118,6 +166,7 @@ browser('original symbol compilation', () => {
     expect(report.ok, JSON.stringify(report.targets)).toBe(true);
     expect(report.targets).toHaveLength(2);
     expect(report.targets.map(t => t.context?.instance)).toEqual([0, 1]);
+    expect(report.targets.map(t => t.context?.captured)).toEqual([{ radius: 3 }, { radius: 7 }]);
     expect(report.targets[0]?.wgsl).toMatch(/3(?:\.0)?/);
     expect(report.targets[1]?.wgsl).toMatch(/7(?:\.0)?/);
     expect(report.targets[0]?.wgsl).not.toBe(report.targets[1]?.wgsl);
@@ -168,6 +217,7 @@ browser('original symbol compilation', () => {
     expect(report.targets[0]?.outcome).toBe('passed');
     expect(report.targets[0]?.diagnostics?.some(d => d.code === 'inspection-defaults-applied')).toBe(false);
     expect(report.targets[1]?.outcome).toBe('passed-with-assumptions');
+    expect(report.targets[1]?.ledger?.find(entry => entry.kind === 'argument-values')?.detail?.arguments).toEqual([{ schema: 'ctx.d.f32' }]);
   }, 60_000);
 
   it('keeps private helpers accessible when the module exports inspect or uses generated names', async () => {

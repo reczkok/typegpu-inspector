@@ -32,6 +32,17 @@ the warm session and finish in seconds. Node.js 20 or newer is required.
 
 ## Generated WGSL beside the editor
 
+Use **TypeGPU Inspector: Select Specialization** to choose a shader helper,
+closure instance, or observed binding context. The picker shows inspection
+outcomes and context labels. Cursor following remembers your choice for each
+declaration; multiple specializations require an explicit choice. Pins and
+selections survive edits above a declaration. If a specialization disappears,
+select another one explicitly.
+
+During refresh the previous WGSL stays visible, with its source version and
+previous-save status. Compiler errors remain attached to the generated code
+and clear after a successful inspection.
+
 The editor title of a TypeGPU file has an "Open Generated WGSL to the Side"
 button. The document it opens follows the cursor: move onto another pipeline
 or shader function and it shows that target's WGSL, with the compiler's

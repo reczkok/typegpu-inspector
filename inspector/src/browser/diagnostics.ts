@@ -314,7 +314,7 @@ export function createSlotBindingRequiredDiagnostic(options: {
       autoBindAttempted ? ' and the inspector could not auto-bind it' : ''
     }.`,
     hint: options.bindingReason
-      ? `${options.bindingReason} Bind a storage buffer usage with root.with(accessor, buffer.as('readonly')) or return a pipeline with that binding from an inspection caller.`
+      ? `${options.bindingReason} Bind a storage buffer with the accessor’s required access mode through an explicit inspection context.`
       : (autoBindAttempted
       ? `No matching accessor or borrowable binding was found among module exports, setup values, and sibling targets.${applied} Bind the slot through a symbol target \`with\` entry, \`probeBindings\`, or a \`root.with(slot, value)\` wrapper — exporting an accessor for this slot, or a pipeline/bound function that provides it, enables auto-binding.`
       : `Bind the slot through a symbol target \`with\` entry, or build a wrapper with \`root.with(slot, value)\` in setupBody/inlineCode.${applied}`),

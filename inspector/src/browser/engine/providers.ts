@@ -1,5 +1,6 @@
 import {
   isAccessorLike,
+  isMutableAccessorLike,
   readAccessorSchema,
   readAccessorSlot,
 } from '../typegpuIntrospection.ts';
@@ -66,25 +67,28 @@ export function collectBindingSources(
   return collected;
 }
 
-/**
- * Placeholder-value synthesis from a matching accessor's schema. Mutable
- * accessors are excluded: their binding must be a mutable buffer usage, which
- * a plain CPU value cannot stand in for — they can only be satisfied by
- * borrowing.
- */
+/** Schema-derived probe bindings. Mutable accessors require storage, not CPU literals. */
 const accessorPlaceholderProvider: Provider = {
   id: 'synthesis',
   canSatisfy: (requirement) => requirement.kind === 'slot-value',
   satisfy: (requirement, ctx) => {
     for (const source of ctx.sources) {
       if (
-        !isAccessorLike(source.value) ||
+        (!isAccessorLike(source.value) && !isMutableAccessorLike(source.value)) ||
         readAccessorSlot(source.value) !== requirement.subject
       ) {
         continue;
       }
       try {
         const slotName = String(requirement.detail?.slotName ?? 'unknown slot');
+        if (isMutableAccessorLike(source.value)) {
+          if (!ctx.createMutableBinding) return undefined;
+          return {
+            value: ctx.createMutableBinding(readAccessorSchema(source.value)),
+            provider: 'synthesis',
+            provenance: 'synthetic mutable storage binding derived from its accessor schema; runtime contents are not validated',
+          };
+        }
         return {
           value: createPlaceholderValue(
             readAccessorSchema(source.value),
@@ -95,7 +99,7 @@ const accessorPlaceholderProvider: Provider = {
             'non-degenerate placeholder value recursively derived from its accessor schema',
         };
       } catch (error) {
-        if (error instanceof StorageBindingRequiredError) {
+        if (error instanceof StorageBindingRequiredError || (isMutableAccessorLike(source.value) && error instanceof Error)) {
           requirement.detail = { ...requirement.detail, bindingReason: error.message };
         }
         // Another source may still provide an actual binding. Retain why a

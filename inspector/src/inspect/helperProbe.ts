@@ -97,7 +97,7 @@ export function buildHelperProbe(target: Extract<TypegpuSymbolTarget, { selector
         provenance: probeArgumentPlan.length > 0
           ? describeProbeArgumentDefaults(probeArgumentPlan)
           : 'Called the selected zero-argument helper from an inspection wrapper.',
-        detail: { argumentCount: probeArgumentPlan.length },
+        detail: { argumentCount: probeArgumentPlan.length, arguments: probeArgumentPlan },
       },
       ...probeBindings.map((binding) => ({
         tier: 'resource',

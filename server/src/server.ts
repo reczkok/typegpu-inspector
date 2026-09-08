@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { resolve } from 'node:path';
+import { createZedShaderHover } from './zedShaderHover.js';
 import { applyInspectionFixture } from './inspectionFixture.js';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
@@ -26,6 +27,8 @@ import {
   describeTargets,
   generatedWgsl,
   targetReport,
+  generatedDocumentDiagnostics,
+  inspectionTargetForRef,
   type ReportResponse,
   type WgslResponse,
 } from './editorRequests.js';
@@ -54,13 +57,9 @@ import {
   createDiagnostics,
   createFindingHover,
   createCodeActions,
-  createDetailLevelActions,
-  createInlayDetailLevelActions,
   createDocumentLinks,
   createHover,
   createInlayHints,
-  DETAIL_LEVELS,
-  INLAY_DETAIL_LEVELS,
   failedTargetInspection,
   materializeInspection,
   mergeDocumentInspections,
@@ -116,8 +115,6 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
       executeCommandProvider: {
         commands: [
           'typegpuInspector.openGeneratedWgsl',
-          'typegpuInspector.setHoverDetailLevel',
-          'typegpuInspector.setInlayDetailLevel',
         ],
       },
     },
@@ -170,9 +167,18 @@ connection.onDidChangeConfiguration(async (change) => {
   refreshAllSurfaces();
 });
 
+function publishGeneratedInspection(previous: DocumentInspection | undefined, current: DocumentInspection | undefined, stale = false): void {
+  // VS Code owns virtual-document diagnostics; Zed opens the generated files.
+  if (presentation !== 'zed') return;
+  for (const [uri, diagnostics] of generatedDocumentDiagnostics(previous, current, stale)) {
+    void connection.sendDiagnostics({ uri, diagnostics: settings.diagnostics ? diagnostics : [] });
+  }
+}
+
 function refreshAllSurfaces(): void {
   for (const document of documents.all()) {
     const state = states.get(document.uri);
+    publishGeneratedInspection(state?.inspection, state?.inspection, state?.inspection?.sourceVersion !== document.version);
     publishDiagnostics(
       document,
       settings.diagnostics &&
@@ -228,6 +234,8 @@ documents.onDidChangeContent(({ document }) => {
   // Discovery is deferred until a consumer (hover/inlay/save) needs it, so
   // typing does not re-parse the module on every keystroke.
   if (states.has(document.uri)) {
+    const inspection = states.get(document.uri)?.inspection;
+    publishGeneratedInspection(inspection, inspection, true);
     publishDiagnostics(document, []);
   }
 });
@@ -340,6 +348,14 @@ connection.onHover(async ({ textDocument, position }) => {
   inspectOnDemand(document, state, symbol.targetIds);
 
   if (!settings.hover) return null;
+  const compactHover = presentation === 'zed' && settings.hoverDetailLevel !== 'deep'
+    ? createZedShaderHover(symbol.name,
+      describeTargets(document.version, state.discovered, state.inspection, progress.targets(document.uri, document.version)),
+      state.inspection, settings.hoverDetailLevel)
+    : undefined;
+  if (compactHover) {
+    return compactHover;
+  }
   return appendHover(
     createHover(
       symbol,
@@ -388,11 +404,13 @@ connection.onRequest('typegpu/targets', (params: {
 connection.onRequest<ReportResponse | null, void>('typegpu/report', (params: {
   textDocument: { uri: string };
   targetId: string;
+  targetKey?: string;
 }) => {
   const document = documents.get(params.textDocument.uri);
   const state = document ? ensureFreshState(document) : undefined;
   if (!document || !state) return null;
-  inspectOnDemand(document, state, [params.targetId]);
+  const target = inspectionTargetForRef(document.version, state.discovered, state.inspection, params);
+  inspectOnDemand(document, state, target ? [target.id] : []);
   return targetReport(
     document.version,
     state.discovered,
@@ -400,23 +418,27 @@ connection.onRequest<ReportResponse | null, void>('typegpu/report', (params: {
     params.targetId,
     progress.targets(document.uri, document.version),
     { ...surfaceOptions(), documentUri: document.uri },
+    params.targetKey,
   );
 });
 
 connection.onRequest<WgslResponse | null, void>('typegpu/wgsl', (params: {
   textDocument: { uri: string };
   targetId: string;
+  targetKey?: string;
 }) => {
   const document = documents.get(params.textDocument.uri);
   const state = document ? ensureFreshState(document) : undefined;
   if (!document || !state) return null;
-  inspectOnDemand(document, state, [params.targetId]);
+  const target = inspectionTargetForRef(document.version, state.discovered, state.inspection, params);
+  inspectOnDemand(document, state, target ? [target.id] : []);
   return generatedWgsl(
     document.version,
     state.discovered,
     state.inspection,
     params.targetId,
     progress.targets(document.uri, document.version),
+    params.targetKey,
   );
 });
 
@@ -446,38 +468,9 @@ connection.onDocumentLinks(({ textDocument }) => {
   return createDocumentLinks(state.discovered, state.inspection);
 });
 
-connection.onCodeAction(({ textDocument, context }) => {
-  const actions = createCodeActions(context);
-  // Zed has no settings QuickPick, so independent hover/inlay selectors live
-  // in its code-actions menu. VS Code provides dedicated persistent pickers.
-  if (presentation === 'zed') {
-    const document = documents.get(textDocument.uri);
-    const state = document ? ensureFreshState(document) : undefined;
-    if (state && state.discovered.targets.length > 0) {
-      actions.push(...createDetailLevelActions(settings.hoverDetailLevel));
-      actions.push(...createInlayDetailLevelActions(settings.inlayDetailLevel));
-    }
-  }
-  return actions;
-});
+connection.onCodeAction(({ context }) => createCodeActions(context));
 
 connection.onExecuteCommand(async ({ command, arguments: args }) => {
-  if (command === 'typegpuInspector.setHoverDetailLevel') {
-    const level = args?.[0];
-    if (!isHoverDetailLevel(level)) return;
-    // In-memory only: editors that persist settings (VS Code) write the
-    // config instead, which flows back through didChangeConfiguration.
-    settings = { ...settings, hoverDetailLevel: level };
-    refreshAllSurfaces();
-    return;
-  }
-  if (command === 'typegpuInspector.setInlayDetailLevel') {
-    const level = args?.[0];
-    if (!isInlayDetailLevel(level)) return;
-    settings = { ...settings, inlayDetailLevel: level };
-    refreshAllSurfaces();
-    return;
-  }
   if (command !== 'typegpuInspector.openGeneratedWgsl') return;
   const argument = args?.[0];
   if (!isRecord(argument) || typeof argument.uri !== 'string') return;
@@ -487,14 +480,6 @@ connection.onExecuteCommand(async ({ command, arguments: args }) => {
     ...(isRange(argument.selection) ? { selection: argument.selection } : {}),
   });
 });
-
-function isHoverDetailLevel(value: unknown): value is InspectorSettings['hoverDetailLevel'] {
-  return DETAIL_LEVELS.includes(value as (typeof DETAIL_LEVELS)[number]);
-}
-
-function isInlayDetailLevel(value: unknown): value is InspectorSettings['inlayDetailLevel'] {
-  return INLAY_DETAIL_LEVELS.includes(value as (typeof INLAY_DETAIL_LEVELS)[number]);
-}
 
 connection.onShutdown(async () => {
   scheduler.cancelAll();
@@ -594,6 +579,7 @@ async function inspectDocument(
   refreshInlayHints();
 
   const startedAt = Date.now();
+  let completionStatus: InspectionStatus | undefined;
   try {
     connection.console.info(
       `Inspecting ${modulePath} (${targets.length} targets, ${priority})`,
@@ -636,23 +622,24 @@ async function inspectDocument(
         discovered,
         result.value,
         requestedTargetIds,
+        () => documents.get(document.uri)?.version === sourceVersion,
       );
-      sendInspectionStatus({
+      completionStatus = {
         state: 'done',
         uri: document.uri,
         targetCount: targets.length,
         passedTargetCount: inspection.output.summary?.passedTargetCount,
         failedTargetCount: inspection.output.summary?.failedTargetCount,
         elapsedMs: Date.now() - startedAt,
-      });
+      };
     } catch (error) {
-      sendInspectionStatus({
+      completionStatus = {
         state: 'failed',
         uri: document.uri,
         targetCount: targets.length,
         elapsedMs: Date.now() - startedAt,
         message: errorMessage(error),
-      });
+      };
       inspection = failedTargetInspection(
         sourceVersion,
         requestedTargetIds,
@@ -669,6 +656,7 @@ async function inspectDocument(
         requestedTargetIds,
       );
       states.set(document.uri, { ...current, inspection: merged });
+      publishGeneratedInspection(current.inspection, merged);
       publishDiagnostics(
         liveDocument,
         settings.diagnostics
@@ -687,6 +675,7 @@ async function inspectDocument(
   } finally {
     progress.finish(progressToken);
     refreshInlayHints();
+    if (completionStatus) sendInspectionStatus(completionStatus);
   }
 }
 

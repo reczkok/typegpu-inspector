@@ -250,6 +250,7 @@ export type StatementMap = {
 };
 
 export type ShaderInspectionContext = {
+  captured?: Record<string, string | number | boolean | null>;
   resultPath?: string[];
   pipelineStages?: string[];
   probe?: { origin: 'schema' | 'call-site'; line?: number; column?: number; missing?: Array<{ index: number; parameter: string; reason: string }> };

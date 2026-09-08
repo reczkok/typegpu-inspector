@@ -376,7 +376,7 @@ export function discoverTypeGpuModule(
     }
   }
 
-  attachFactoryResults(symbols, targets, factoryResults);
+  attachFactoryResults(sourceFile, symbols, targets, factoryResults, helperDeclarations);
   removeRedundantComputeTargets(symbols, targets);
 
   const vertices = symbols.filter(

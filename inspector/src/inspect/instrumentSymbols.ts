@@ -19,12 +19,14 @@ export function instrumentSymbols(path: string, source: string, runtimeUrl: stri
     lines.push(text);
     registrations.set(at, lines);
   }
-  function visit(node: ts.Node, names: string[], insideFunction: boolean): void {
+  function visit(node: ts.Node, names: string[], insideFunction: boolean, parameters: string[] = []): void {
     if (isGpuFunction(node)) return; // Never inject CPU registration into TGSL.
     let visible = names;
     if (ts.isBlock(node) || ts.isSourceFile(node)) visible = [...names, ...scopeNames(node)];
     if (isFunction(node)) {
-      visible = [...visible, ...node.parameters.flatMap(p => boundNames(p.name))];
+      const localParameters = node.parameters.flatMap(p => boundNames(p.name));
+      parameters = [...parameters, ...localParameters];
+      visible = [...visible, ...localParameters];
       insideFunction = true;
     }
     if ((ts.isForStatement(node) || ts.isForInStatement(node) || ts.isForOfStatement(node)) &&
@@ -37,7 +39,7 @@ export function instrumentSymbols(path: string, source: string, runtimeUrl: stri
     if (insideFunction && ts.isVariableStatement(node) && (ts.isBlock(node.parent) || ts.isSourceFile(node.parent))) {
       for (const declaration of node.declarationList.declarations) {
         if (ts.isIdentifier(declaration.name) && declaration.initializer && requested.has(declaration.name.getStart(file))) {
-          insert(node.end, `;${prefix}Instance(${JSON.stringify(path)}, ${declaration.name.getStart(file)}, ${declaration.name.text}, ${scope(visible)});`);
+          insert(node.end, `;${prefix}Instance(${JSON.stringify(path)}, ${declaration.name.getStart(file)}, ${declaration.name.text}, ${scope(visible)}, ${JSON.stringify([...new Set(parameters)])});`);
         }
       }
     }
@@ -45,11 +47,11 @@ export function instrumentSymbols(path: string, source: string, runtimeUrl: stri
     if (ts.isBlock(node)) {
       for (const statement of node.statements) {
         if (ts.isFunctionDeclaration(statement) && statement.name && requested.has(statement.name.getStart(file))) {
-          insert(directiveEnd(node), `;${prefix}Instance(${JSON.stringify(path)}, ${statement.name.getStart(file)}, ${statement.name.text}, ${scope(visible)});`);
+          insert(directiveEnd(node), `;${prefix}Instance(${JSON.stringify(path)}, ${statement.name.getStart(file)}, ${statement.name.text}, ${scope(visible)}, ${JSON.stringify([...new Set(parameters)])});`);
         }
       }
     }
-    node.forEachChild(child => visit(child, visible, insideFunction));
+    node.forEachChild(child => visit(child, visible, insideFunction, parameters));
   }
   if (requested.size > 0) visit(file, [], false);
   for (const [at, lines] of registrations) code.appendLeft(at, lines.join('\n'));

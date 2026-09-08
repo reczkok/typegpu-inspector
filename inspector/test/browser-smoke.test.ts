@@ -97,6 +97,85 @@ describe('browser harness', () => {
     }
   });
 
+  maybeIt('compiles minimal extension headers for standalone helpers and pipelines', async () => {
+    const report = await inspectTypegpuModule({
+      cwd, timeoutMs: 30_000,
+      source: { kind: 'inlineCode', inlineCode: `
+        export function inspect({ root, tgpu, d }) {
+          const plain = tgpu.fn([d.vec2f], d.f32)('(a: vec2f) -> f32 { return a.x + a.y; }');
+          const half = tgpu.fn([], d.f32)('() -> f32 { return f32(1h); }');
+          const subgroup = tgpu.computeFn({ workgroupSize: [1] })('{ let sum = subgroupAdd(1u); }');
+          const main = tgpu.computeFn({ workgroupSize: [1] })('{ let value = 1u; }');
+          return [
+            { label: 'plain', kind: 'resolvable', value: plain },
+            { label: 'half', kind: 'resolvable', value: half },
+            { label: 'subgroup', kind: 'compute-pipeline', value: root.createComputePipeline({ compute: subgroup }) },
+            { label: 'pipeline', kind: 'compute-pipeline', value: root.createComputePipeline({ compute: main }) },
+          ];
+        }
+      ` },
+    });
+    for (const label of ['plain', 'pipeline']) {
+      const target = report.targets.find(target => target.label === label)!;
+      expect(target.ok, JSON.stringify(target)).toBe(true);
+      expect(target.wgsl).not.toMatch(/enable /);
+      const calls = report.calls.filter(call => call.targetLabel === label && call.name === 'device.createShaderModule');
+      expect(calls.length).toBeGreaterThan(0);
+      for (const call of calls) expect((call.descriptor as { code: string }).code).toBe(target.wgsl);
+    }
+    for (const [label, extension, feature] of [['half', 'f16', 'shader-f16'], ['subgroup', 'subgroups', 'subgroups']]) {
+      const target = report.targets.find(target => target.label === label)!;
+      if (report.environment.enabledFeatures.includes(feature!)) {
+        expect(target.ok, JSON.stringify(target)).toBe(true);
+        expect(target.wgsl?.match(/enable [a-z_0-9]+;/g)).toEqual([`enable ${extension};`]);
+      } else {
+        expect(target.outcome, JSON.stringify(target)).toBe('blocked');
+      }
+    }
+  });
+
+  maybeIt('compiles mutable accessor probes and still detects invalid WGSL', async () => {
+    const options = { cwd, modulePath: 'test/fixtures/mutable-accessor.ts', timeoutMs: 30_000 };
+    const report = await inspectTypegpuSymbols({
+      ...options, targets: [{ kind: 'compute-pipeline', compute: 'step' }],
+    });
+    expect(report.ok, JSON.stringify(report.targets)).toBe(true);
+    const target = report.targets[0]!;
+    expect(target.outcome).toBe('passed-with-assumptions');
+    expect(target.wgsl?.match(/var<storage, read_write>/g)).toHaveLength(2);
+    expect(target.wgsl).toContain('array<');
+    expect(target.ledger?.filter(entry => entry.provider === 'synthesis')).toHaveLength(3);
+
+    const explicit = await inspectTypegpuSymbols({
+      ...options,
+      setupBody: 'return { scale: 7, states: root.createMutable(module.states.schema), velocity: root.createMutable(module.velocity.schema) };',
+      targets: [{ kind: 'compute-pipeline', compute: 'step', with: [
+        { slot: 'module.states', value: 'setup.states' },
+        { slot: 'module.velocity', value: 'setup.velocity' },
+        { slot: 'module.scale', value: 'setup.scale' },
+      ] }],
+    });
+    expect(explicit.ok, JSON.stringify(explicit.targets)).toBe(true);
+    expect(explicit.targets[0]?.ledger?.some(entry => entry.provider === 'synthesis')).not.toBe(true);
+    expect(explicit.targets[0]?.wgsl).toContain('7');
+
+    const disabled = await inspectTypegpuSymbols({
+      ...options, autoBind: false, targets: [{ kind: 'compute-pipeline', compute: 'step' }],
+    });
+    expect(disabled.targets[0]?.outcome).toBe('blocked');
+    const unbounded = await inspectTypegpuSymbols({
+      ...options, targets: [{ kind: 'compute-pipeline', compute: 'runtimeArray' }],
+    });
+    expect(unbounded.targets[0]?.outcome).toBe('blocked');
+    expect(unbounded.targets[0]?.diagnostics?.find(d => d.code === 'slot-binding-required')?.hint).toContain('concrete buffer size');
+
+    const invalid = await inspectTypegpuSymbols({
+      ...options, targets: [{ kind: 'compute-pipeline', compute: 'invalid' }],
+    });
+    expect(invalid.targets[0]?.outcome, JSON.stringify(invalid.targets)).toBe('failed');
+    expect(invalid.targets[0]?.compilationMessages.some(message => message.type === 'error')).toBe(true);
+  });
+
   maybeIt('blocks runtime-sized accessor synthesis and validates the same shader with a storage binding', async () => {
     const options = {
       cwd,

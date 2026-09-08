@@ -75,7 +75,8 @@ export type ProviderContext = {
   sources: TaggedBindingSource[];
   /** Present when the recording shim captured application activity. */
   recorded?: RecordedBindingRegistry | undefined;
-
+  /** Creates a lazy storage binding on the inspection root; never dispatches. */
+  createMutableBinding?: ((schema: unknown) => unknown) | undefined;
 };
 
 /**

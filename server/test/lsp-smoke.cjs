@@ -91,6 +91,10 @@ child.stdout.on('data', (chunk) => {
       if (message.id !== undefined) {
         send({ jsonrpc: '2.0', id: message.id, result: null });
       }
+    }
+
+    if (message.method === 'typegpu/inspectionStatus' && message.params?.uri === uri &&
+      ['done', 'failed'].includes(message.params.state)) {
       const hoverRequestId = nextHoverRequestId++;
       hoverRequestIds.add(hoverRequestId);
       send({
@@ -109,7 +113,7 @@ child.stdout.on('data', (chunk) => {
       // Strip zero-width soft-wrap chars so needles match the visible text.
       const value = (message.result?.contents?.value ?? '')
         .replace(/\u200B/g, '');
-      if (value.includes('Inspecting this target')) {
+      if (value.includes('Inspecting this target') || value.endsWith('Refreshing')) {
         continue;
       }
       if (!message.result) {
@@ -118,10 +122,10 @@ child.stdout.on('data', (chunk) => {
       finish(
         expectedHoverText.length > 0
           ? expectedHoverText.every((expected) => value.includes(expected))
-          : value.includes('Inspected with 1 synthesized input (arguments)') &&
-            value.includes('see deep hover or the full report') &&
-            /Open generated WGSL\]\([^)]+\) · \d+ lines · \d+ B · \d+ declarations/
-              .test(value) &&
+          : value.includes('✓ WGSL compiled') &&
+            value.includes('Probe: vec4f(0)') &&
+            value.includes('```wgsl') && value.includes('fn parameterizedHelper(') &&
+            /\[Open WGSL\]\(<file:[^>]+\.wgsl>\)/.test(value) &&
             !value.includes('inspection-defaults-applied') &&
             !value.includes('**Declarations ('),
         message.result,

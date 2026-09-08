@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { discoverTypeGpuModule } from '../src/discovery.js';
-import { describeTargets, generatedWgsl, targetReport } from '../src/editorRequests.js';
+import { describeTargets, generatedWgsl, targetReport, generatedDocumentDiagnostics } from '../src/editorRequests.js';
 import {
   createHover,
   defaultSurfaceOptions,
@@ -78,9 +78,9 @@ describe('typegpu/wgsl', () => {
       reason: expect.stringContaining('Save the file'),
     });
     expect(generatedWgsl(1, discovered, inspection, id, new Set([id]))).toMatchObject({
-      ok: false,
-      reason: 'Inspecting…',
+      ok: true, refreshing: true, wgsl,
     });
+    expect(generatedWgsl(1, discovered, undefined, id, new Set([id]))).toMatchObject({ ok: false, reason: 'Inspecting…' });
     expect(generatedWgsl(1, discovered, inspection, 'missing', new Set())).toMatchObject({
       ok: false,
       reason: expect.stringContaining('no longer exists'),
@@ -137,4 +137,71 @@ describe('VS Code hover actions', () => {
     expect(text).toContain('[Open generated WGSL](file:');
     expect(text).not.toContain('command:');
   });
+});
+
+
+describe('specialization workflow', () => {
+  const nestedSource = "function makeBlur(radius: number) { const helper = tgpu.fn([], d.f32)(() => { 'use gpu'; return d.f32(radius); }); }";
+  async function nested() {
+    const discovered = discoverTypeGpuModule('/workspace/nested.ts', nestedSource);
+    const inspection = await materializeInspection('/workspace', '/workspace/nested.ts', 1, discovered, {
+      ok: true, targets: [0, 1].map(instance => ({
+        label: `makeBlur.helper [instance ${instance}]`, parentLabel: 'makeBlur.helper',
+        kind: 'resolvable', ok: true, outcome: 'passed', context: { instance },
+        wgsl: `fn helper() -> f32 { return ${instance ? 7 : 3}; }`,
+      })),
+    });
+    return { discovered, inspection };
+  }
+
+  it('retains observed instances and WGSL while edits move the declaration', async () => {
+    const { discovered, inspection } = await nested();
+    const target = discovered.targets[1]!;
+    const edited = discoverTypeGpuModule('/workspace/nested.ts', '// moved\n' + nestedSource);
+    const progress = new Set(edited.targets.map(target => target.id));
+    const snapshot = describeTargets(2, edited, inspection, progress);
+    expect(snapshot.targets).toHaveLength(2);
+    expect(snapshot.targets.every(target => target.status === 'inspecting')).toBe(true);
+    expect(snapshot.symbols[0]!.targetIds).toContain(target.id);
+    expect(generatedWgsl(2, edited, inspection, target.id, progress)).toMatchObject({
+      ok: true, stale: true, refreshing: true, sourceVersion: 1, context: { instance: 1 },
+    });
+    const report = targetReport(2, edited, inspection, target.id, new Set(), defaultSurfaceOptions);
+    expect(report).toMatchObject({ ok: true, stale: true });
+    if (report.ok) {
+      expect(report.markdown).toContain('return 7');
+      expect(report.markdown).not.toContain('return 3');
+    }
+  });
+
+  it.each(['blocked', 'unsupported', 'passed-with-assumptions'] as const)('preserves %s as structured editor data', async outcome => {
+    const { discovered, inspection } = await nested();
+    const report = inspection.targets.values().next().value!.report;
+    report.outcome = outcome;
+    report.ok = outcome === 'passed-with-assumptions';
+    report.diagnostics = [{ code: 'slot-binding-required', message: 'Supply the color slot' }];
+    expect(describeTargets(1, discovered, inspection, new Set()).targets[0]).toMatchObject({ outcome, diagnostics: report.diagnostics });
+  });
+});
+
+
+describe('generated file diagnostics', () => {
+  it('marks previous WGSL stale and clears compiler errors after recovery', async () => {
+    const { inspection } = await inspected();
+    const target = inspection.targets.values().next().value!;
+    const uri = target.generatedUri!;
+    expect(generatedDocumentDiagnostics(undefined, inspection).get(uri)?.[0]).toMatchObject({ source: 'WGSL compiler', severity: 1 });
+    expect(generatedDocumentDiagnostics(inspection, inspection, true).get(uri)?.[0]).toMatchObject({ message: expect.stringContaining('Previous inspection'), severity: 2 });
+    const recovered = { ...inspection, targets: new Map([[target.target.id, { ...target, report: { ...target.report, compilationMessages: [] } }]]) };
+    expect(generatedDocumentDiagnostics(inspection, recovered).get(uri)).toEqual([]);
+    expect(generatedDocumentDiagnostics(inspection, undefined).get(uri)?.[0]?.message).toContain('Previous inspection');
+  });
+});
+
+
+it('never serves a cached report for a different declaration reusing an ID', async () => {
+  const { discovered, inspection } = await inspected();
+  discovered.targets[0] = { ...discovered.targets[0]!, label: 'renamed' };
+  expect(describeTargets(2, discovered, inspection, new Set()).targets[0]!.status).toBe('not-inspected');
+  expect(generatedWgsl(2, discovered, inspection, discovered.targets[0]!.id, new Set()).ok).toBe(false);
 });

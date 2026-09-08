@@ -272,7 +272,7 @@ async function startClient(context: ExtensionContext): Promise<void> {
       'typegpu/inspectionStatus',
       (payload: InspectionStatus) => {
         if (statusItem) renderStatus(statusItem, payload);
-        if (payload.state === 'done' || payload.state === 'failed') {
+        if (payload.state === 'done' || payload.state === 'failed' || payload.state === 'inspecting') {
           preview?.refresh(payload.uri);
         }
         if (payload.state === 'failed') {
@@ -421,6 +421,11 @@ export async function activate(context: ExtensionContext): Promise<void> {
       }
       await preview?.openLive();
     }),
+    commands.registerCommand('typegpuInspector.selectTarget', async () => {
+      const active = window.activeTextEditor?.document;
+      if (!client && active) await considerDocument(context, active);
+      await preview?.selectTarget();
+    }),
     commands.registerCommand('typegpuInspector.openReportPreview', async () => {
       if (!client) {
         const active = window.activeTextEditor?.document;
@@ -466,6 +471,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
     commands.registerCommand('typegpuInspector.statusMenu', async () => {
       const picked = await window.showQuickPick(
         [
+          { label: '$(list-selection) Select specialization', action: 'typegpuInspector.selectTarget' },
           { label: '$(open-preview) Open generated WGSL to the side', action: 'typegpuInspector.openWgslPreview' },
           { label: '$(book) Open inspection report to the side', action: 'typegpuInspector.openReportPreview' },
           { label: '$(output) Show output log', action: 'typegpuInspector.showOutput' },
@@ -497,6 +503,9 @@ export async function activate(context: ExtensionContext): Promise<void> {
     }),
     window.onDidChangeActiveTextEditor((editor) => {
       updateFileContext(editor?.document);
+    }),
+    workspace.onDidChangeTextDocument(({ document }) => {
+      if (document.uri.scheme === 'file') preview?.refresh(document.uri.toString());
     }),
     workspace.onDidSaveTextDocument((document) => {
       void considerDocument(context, document);

@@ -77,7 +77,7 @@ describe('satisfyAndAttempt', () => {
       kind: 'slot-value', key: 'slot-value:instances', subject: access.slot, discoveredBy: 'failure',
       detail: engine.ledger[0]?.detail,
     }, new Error('Missing binding'), access);
-    expect(failure.diagnostics[0]?.hint).toContain("buffer.as('readonly')");
+    expect(failure.diagnostics[0]?.hint).toContain("explicit inspection context");
     expect(() => createPlaceholderValue(d.struct({ data: d.arrayOf(d.vec4f, 0) })))
       .toThrow('Runtime-sized arrays require a storage binding');
     expect(createPlaceholderValue(d.arrayOf(d.vec4f, 2))).toEqual([d.vec4f(1), d.vec4f(1)]);

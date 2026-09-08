@@ -1,5 +1,5 @@
 import { collectBindingContexts, expandBindingContexts } from './bindingContexts.ts';
-import { tgpu, type Configurable as TgpuConfigurable } from 'typegpu';
+import { d, tgpu, type Configurable as TgpuConfigurable } from 'typegpu';
 import {
   MIN_BROWSER_WAIT_MS,
   serializeError,
@@ -25,6 +25,7 @@ import {
 } from './engine/engine.ts';
 import {
   partitionUnavailableExtensionErrors,
+  pruneUnusedWgslExtensions,
   unavailableExtensionFeature,
   wgslExtensionsFor,
 } from './wgslExtensions.ts';
@@ -145,6 +146,14 @@ export async function inspectPipelineTargets(
       enabled: target.autoBind ?? autoBind,
       sources: taggedSources,
       recorded: options.recorded,
+      createMutableBinding: (schema) => {
+        // Validate that the schema has a finite buffer size without constructing
+        // potentially huge CPU arrays. TypeGPU allocates this buffer lazily.
+        if (!Number.isFinite(d.sizeOf(schema as d.AnyData))) {
+          throw new Error('A runtime-sized mutable accessor needs an explicit storage binding with a concrete buffer size.');
+        }
+        return root.createBuffer(schema as d.AnyData).$usage('storage').as('mutable');
+      },
     });
     for (const [slot, value] of target.bindings ?? []) {
       const entry = {
@@ -639,10 +648,11 @@ async function validateResolvableTarget(
       createRequirementFailure(engineCtx, requirement, error, value),
   );
   report.resolutionMs = performance.now() - resolutionStart;
-  report.wgsl = result.code;
-  report.wgslSize = byteLength(result.code);
+  const code = pruneUnusedWgslExtensions(result.code, device.features);
+  report.wgsl = code;
+  report.wgslSize = byteLength(code);
   const statementMap = statementRecorder
-    ? buildStatementMap(statementRecorder, result.code)
+    ? buildStatementMap(statementRecorder, code)
     : undefined;
   if (statementMap) {
     report.statementMap = statementMap;
@@ -664,7 +674,7 @@ async function validateResolvableTarget(
   try {
     const module = device.createShaderModule({
       label: `${report.label} - Shader`,
-      code: result.code,
+      code,
     });
     const info = await withBrowserTimeout(
       module.getCompilationInfo(),

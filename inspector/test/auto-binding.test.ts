@@ -145,7 +145,7 @@ describe('slot-value provider chain', () => {
     expect(provision).toBeUndefined();
   });
 
-  it('requires a complete context for mutable accessors', () => {
+  it('leaves mutable accessors unresolved without a storage binding factory', () => {
     const mutableAccess = tgpu.mutableAccessor(d.f32).$name('state');
     const consumer = tgpu.fn([], d.f32)(() => {
       'use gpu';

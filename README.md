@@ -26,6 +26,9 @@ grammar is enough.
 - Links to the generated `.wgsl` file and the full report. In VS Code, a
   generated-WGSL document and an inspection report open beside the editor and
   follow the cursor.
+- Explicit shader specialization selection in VS Code through **Select
+  Specialization**. Generated files carry compiler diagnostics. See
+  [the editor workflow](EDITOR_REMASTER.md) for selection and refresh behavior.
 - Schema layout: offsets, alignment, padding, host shareability, and a tighter
   field order when one is provably smaller.
 
@@ -48,7 +51,7 @@ accessors, GPU variables, and collections of them.
 
 ```sh
 git clone https://github.com/reczkok/typegpu-inspector.git
-cd typegpu-inspector && git checkout v0.9.0
+cd typegpu-inspector && git checkout v0.10.0
 ```
 
 Then run `zed: install dev extension` and pick that folder. Zed builds it
@@ -103,13 +106,22 @@ otherwise installs the published server from npm:
 
 The server then runs the runtime from the checkout's `inspector/` directory.
 
-`wgsl` shows only the generated WGSL for shaders and pipelines (120 lines by
-default) and compact facts for everything else. At every level the WGSL comes
-before the tables. Hover and inlay detail are independent. `hoverPresentation`
-sets each section to `auto`, `show`, or `hide`, reorders them with
-`sectionOrder`, and bounds the ones that can grow. `maxColumns` (72 in Zed, 96
-elsewhere) is the widest table a hover renders; a wider one is written as
-key/value lines. VS Code's settings schema lists the section names and ranges.
+Zed shader hovers show the selected function's WGSL immediately, including
+separate previews for two specializations. Shared status appears once. Each
+specialization has an **Open WGSL** link that opens its exact compiler input
+directly in a normal editor tab. Additional specializations keep direct links.
+Generated files keep stable paths and update atomically after inspection.
+Unused supported extension directives are removed before compilation.
+A short context line identifies probe inputs (`Probe: vec2f(0)`), captured
+primitive parameters (`Captured: radius = 7`), or synthesized bindings
+(`3 synthetic storage bindings`). Missing inputs name the argument or slot
+and the next action. Full provenance remains in the inspection report.
+
+In Zed, `compact` omits the excerpt, `standard` shows up to 8 lines per preview, and `wgsl`
+shows up to 12. `deep` retains the full configurable report hover. Section
+visibility and budgets in `hoverPresentation` apply to full report and resource
+hovers. VS Code retains its configurable WGSL preview and section order.
+Hover and inlay detail are independent.
 `sourceMapping` is exact at statement level on TypeGPU 0.12 or newer and
 heuristic below that. Helpers in imported files are located through the
 document's imports (`tsconfig` path aliases included; packages are skipped).
@@ -264,6 +276,15 @@ This example assumes the app has not already called `makeBlur`. Setup runs
 after the module import; existing calls contribute instances too. A factory
 that never executes produces a blocked result with a setup hint. The inspector
 does not invoke CPU factories automatically.
+For an existing result that is one unconditionally returned GPU function,
+argument probes use its known parameter schemas, including finite generic
+specializations. Ambiguous returns and captured local schemas still require
+an explicit inspection context.
+For plain numeric parameters, known shader calls take precedence over default
+schemas. Typed constructors and entrypoint inputs (including local const aliases)
+can establish separate `u32`, `i32`, or floating-point specializations. These show
+`Call-site type probe`; unresolved calls retain the independent schema probe.
+This does not infer types from CPU values or arbitrary arithmetic expressions.
 
 Each target context can also supply `arguments` (an array of `{ "value":
 "setup.input" }`, `{ "schema": "ctx.d.vec3f" }`, or `{ "refSchema":

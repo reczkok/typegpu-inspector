@@ -15,6 +15,7 @@ import {
 } from './providers.ts';
 import type {
   EngineContext,
+  ProviderContext,
   RecordedBindingRegistry,
   Requirement,
   TaggedBindingSource,
@@ -23,6 +24,7 @@ import type {
 const MAX_ENGINE_ITERATIONS = 8;
 
 export function createEngineContext(options: {
+  createMutableBinding?: ProviderContext['createMutableBinding'];
   enabled: boolean;
   sources: TaggedBindingSource[];
   recorded?: RecordedBindingRegistry | undefined;
@@ -33,6 +35,7 @@ export function createEngineContext(options: {
     providerContext: {
       sources: options.enabled ? collectBindingSources(options.sources) : [],
       recorded: options.recorded,
+      createMutableBinding: options.createMutableBinding,
     },
     satisfied: [],
     ledger: [],

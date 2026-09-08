@@ -1,3 +1,4 @@
+import { pruneUnusedWgslExtensions } from './wgslExtensions.ts';
 import type {
   BindingStats,
   CompilationMessageStats,
@@ -124,8 +125,15 @@ export function createGpuRecorder(
         return value.bind(target);
       }
 
-      return (...args: unknown[]) =>
-        recordCall(state, `device.${prop}`, args[0], () => value.apply(target, args), prop);
+      return (...args: unknown[]) => {
+        if (prop === 'createShaderModule') {
+          const descriptor = args[0] as GPUShaderModuleDescriptor | undefined;
+          if (typeof descriptor?.code === 'string') {
+            args[0] = { ...descriptor, code: pruneUnusedWgslExtensions(descriptor.code, device.features) };
+          }
+        }
+        return recordCall(state, `device.${prop}`, args[0], () => value.apply(target, args), prop);
+      };
     },
   });
 

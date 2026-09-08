@@ -759,6 +759,76 @@ describe('discoverTypeGpuModule', () => {
     expect(result.targets.filter(target => target.id.startsWith('factory-result:')).map(target => 'selector' in target.selector && target.selector.selector)).toEqual(['bundle', 'again', 'selected']);
   });
 
+  it('plans arguments for known factory-returned GPU callables and their aliases', () => {
+    const result = discoverTypeGpuModule('/returned.ts', `
+      const make = (gain: number) => (value: d.v2f, scale: number) => { 'use gpu'; return value.x * scale * gain; };
+      const alias = make;
+      const first = alias(3);
+      const second = make(7);
+      const again = first;
+    `);
+    const targets = result.targets.filter(target => target.id.startsWith('factory-result:'));
+    expect(targets.map(target => target.label)).toEqual(['make → first', 'make → second', 'make → again']);
+    for (const target of targets) expect(target.selector).toMatchObject({
+      member: [], probeArgumentPlan: [{ schema: 'ctx.d.vec2f' }, { schema: 'ctx.d.f32' }], probeContext: { origin: 'schema' },
+    });
+  });
+
+  it('reuses generic specialization planning for a returned helper', () => {
+    const result = discoverTypeGpuModule('/returned-generic.ts', `
+      function make() { return <T extends d.v2f | d.v4f>(value: T) => { 'use gpu'; return value.x; }; }
+      const helper = make();
+    `);
+    expect(result.targets.filter(target => target.id.startsWith('factory-result:')).map(target => target.selector)).toEqual([
+      expect.objectContaining({ member: [], probeArgumentPlan: [{ schema: 'ctx.d.vec2f' }] }),
+      expect.objectContaining({ member: [], probeArgumentPlan: [{ schema: 'ctx.d.vec4f' }] }),
+    ]);
+  });
+
+  it('leaves ambiguous returns, bundles and inaccessible captured schemas to explicit contexts', () => {
+    const result = discoverTypeGpuModule('/returned-fallback.ts', `
+      const Local = d.struct({ unrelated: d.u32 });
+      function ambiguous(flag: boolean) {
+        return flag ? (v: d.v2f) => { 'use gpu'; return v.x; } : (v: d.v4f) => { 'use gpu'; return v.w; };
+      }
+      function localSchema() {
+        const Local = d.struct({ value: d.f32 });
+        return (v: d.Infer<typeof Local>) => { 'use gpu'; return v.value; };
+      }
+      function bundle() { return { helper: (v: d.v2f) => { 'use gpu'; return v.x; } }; }
+      function early(flag: boolean) {
+        if (!flag) return undefined;
+        return (v: d.v2f) => { 'use gpu'; return v.x; };
+      }
+      const maybe = early(true);
+      const a = ambiguous(true);
+      const b = localSchema();
+      const c = bundle();
+    `);
+    const targets = result.targets.filter(target => target.id.startsWith('factory-result:'));
+    expect(targets).toHaveLength(4);
+    for (const target of targets) {
+      expect(target.selector).not.toHaveProperty('probeArgumentPlan');
+      expect(target.selector).not.toHaveProperty('member');
+    }
+  });
+
+  it('allows module schemas for returned helpers and identifies unsupported arguments', () => {
+    const result = discoverTypeGpuModule('/returned-schema.ts', `
+      const Config = d.struct({ value: d.f32 });
+      function make() { return (v: d.Infer<typeof Config>) => { 'use gpu'; return v.value; }; }
+      function unknown() { return (values: number[]) => { 'use gpu'; return values[0]; }; }
+      const configured = make();
+      const missing = unknown();
+    `);
+    expect(result.targets.find(target => target.id === 'factory-result:configured')?.selector).toMatchObject({
+      member: [], probeArgumentPlan: [{ schema: 'module.Config' }],
+    });
+    expect(result.targets.find(target => target.id === 'factory-result:missing')?.selector).toMatchObject({
+      member: [], probeContext: { missing: [expect.objectContaining({ parameter: 'values' })] },
+    });
+  });
+
   it('pairs render stages by name instead of producing a Cartesian product', () => {
     const result = discoverTypeGpuModule(
       '/project/render.ts',

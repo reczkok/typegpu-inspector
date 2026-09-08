@@ -54,8 +54,20 @@ describe('original lexical symbol access', () => {
     const instances = registry.selectInstances(path, declaration);
     expect(instances.map(i => (i.value as () => number)())).toEqual([3, 7]);
     expect(instances.map(i => i.scope.Schema)).toEqual([3, 7]);
+    expect(instances.map(i => i.captured)).toEqual([{ radius: 3 }, { radius: 7 }]);
     expect(registry.selectInstances(path, declaration, 1)[0]?.instance).toBe(1);
     expect(() => registry.selectInstances(path, declaration, 2)).toThrow('available instance indices');
+  });
+
+  it('summarizes primitive parameters without traversing objects or reading unrelated getters', () => {
+    let reads = 0;
+    const path = '/bounded-capture';
+    registry.registerInstance(path, 1, {}, () => ({
+      radius: 7, config: { get secret() { reads++; throw new Error('must not read'); } },
+      get unrelated() { reads++; throw new Error('TDZ'); },
+    }), ['radius', 'config']);
+    expect(registry.selectInstances(path, 1)[0]?.captured).toEqual({ radius: 7 });
+    expect(reads).toBe(0);
   });
 
   it('registers hoisted helpers before an early return and leaves GPU bodies unchanged', () => {

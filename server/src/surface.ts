@@ -1,9 +1,7 @@
 import { findContextSuggestions } from './contextSuggestions.js';
 import { expandInstanceTargets } from './instanceTargets.js';
-import { createHash } from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { inspectionDocumentPath, writeInspectionDocument } from './inspectionDocuments.js';
+import { basename } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   CodeActionKind,
@@ -143,6 +141,7 @@ export async function materializeInspection(
   discovered: DiscoveredModule,
   output: InspectorOutput,
   requestedTargetIds?: readonly string[],
+  isCurrent = () => true,
 ): Promise<DocumentInspection> {
   const needsContext = (output.targets ?? []).filter(report =>
     report.diagnostics?.some(diagnostic => ['slot-binding-required', 'selector-not-resolved', 'wrapper-required', 'reference-wrapper-required'].includes(diagnostic.code)));
@@ -170,7 +169,7 @@ export async function materializeInspection(
     const layouts = extractGpuBindGroupLayouts(output, report);
     const pipelineState = extractGpuPipelineState(output, report);
     const generatedUri = report.wgsl
-      ? await writeGeneratedWgsl(workspaceRoot, modulePath, target, report.wgsl)
+      ? await writeGeneratedWgsl(workspaceRoot, modulePath, report, report.wgsl, isCurrent)
       : undefined;
     const materialized: MaterializedTarget = {
       target,
@@ -186,6 +185,7 @@ export async function materializeInspection(
         modulePath,
         materialized,
         output,
+        isCurrent,
       );
     } catch {
       // A failed report write only costs the hover its link.
@@ -332,7 +332,7 @@ export function createHover(
       lines.push(
         '',
         `_Showing ${plural(synthesis.emitted, 'specialization')} inferred ` +
-          (symbol.probeContext?.origin === 'call-site' ? 'from complete call-site resource tuples._' : 'from finite parameter types._'),
+          (symbol.probeContext?.origin === 'call-site' ? 'from known call-site inputs (with schema fallbacks where needed)._' : 'from finite parameter types._'),
       );
     }
   }
@@ -1084,55 +1084,6 @@ function mergeInspectorOutputs(
       ...(next.pageErrors ?? []),
     ]),
   };
-}
-
-export const DETAIL_LEVELS = ['wgsl', 'compact', 'standard', 'deep'] as const;
-export const INLAY_DETAIL_LEVELS = ['compact', 'summary', 'detailed'] as const;
-
-const DETAIL_LEVEL_SUMMARIES: Record<HoverDetailLevel, string> = {
-  wgsl: 'generated WGSL only',
-  compact: 'core shape',
-  standard: 'role-focused detail',
-  deep: 'everything',
-};
-
-/**
- * Verbosity switcher for editors without their own settings UI affordance
- * (Zed reaches server features through the code-actions menu). VS Code users
- * get the richer QuickPick command instead, so the client decides whether to
- * surface these.
- */
-export function createDetailLevelActions(
-  current: HoverDetailLevel,
-): CodeAction[] {
-  return DETAIL_LEVELS.filter((level) => level !== current).map((level) => ({
-    title: `TypeGPU hover detail: ${level} (${DETAIL_LEVEL_SUMMARIES[level]})`,
-    kind: 'source.typegpuInspector',
-    command: {
-      title: `Set TypeGPU hover detail to ${level}`,
-      command: 'typegpuInspector.setHoverDetailLevel',
-      arguments: [level],
-    },
-  }));
-}
-
-export function createInlayDetailLevelActions(
-  current: InlayDetailLevel,
-): CodeAction[] {
-  const summaries: Record<InlayDetailLevel, string> = {
-    compact: 'status only',
-    summary: 'one role-specific fact',
-    detailed: 'two role-specific facts',
-  };
-  return INLAY_DETAIL_LEVELS.filter((level) => level !== current).map((level) => ({
-    title: `TypeGPU inlays: ${level} (${summaries[level]})`,
-    kind: 'source.typegpuInspector',
-    command: {
-      title: `Set TypeGPU inlays to ${level}`,
-      command: 'typegpuInspector.setInlayDetailLevel',
-      arguments: [level],
-    },
-  }));
 }
 
 function effectiveHoverLevel(options: SurfaceOptions): HoverDetailLevel {
@@ -2951,21 +2902,12 @@ function renderMonoGrid(input: string[][]): string[] {
 async function writeGeneratedWgsl(
   workspaceRoot: string,
   modulePath: string,
-  target: InspectionTarget,
+  target: InspectorTargetReport,
   wgsl: string,
+  isCurrent: () => boolean,
 ): Promise<string> {
-  const workspaceKey = shortHash(workspaceRoot);
-  const moduleKey = shortHash(modulePath);
-  const directory = join(
-    tmpdir(),
-    'typegpu-inspector',
-    workspaceKey,
-    moduleKey,
-  );
-  await mkdir(directory, { recursive: true });
-  const fileName = `${stripExtension(basename(modulePath))}__${safeName(target.label)}.wgsl`;
-  const outputPath = join(directory, fileName);
-  await writeFile(outputPath, wgsl, 'utf8');
+  const outputPath = inspectionDocumentPath(workspaceRoot, modulePath, target);
+  await writeInspectionDocument(outputPath, wgsl, isCurrent);
   return pathToFileURL(outputPath).toString();
 }
 
@@ -2974,18 +2916,9 @@ async function writeGeneratedReport(
   modulePath: string,
   target: MaterializedTarget,
   output: InspectorOutput,
+  isCurrent: () => boolean,
 ): Promise<string> {
-  const workspaceKey = shortHash(workspaceRoot);
-  const moduleKey = shortHash(modulePath);
-  const directory = join(
-    tmpdir(),
-    'typegpu-inspector',
-    workspaceKey,
-    moduleKey,
-  );
-  await mkdir(directory, { recursive: true });
-  const fileName = `${stripExtension(basename(modulePath))}__${safeName(target.target.label)}.typegpu.md`;
-  const outputPath = join(directory, fileName);
+  const outputPath = inspectionDocumentPath(workspaceRoot, modulePath, target.report, 'typegpu.md');
   const lines = [`# TypeGPU inspection · ${escapeMarkdown(target.target.label)}`];
   appendTarget(lines, target, output, {
     ...defaultSurfaceOptions,
@@ -3005,7 +2938,7 @@ async function writeGeneratedReport(
     },
   });
   appendRuntimeSummary(lines, output, true, editorDefaultLedgerEntries([target]));
-  await writeFile(outputPath, `${lines.join('\n')}\n`, 'utf8');
+  await writeInspectionDocument(outputPath, `${lines.join('\n')}\n`, isCurrent);
   return pathToFileURL(outputPath).toString();
 }
 
@@ -3399,18 +3332,6 @@ function compactHintLabel(
 ): string {
   if (value.length <= maxLength) return value;
   return `${value.slice(0, maxLength - 1).trimEnd()}…`;
-}
-
-function shortHash(value: string): string {
-  return createHash('sha256').update(value).digest('hex').slice(0, 12);
-}
-
-function safeName(value: string): string {
-  return value.replaceAll(/[^A-Za-z0-9_.-]+/g, '_').slice(0, 100);
-}
-
-function stripExtension(value: string): string {
-  return value.replace(/\.[^.]+$/, '');
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

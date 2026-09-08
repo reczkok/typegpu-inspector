@@ -1,4 +1,5 @@
 import ts from 'typescript';
+import { discoverShaderCallSchemas, type ShaderCallSchemas } from './callerSchemas.js';
 import type { DiscoveredSymbol, InspectionTarget, ProbeArgumentPlanEntry, ProbeSpecialization } from './discovery.js';
 import { expressionSelector, findFnShell, sourceBindings, isRuntimeBinding, isTgpuFactoryCall, readCallee, unwrap } from './shaderSyntax.js';
 
@@ -103,11 +104,13 @@ function discoverContextualProbeInputs(
   };
 
   const helpers = new Map<string, Helper>();
+  const checker = sourceBindings(sourceFile);
+  const moduleBindings = new Map(checker.getSymbolsInScope(sourceFile, ts.SymbolFlags.Value | ts.SymbolFlags.Alias).map(binding => [binding.name, binding]));
   for (const [name, declaration] of declarations) {
     const value = ts.isFunctionDeclaration(declaration) ? declaration : unwrap(declaration);
     if ((ts.isFunctionDeclaration(value) || ts.isArrowFunction(value) || ts.isFunctionExpression(value)) && value.body) {
       const identifier = ts.isFunctionDeclaration(value) ? value.name : ts.isVariableDeclaration(value.parent) ? value.parent.name : undefined;
-      helpers.set(name, { symbol: identifier && sourceBindings(sourceFile).getSymbolAtLocation(identifier), body: value.body, parameters: value.parameters, typeParameters: value.typeParameters });
+      helpers.set(name, { symbol: identifier ? checker.getSymbolAtLocation(identifier) : moduleBindings.get(name), body: value.body, parameters: value.parameters, typeParameters: value.typeParameters });
     }
   }
 
@@ -154,6 +157,7 @@ function discoverContextualProbeInputs(
   }
 
   const callSiteValues = discoverCallSiteArgumentValues(sourceFile, helpers);
+  const callerSchemas = discoverShaderCallSchemas(sourceFile);
   const result = new Map<string, ProbeInputs>();
 
   for (const [name, helper] of helpers) {
@@ -179,6 +183,8 @@ function discoverContextualProbeInputs(
     }
 
     const helperSelectors = selectors.get(name)!;
+    const callerPlan = numericCallerPlan(helper.parameters, helperSelectors, helper.symbol ? callerSchemas.get(helper.symbol) ?? [] : []);
+    if (callerPlan) { result.set(name, callerPlan); continue; }
     const refParameterIndexes = new Set(
       helper.parameters.flatMap((parameter, index) =>
         isNumberRefType(parameter.type, sourceFile) ? [index] : []
@@ -237,6 +243,38 @@ function discoverContextualProbeInputs(
   }
 
   return result;
+}
+
+/** Preserve complete caller tuples; unknown calls keep the independent schema probe. */
+function numericCallerPlan(parameters: ts.NodeArray<ts.ParameterDeclaration>, defaults: Array<string | undefined>, calls: ShaderCallSchemas[]): ProbeInputs | undefined {
+  if (!parameters.some(parameter => parameter.type?.kind === ts.SyntaxKind.NumberKeyword) ||
+    !defaults.every((schema): schema is string => schema !== undefined)) return undefined;
+  const variants = new Map<string, ProbeSpecialization>();
+  let unknown = false;
+  for (const call of calls) {
+    if (call.schemas.length !== parameters.length || !call.schemas.every((schema, index) => schema &&
+      (parameters[index]!.type?.kind === ts.SyntaxKind.NumberKeyword ? /^ctx\.d\.(?:u32|i32|f32|f16)$/.test(schema) : schema === defaults[index]))) {
+      unknown = true;
+      continue;
+    }
+    const schemas = call.schemas as string[];
+    const key = schemas.join(',');
+    if (!variants.has(key)) variants.set(key, {
+      probeArgumentPlan: schemas.map(schema => ({ schema })), signature: schemas.map(probeSchemaDisplayName).join(', '),
+      probeContext: { origin: 'call-site', line: call.line, column: call.column },
+    });
+  }
+  if (!variants.size) return undefined;
+  if (unknown && !variants.has(defaults.join(','))) variants.set(defaults.join(','), {
+    probeArgumentPlan: defaults.map(schema => ({ schema })), signature: `${defaults.map(probeSchemaDisplayName).join(', ')} · schema probe`,
+    probeContext: { origin: 'schema' },
+  });
+  const emitted = [...variants.values()].slice(0, MAX_SYNTHESIZED_SPECIALIZATIONS);
+  if (variants.size === 1) return { probeArgumentPlan: emitted[0]!.probeArgumentPlan, probeContext: emitted[0]!.probeContext! };
+  return {
+    probeSpecializations: emitted, probeContext: { origin: 'call-site' },
+    specializationSynthesis: { emitted: emitted.length, limit: MAX_SYNTHESIZED_SPECIALIZATIONS, truncated: variants.size > emitted.length },
+  };
 }
 
 function inferNumberParameterSchema(

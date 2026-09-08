@@ -6,6 +6,45 @@ and released together. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-09-08
+
+### Added
+
+- Zed shader hovers show generated function bodies immediately, with separate
+  specialization previews and direct links to their WGSL files.
+- VS Code provides an explicit specialization picker. Live and pinned WGSL views
+  retain the selected context through source edits and inspection refreshes.
+- Inspection summaries identify probe arguments, captured primitive parameters,
+  synthetic storage bindings, and missing inputs. Full provenance remains in
+  the inspection report.
+- Known factory-returned GPU helpers infer argument schemas through the existing
+  helper planner, including finite generic specializations and result aliases.
+- Plain numeric helper parameters use known shader caller types from typed
+  constructors and entrypoint inputs. Different caller tuples remain separate;
+  unresolved calls retain an independent schema probe.
+
+### Changed
+
+- Zed code actions focus on navigating compiler errors to generated WGSL. Hover
+  and inlay settings remain available through editor configuration.
+- Generated WGSL files use stable specialization paths and atomic updates.
+  Previous results are marked stale while edited source awaits inspection.
+- Finite mutable accessor schemas can synthesize storage bindings for standalone
+  shader checks. These checks retain their inspection-assumptions status;
+  runtime-sized accessors still require a concrete binding.
+
+### Fixed
+
+- Unused supported WGSL extension directives are removed before compilation.
+  Reports, source maps, and compiler input use the same resulting shader text.
+- Late inspection responses no longer replace a newer VS Code preview. Removed
+  or ambiguous specializations require another explicit selection.
+- Generated-file compiler diagnostics refresh and clear on recovery, and editor
+  completion notifications follow the committed inspection state.
+- Caller-derived numeric probes catch compilation failures that a different
+  default specialization could miss. For example, a real `f32` call is checked
+  as `f32` even when the helper's integer schema probe would compile.
+
 ## [0.9.0] - 2026-09-08
 
 ### Added
@@ -373,6 +412,7 @@ First public release: VS Code Marketplace, and Zed as a dev extension.
 Internal iterations: hover and inlay surface work, discovery and diagnostics
 tuning, packaging experiments. Not published to any store.
 
+[0.10.0]: https://github.com/reczkok/typegpu-inspector/releases/tag/v0.10.0
 [0.9.0]: https://github.com/reczkok/typegpu-inspector/releases/tag/v0.9.0
 [0.8.4]: https://github.com/reczkok/typegpu-inspector/releases/tag/v0.8.4
 [0.8.3]: https://github.com/reczkok/typegpu-inspector/releases/tag/v0.8.3

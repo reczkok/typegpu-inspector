@@ -62,7 +62,7 @@ export function prepareSymbolTargets(
             ...base, unwrap: selector.unwrap, subject: member.value, usage: selector.usage,
             ...(expand ? { parentLabel: plan.label, label } : {}),
             ...(resultPath !== undefined ? { kind: 'kind' in member ? member.kind : plan.kind, parentLabel: plan.label, label: selector.member !== undefined ? label : resultMemberLabel(label, resultPath) } : {}),
-            context: { ...context, ...(resultPath !== undefined ? { resultPath, pipelineStages: observedPipelineStages(member.value, inspectedModule) } : {}), ...(captured ? { instance: candidate.instance } : {}) },
+            context: { ...context, ...(resultPath !== undefined ? { resultPath, pipelineStages: observedPipelineStages(member.value, inspectedModule) } : {}), ...(captured ? { instance: candidate.instance, captured: candidate.captured } : {}) },
             ...(captured || selector.context ? { autoBind: false } : {}),
           };
           try {

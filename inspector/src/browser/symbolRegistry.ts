@@ -1,6 +1,6 @@
 /** Per-page references to original lexical bindings. Nothing here evaluates a factory. */
 type Scope = Record<string, unknown>;
-type Instance = { value: unknown; scope: () => Scope };
+type Instance = { value: unknown; scope: () => Scope; parameters: readonly string[] };
 type ModuleSymbols = { scope?: () => Scope; instances: Map<number, Instance[]> };
 const modules = new Map<string, ModuleSymbols>();
 const MAX_INSTANCES = 128;
@@ -33,13 +33,13 @@ export function registerModule(path: string, scope: () => Scope): void {
 }
 
 export function registerInstance(
-  path: string, declaration: number, value: unknown, scope: () => Scope,
+  path: string, declaration: number, value: unknown, scope: () => Scope, parameters: readonly string[] = [],
 ): void {
   const registry = symbols(path);
   let entries = registry.instances.get(declaration);
   if (!entries) registry.instances.set(declaration, entries = []);
   // Retain one overflow sentinel so selection cannot silently certify a truncated set.
-  if (entries.length <= MAX_INSTANCES) entries.push({ value, scope });
+  if (entries.length <= MAX_INSTANCES) entries.push({ value, scope, parameters });
 }
 
 export function moduleScope(path: string, exported: Scope): Scope {
@@ -57,7 +57,7 @@ export function moduleScope(path: string, exported: Scope): Scope {
 }
 
 export function selectInstances(path: string, declaration: number, instance?: number): Array<{
-  value: unknown; scope: Scope; instance: number;
+  value: unknown; scope: Scope; instance: number; captured: Record<string, string | number | boolean | null>;
 }> {
   const entries = symbols(path).instances.get(declaration) ?? [];
   if (entries.length === 0) {
@@ -69,6 +69,19 @@ export function selectInstances(path: string, declaration: number, instance?: nu
   if (instance !== undefined && (!Number.isInteger(instance) || instance < 0 || instance >= entries.length)) {
     throw new Error(`Could not resolve selector: instance ${instance} does not exist; available instance indices are 0–${entries.length - 1}.`);
   }
-  return entries.flatMap((entry, index) => instance !== undefined && instance !== index
-    ? [] : [{ value: entry.value, scope: entry.scope(), instance: index }]);
+  return entries.flatMap((entry, index) => {
+    if (instance !== undefined && instance !== index) return [];
+    const scope = entry.scope();
+    const captured: Record<string, string | number | boolean | null> = Object.create(null);
+    for (const name of entry.parameters.slice(0, 8)) {
+      try {
+        // Only generated lexical getters for enclosing parameters. Never
+        // traverse objects, evaluate factories, or read unrelated module bindings.
+        const value = scope[name];
+        if (value === null || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) captured[name] = value;
+        else if (typeof value === 'string') captured[name] = value.length > 80 ? `${value.slice(0, 79)}…` : value;
+      } catch { /* A shadowing binding may still be in its TDZ. */ }
+    }
+    return [{ value: entry.value, scope, instance: index, captured }];
+  });
 }

@@ -1,6 +1,7 @@
 import ts from 'typescript';
-import { sourceBindings, unwrap } from './shaderSyntax.js';
+import { hasOwnUseGpuDirective, isRuntimeBinding, sourceBindings, unwrap } from './shaderSyntax.js';
 import type { DiscoveredSymbol, InspectionTarget } from './discovery.js';
+import type { HelperDeclarations } from './helperPlanning.js';
 
 type Results = Map<string, string[]>;
 
@@ -63,15 +64,58 @@ export function discoverFactoryResults(file: ts.SourceFile, isFactory: (fn: ts.F
   return results;
 }
 
-export function attachFactoryResults(symbols: DiscoveredSymbol[], targets: InspectionTarget[], results: Results): void {
+export function attachFactoryResults(file: ts.SourceFile, symbols: DiscoveredSymbol[], targets: InspectionTarget[], results: Results, helpers: HelperDeclarations): void {
+  const checker = sourceBindings(file);
+  const moduleBindings = new Map(checker.getSymbolsInScope(file, ts.SymbolFlags.Value | ts.SymbolFlags.Alias).map(binding => [binding.name, binding]));
   for (const symbol of symbols) {
     const selector = symbol.runtimeName ?? symbol.name;
     const factories = results.get(selector);
     if (!factories) continue;
+    let rootHelper = false;
+    const binding = moduleBindings.get(selector);
+    const declaration = binding?.valueDeclaration;
+    if (declaration) {
+      const type = checker.getTypeAtLocation(declaration);
+      const signatures = type.getCallSignatures();
+      const callable = !type.isUnionOrIntersection() && signatures.length === 1 ? signatures[0]!.getDeclaration() : undefined;
+      if (callable && (ts.isArrowFunction(callable) || ts.isFunctionExpression(callable) || ts.isFunctionDeclaration(callable)) &&
+        hasOwnUseGpuDirective(callable) && isUnconditionalReturn(callable) && callable.parameters.every(parameter => !parameter.type || moduleSchemaReferences(parameter.type, checker, moduleBindings))) {
+        helpers.set(selector, callable);
+        rootHelper = true;
+      }
+    }
     const id = `factory-result:${symbol.name}`;
     const label = `${factories.join(', ')} → ${symbol.name}`;
     const names = [...new Set([symbol.name, ...factories])];
-    targets.push({ id, label, symbolNames: names, selector: { selector, inspectMembers: true, kind: 'resolvable', label } });
+    targets.push({ id, label, symbolNames: names, selector: { selector, inspectMembers: true, ...(rootHelper ? { member: [] } : {}), kind: 'resolvable', label } });
     for (const candidate of symbols) if (names.includes(candidate.name)) candidate.targetIds.push(id);
   }
+}
+
+/** Returned closures keep their values, but only module bindings are addressable by schema probes. */
+function moduleSchemaReferences(node: ts.Node, checker: ts.TypeChecker, bindings: Map<string, ts.Symbol>): boolean {
+  if (ts.isIdentifier(node)) {
+    const binding = checker.getSymbolAtLocation(node);
+    if (isRuntimeBinding(binding, true) && binding !== bindings.get(node.text)) return false;
+  }
+  return !ts.forEachChild(node, child => !moduleSchemaReferences(child, checker, bindings) || undefined);
+}
+
+/** Source-only typing can collapse unresolved branch types to any; require one authored return. */
+function isUnconditionalReturn(callable: ts.FunctionExpression | ts.ArrowFunction | ts.FunctionDeclaration): boolean {
+  let value: ts.Node = callable;
+  while (ts.isExpression(value.parent) && unwrap(value.parent) === callable) value = value.parent;
+  const parent = value.parent;
+  if (ts.isArrowFunction(parent) && parent.body === value) return true;
+  if (!ts.isReturnStatement(parent) || !ts.isBlock(parent.parent) || !ts.isFunctionLike(parent.parent.parent)) return false;
+  const body = parent.parent;
+  if (body.statements.at(-1) !== parent) return false;
+  let returns = 0;
+  const visit = (node: ts.Node) => {
+    if (ts.isFunctionLike(node)) return;
+    if (ts.isReturnStatement(node)) returns++;
+    node.forEachChild(visit);
+  };
+  visit(body);
+  return returns === 1;
 }
